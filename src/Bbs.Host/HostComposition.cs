@@ -65,7 +65,10 @@ public static class HostComposition
 
         var consoleConfig = new BbsConsoleConfig
         {
-            BbsCallsign = baseCallsign,
+            // The console prompt is `de <CALL>>` with the FULL bound callsign incl. SSID —
+            // the oracle's own transcript shows `de GB7BPQ-1>` (compat spec §1.2). The base
+            // form stays for R-lines / hierarchical routing, which never carry SSIDs.
+            BbsCallsign = bindCallsign,
             SysopCallsigns = string.IsNullOrWhiteSpace(config.Sysop) ? [] : [config.Sysop],
             Version = version,
         };
