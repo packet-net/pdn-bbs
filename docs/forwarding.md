@@ -8,14 +8,14 @@ Everything BPQMail's forwarding configuration can express, ours must too. The in
 
 | BPQ capability | Ours | Status |
 |---|---|---|
-| Per-partner identity (call+SSID exact) | `partners[].call` | ✅ shipped |
+| Per-partner identity | `partners[].call` (call+SSID exact) | ✅ shipped — **stricter than BPQ**, which strips the SSID before its partner lookup (`BBSUtilities.c:10827`), so a BPQ partner may dial in under any SSID. Safe for the GB7RDG partnership because BPQ dials out with its stable APPLICATION call (`GB7RDG-2`); a base-call match option is an F-1 candidate if a partner ever floats SSIDs |
 | Connect script (node navigation) | `connect` (bare call) / `connectScript` (full §4.4 semantics) | 🔨 in flight |
 | Forward interval + send-immediately | `intervalMinutes`, `sendImmediately` | ✅ shipped |
 | Forward time windows (`FWDTimes`) | `times: ["02:00-06:00", …]` — human-readable ranges, TimeProvider-scheduled | F-1 |
 | TO / AT (incl. implied-AT) / HR routing lists | `to`/`at`/`hr` + `bbsHa` | ✅ shipped |
 | Single-copy best-HR-depth for P; bulletin flood | RoutingEngine | ✅ shipped (oracle-proven) |
 | NTS routing by TO wildcards | T-type routing | F-3 (spec SHOULD) |
-| Per-partner protocol options (B/B1/B2, MaxBlock) | `protocol:` block (b1 default; b2 later; maxBlock) | F-1 |
+| Per-partner protocol options (B/B1/B2, MaxBlock) | `protocol:` block (b1 default; maxBlock F-1; **b2 promoted to F-1** — the GB7RDG config snapshot shows B2F is the production lingua franca, 7 of its 9 enabled partners; B1F suffices for the GB7RDG↔us pair itself) | F-1 |
 | Per-partner size caps (MaxRX/MaxTX) | `maxRx`/`maxTx` | ✅ shipped |
 | Reverse polling (`RequestReverse`) | `requestReverse: true` — dial on interval even with an empty queue to collect | F-1 |
 | `FWD <partner> NOW` | console `FWD` sysop verb + webmail button + the scheduler nudge | F-2 |
@@ -61,8 +61,8 @@ The wire keeps speaking FBB (it must), and the terse RF console keeps its classi
 |---|---|---|
 | AT / `@BBS` field | **mail for** | mail addressed to stations whose home BBS is X |
 | implied-AT | *(no name — just behaviour)* | a partner naturally receives mail addressed to stations homed on it |
-| HR / hierarchical routes | **regions** | the network's geographic tree (`gbr.euro`, `#23.gbr.euro`) |
-| BBSHA / H-address | **network address** | where a BBS sits in that tree (`gb7rdg.#23.gbr.euro`) |
+| HR / hierarchical routes | **regions** | the network's geographic tree (`gbr.euro`, `#42.gbr.euro`) |
+| BBSHA / H-address | **network address** | where a BBS sits in that tree (`gb7rdg.#42.gbr.euro`) |
 | TO-distribution (bulletins) | **topics** | bulletin categories (`SALE`, `ARRL`, …) |
 | BID / MID | **network id** | the network-wide dedup identity of a message |
 | FWDTimes | **window** | when dialling is allowed |
@@ -86,7 +86,7 @@ partners:
     collect: true              # also pick up waiting mail when we have nothing to send
     window: []                 # when dialling is allowed; empty = always; ["02:00-06:00"]
     priority: null             # explicit tie-break; null = call order
-    networkAddress: gb7rdg.#23.gbr.euro   # where this partner sits in the network tree
+    networkAddress: gb7rdg.#42.gbr.euro   # where this partner sits in the network tree
     sends:
       mailFor: [gb7rdg-2]      # mail addressed to stations homed on these BBSes
       regions: [gbr.euro]      # this partner carries mail toward these regions
