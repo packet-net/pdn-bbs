@@ -5,6 +5,8 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <IsPackable>false</IsPackable>
+    <!-- xunit convention: Method_Scenario_Expectation test names. -->
+    <NoWarn>$(NoWarn);CA1707</NoWarn>
   </PropertyGroup>
 
   <ItemGroup>
