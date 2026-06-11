@@ -519,7 +519,7 @@ Knowing BPQMail's routing model is required to configure the oracle and to desig
 | `ConnectScript` | §4.4 (multi-line stored `|`-joined) |
 | `Enabled`, `FwdInterval` | auto-dial on/off; poll interval in **seconds** (default 3600) |
 | `RequestReverse`, `RevFWDInterval` | dial even with empty queue, to poll the partner |
-| `FWDNewImmediately` | dial on enqueue (~2 s + jitter) |
+| `FWDNewImmediately` | **VESTIGIAL in 6.0.25.23** — loaded/saved/shown in the UI ("Send new messages without waiting for poll timer") and reported by the API, but no forwarding-engine code reads `SendNew`; new-mail dial latency is governed solely by `FwdInterval` (verified by source trace of every use site + live experiment: `Enabled=0/SendNew=1` strands queued mail with zero dials; the "~2 s on enqueue" seen in CI is `FwdInterval = 2`, not this flag) |
 | `AllowBlocked`, `AllowCompressed`, `UseB1Protocol`, `UseB2Protocol` | the SID feature gates (§3.2). B2 forces Compressed; Blocked ⇔ Compressed for non-BPQ |
 | `MaxFBBBlock` | proposal-block byte cap (default 10000; code compares raw byte sums — community "KB" claims are wrong/legacy — **[VERIFY-ORACLE #16]**) |
 | `SendCTRLZ` | MBL terminator Ctrl-Z vs `/ex` |
@@ -650,7 +650,7 @@ Notes: multi-line fields are `|`-joined single strings; callsign keys starting w
 ### 7.3 Driving it in CI
 
 - **Post mail**: telnet :8010 → `USER`/`password` from the cfg (`admin`/`admin` today) → `BBS` → `SP USER @ GB7PDN` → title → body → `/EX` → expect `Message: nnn` + `Bid:` [M0LTE-IT does exactly this].
-- **Trigger forwarding deterministically**: (a) `FwdInterval = 2` + `FWDNewImmediately = 1` (fires ~2 s after enqueue — what the m0lte harness uses); (b) sysop telnet `FWD GB7PDN NOW`; (c) web POST `/Mail/FWDSave?<sessionkey>` body `StartForward`.
+- **Trigger forwarding deterministically**: (a) `FwdInterval = 2` (the per-partner scan fires every ~2 s and dials whenever mail is queued — what the m0lte harness uses; `FWDNewImmediately` is vestigial, see §4.1); (b) sysop telnet `FWD GB7PDN NOW`; (c) web POST `/Mail/FWDSave?<sessionkey>` body `StartForward`.
 - **Force WP emission**: set `SendWP = 1` + `SendWPAddrs`, then `DOHOUSEKEEPING`.
 - **Re-run routing after config edits**: `REROUTEMSGS`.
 - **Our BBS connects in** over netsim KISS (AX.25 to `PN0TST-1`) or AXIP map, or FBBPORT raw TCP.
