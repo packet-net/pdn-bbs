@@ -38,6 +38,15 @@ pdn-bbs.sln
 
 Dependency rule: Fbb and Core never reference Host; Console references Core only; Host references all three. Nothing references packet.net source — only published packages (and only if the RHP client lib is consumable; otherwise self-contained).
 
+## The home-BBS requirement (Tom, 2026-06-11)
+
+Although rare, a user MUST be able to adopt an instance as their **home BBS** without being the node owner — e.g. a legacy TNC2 user across town using this node as their mail provider. Their address becomes `<call> @ <bbscall>.<HA>`; the world routes mail here and it waits in their inbox. This decomposes to:
+
+1. **Local delivery beats forwarding** — the load-bearing rule: a personal whose AT is us (our callsign, or an address under our own HA) gets **zero forward targets**, full stop; and a personal with no AT whose TO is a known local user stays local rather than matching any partner's wildcard AT. The dangerous failure is the silent one: a wildcard default route swallowing local users' mail. Pinned by tests before any wildcard-AT partner config goes live.
+2. **Auto-create the user on first inbound personal** — mail can arrive before its owner ever connects; a skeletal user record makes it listable on their first `L`.
+3. **WP announcements** (spec SHOULD, promoted by this requirement) — emitting White Pages updates for homed users is how the rest of the network learns to route `<call> @ here`.
+4. The RF console is already the full management surface (read/kill/send, `Home`/name/QTH persistence) — no node-owner involvement needed; callsign-is-identity per network norms.
+
 ## Load-bearing decisions
 
 1. **Session demux**: one RHP-bound callsign serves both users and partners. The answerer sniffs the first inbound line: `[...-...$]`-shaped SID → Fbb answerer FSM; anything else → Console. (LinBPQ does the same on its BBS port.)

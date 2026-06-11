@@ -88,8 +88,8 @@ partners:
 ## Build waves
 
 - **F-0 (in flight):** greet-first demux + full §4.4 connect scripts with per-step timeouts and attempt transcripts.
-- **F-1 — parity:** time windows, reverse polling, per-recipient fan-out, the `protocol:` block (maxBlock enforcement; b2 stub), `priority`.
+- **F-1 — parity + the home-BBS rule:** **local-delivery-beats-forwarding** (at-is-us / TO-is-local-user → zero targets; the wildcard-AT leak pinned by tests — see design.md § The home-BBS requirement) + auto-create users on inbound personals; time windows, reverse polling, per-recipient fan-out, the `protocol:` block (maxBlock enforcement; b2 stub), `priority`.
 - **F-2 — the de-warting ops layer:** health tracking + session stats, auto-re-route-on-config-apply, console `FWD`/`ROUTE?` verbs, the webmail sysop pages.
-- **F-3 — spec SHOULDs that touch forwarding:** NTS routing, WP consumption (address completion feeding explain), B2F.
+- **F-3 — spec SHOULDs that touch forwarding:** NTS routing, WP consumption AND emission (announcing homed users to the network — promoted by the home-BBS requirement), B2F.
 
 The GB7RDG partnership (the real network) starts on F-0: a direct dial to `GB7RDG-2` needs no scripts, and the shipped routing/loop-guard/BID machinery is already oracle-proven. F-1/F-2 land behind it while real traffic flows.
