@@ -10,5 +10,6 @@
     <Project Path="tests/Bbs.Core.Tests/Bbs.Core.Tests.csproj" />
     <Project Path="tests/Bbs.Fbb.Tests/Bbs.Fbb.Tests.csproj" />
     <Project Path="tests/Bbs.Host.Tests/Bbs.Host.Tests.csproj" />
+    <Project Path="tests/Bbs.Interop.Tests/Bbs.Interop.Tests.csproj" />
   </Folder>
 </Solution>

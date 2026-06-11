@@ -1,0 +1,36 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+    <!-- xunit conventions: Method_Scenario_Expectation test names (CA1707) and
+         the XxxCollection name for [CollectionDefinition] classes (CA1711). -->
+    <NoWarn>$(NoWarn);CA1707;CA1711</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="coverlet.collector" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" />
+    <!-- The published packet.net libraries (public interfaces only — design.md
+         architecture rule). The interop tests take the AX.25 leg directly because
+         the oracle stack has no pdn node: Ax25Listener over KISS-TCP to netsim
+         node a is the same engine a real pdn node fronts for the BBS. -->
+    <PackageReference Include="Packet.Ax25" />
+    <PackageReference Include="Packet.Kiss" />
+    <PackageReference Include="xunit" />
+    <PackageReference Include="xunit.runner.visualstudio" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Using Include="Xunit" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\Bbs.Core\Bbs.Core.csproj" />
+    <ProjectReference Include="..\..\src\Bbs.Fbb\Bbs.Fbb.csproj" />
+    <ProjectReference Include="..\..\src\Bbs.Host\Bbs.Host.csproj" />
+  </ItemGroup>
+
+</Project>

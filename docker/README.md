@@ -54,7 +54,7 @@ Files are root-owned (the container runs as root); `smoke.sh` wipes the director
 - **Reverse**: `RequestReverse = 0` (the oracle doesn't dial with an empty queue). Reverse forwarding *within* a session (we connect in, send `FF`, the oracle proposes its queued traffic) is inherent to the FBB block flow (spec §3.11) and needs no extra config.
 - **Acceptance**: `MaxRXSize = 99999`, BIDs accepted and deduped (`WFBID.SYS`), `DontHoldNewUsers = 1` / `AllowAnon = 1` so smoke/test users are usable immediately. Housekeeping group is seeded empty (defaults: 30-day lifetimes, BID lifetime 60 — sane for an ephemeral CI container that's wiped every run).
 
-## How a future `Bbs.Interop.Tests` lane should use it
+## How `Bbs.Interop.Tests` uses it (the lane is live — `tests/Bbs.Interop.Tests`, CI job `interop`)
 
 1. `docker compose -f docker/compose.oracle.yml up -d --wait` (CI step before the test run; the healthchecks gate readiness).
 2. Mark oracle-dependent tests `[Trait("Category", "Interop")]` and run them with `--filter "Category=Interop"`; everything else keeps excluding the category (the packet.net convention).
@@ -79,6 +79,8 @@ Verified live against the pinned image, 2026-06-11. The spec's §7 recipe works 
 5. **`B` sign-off over the telnet host path emits no `73 de …`** to the client — the session ends with the node's `*** Disconnected from Stream 1` / `Disconnected from Node - Telnet Session kept`. (Spec §1.2's `73 de <BBSNAME>` may still apply on RF paths — feeds [VERIFY-ORACLE #6]'s prompt-shapes probe.)
 6. **The user-session SID letter run varies with user flags** — a WLE-flagged auto-created user saw `[BPQ-6.0.25.23-B2FWIHJM$]`, the seeded sysop user sees `[BPQ-6.0.25.23-IHJM$]`. Don't read capability gates off a *user* session's SID; the forwarding-session SID (what `PDNBBS-1` will see) is governed by the per-partner `Allow…/Use…` gates.
 7. **Mail enablement per §7.2 works exactly as written**: `LINMAIL` + `APPLICATION 1,BBS,,GB7BPQ-1,BPQBBS,255` in `bpq32.cfg` (no `mail` command-line arg needed), linmail.cfg seeded copy-on-first-boot into the writable volume (BPQMail rewrites it — a `.bak` appears next to it), message store and acceptance/list shapes all as specified.
+8. **Inbound AX.25 connects reach BPQMail with the SSID stripped** (verified live by the interop lane): a connect from `PDNBBS-1` over the netsim port is logged `Incoming Connect from PDNBBS on Port 2` and lands on an auto-created user **`PDNBBS`** — the seeded F_BBS `BBSUsers.PDNBBS-1` record does **not** gate this direction (it gates the *outbound* dial + queue under `BBSForwarding.PDNBBS-1`). BPQMail still flips into FBB forwarding mode when our SID arrives, but it answers with the auto-user's SID shape (`[BPQ-…-B2FWIHJM$]`, delta 6) rather than the partner-configured B1F — harmless to a B1F caller (B1 is negotiated down), and the transfer/`FS +`/store path is identical. Don't assert partner-record semantics on the us→oracle direction.
+9. **One forwarding session per partner at a time**: while the oracle holds an (even half-dead) session it believes is the `PDNBBS-1` forwarding partner, it won't service that queue again until its inactivity timeout (~100 s) reaps the old one. A test listener that vanishes without DISCing leaves exactly that state behind — `Bbs.Interop.Tests`' AX.25 endpoint tears its sessions down with a DISC on dispose for this reason.
 
 ## Files
 

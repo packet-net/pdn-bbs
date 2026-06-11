@@ -13,3 +13,45 @@ jobs:
         run: dotnet build -c Release
       - name: Test
         run: dotnet test -c Release --no-build --filter "Category!=Interop"
+
+  interop:
+    # The oracle lane: real bidirectional FBB forwarding against the live
+    # LinBPQ+BPQMail stack over the simulated RF channel (docker/README.md).
+    runs-on: [self-hosted, Linux, X64]
+    # The stack owns fixed host ports (8200/8208/8210/8211) and one compose
+    # project, and the self-hosted box runs several runners — serialise.
+    concurrency:
+      group: pdnbbs-oracle-stack
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+      - name: Oracle clean slate (down -v + state wipe)
+        # `down -v` does not clear the bind mount; the state wipe runs in a
+        # throwaway root container because LinBPQ writes /data as root
+        # (same image digest as compose.oracle.yml; smoke.sh precedent).
+        run: |
+          docker compose -f docker/compose.oracle.yml down -v --remove-orphans || true
+          mkdir -p docker/oracle/state
+          docker run --rm --entrypoint /bin/sh \
+            -v "$PWD/docker/oracle/state:/data" \
+            m0lte/linbpq@sha256:872343ffb76a52316b1ae42a42d3c0893f545ccd577301ebc7c4455b292a8025 \
+            -c 'rm -rf /data/* /data/.[!.]* /data/..?* 2>/dev/null; true'
+      - name: Oracle up (healthcheck-gated)
+        run: docker compose -f docker/compose.oracle.yml up -d --wait
+      - name: Build (Release)
+        run: dotnet build -c Release
+      - name: Interop tests
+        run: dotnet test -c Release --no-build --filter "Category=Interop"
+      - name: Oracle logs on failure
+        if: failure()
+        run: |
+          docker compose -f docker/compose.oracle.yml ps || true
+          docker compose -f docker/compose.oracle.yml logs --tail 100 || true
+      - name: Oracle down (down -v + state wipe)
+        if: always()
+        run: |
+          docker compose -f docker/compose.oracle.yml down -v --remove-orphans || true
+          docker run --rm --entrypoint /bin/sh \
+            -v "$PWD/docker/oracle/state:/data" \
+            m0lte/linbpq@sha256:872343ffb76a52316b1ae42a42d3c0893f545ccd577301ebc7c4455b292a8025 \
+            -c 'rm -rf /data/* /data/.[!.]* /data/..?* 2>/dev/null; true' || true
