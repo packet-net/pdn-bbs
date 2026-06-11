@@ -1,4 +1,5 @@
 using Bbs.Core;
+using Bbs.Fbb;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
@@ -40,6 +41,12 @@ public sealed class HostCompositionTests
         // I-frame — through the real RhpNodeLink + InboundDemux as Program composes them.
         FakeRhpPeer peer = await host.Server.AcceptChildAsync("M0ABC");
         await peer.SendLineAsync("B");
+
+        // Greet-immediately (compat spec §1.1/§3.1): the SID line leads. The composed
+        // host's version is the assembly informational version, so pin the shape only.
+        string sidLine = await peer.ReadLineAsync();
+        Assert.True(Sid.IsSidShaped(sidLine), $"First line was not SID-shaped: \"{sidLine}\"");
+        Assert.StartsWith("[PDN-", sidLine, StringComparison.Ordinal);
 
         Assert.Equal("Hello Alice. Latest Message is 0, Last listed is 0", await peer.ReadLineAsync());
         Assert.Equal("de GB7PDN>", await peer.ReadLineAsync());

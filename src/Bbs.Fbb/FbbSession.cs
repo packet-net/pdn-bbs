@@ -59,6 +59,16 @@ public sealed record FbbSessionConfig
     public bool OfferB2 { get; init; }
 
     /// <summary>
+    /// Answerer continue-mode: the host already greeted the caller (our SID — and any
+    /// prompt/banner text — is on the wire, e.g. the inbound demux's greet-immediately
+    /// flow), so <see cref="FbbStart"/> emits nothing and the FSM starts directly at the
+    /// SID-parse phase; the host feeds the peeked SID line in as peer data. Only valid
+    /// for <see cref="FbbRole.Answerer"/> — a caller never pre-sends its SID (spec §3.1
+    /// step 3: the caller's SID answers the peer's).
+    /// </summary>
+    public bool SidAlreadySent { get; init; }
+
+    /// <summary>
     /// Cap on the accumulated (uncompressed) sizes proposed per block —
     /// BPQ's <c>MaxFBBBlock</c>, default 10000 raw bytes (spec §3.3/§4.1).
     /// At least one message is always proposed regardless.
@@ -103,9 +113,17 @@ public sealed class FbbSession
     private bool _skipNextLf;
 
     /// <summary>Creates a session with the messages we intend to forward (may be empty).</summary>
+    /// <exception cref="ArgumentException"><see cref="FbbSessionConfig.SidAlreadySent"/> is set on a caller.</exception>
     public FbbSession(FbbSessionConfig config, IEnumerable<FbbOutboundMessage>? outbound = null)
     {
         ArgumentNullException.ThrowIfNull(config);
+        if (config is { Role: FbbRole.Caller, SidAlreadySent: true })
+        {
+            throw new ArgumentException(
+                "SidAlreadySent is answerer-only: a caller's SID answers the peer's (spec §3.1 step 3).",
+                nameof(config));
+        }
+
         _config = config;
         _outbound = new Queue<FbbOutboundMessage>(outbound ?? []);
     }
@@ -157,11 +175,13 @@ public sealed class FbbSession
             throw new InvalidOperationException("Session already started.");
         }
 
-        if (_config.Role == FbbRole.Answerer)
+        if (_config.Role == FbbRole.Answerer && !_config.SidAlreadySent)
         {
             // "The SID is always sent by the BBS as the first line after the
             // connection" [FBB-SID], followed by a >-terminated prompt the
-            // caller may wait for (spec §3.1 step 2).
+            // caller may wait for (spec §3.1 step 2). In continue-mode
+            // (SidAlreadySent) the host owns the whole pre-SID transcript —
+            // SID, banner and prompt — so nothing is emitted here.
             actions.Add(new FbbSendLine(Sid.Build(_config.SidVersion, _config.OfferB2)));
             actions.Add(new FbbSendLine($"de {_config.OwnCallsign}>"));
         }

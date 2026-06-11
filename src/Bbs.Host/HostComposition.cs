@@ -99,7 +99,8 @@ public static class HostComposition
             new JsonUserSettingsStore(Path.Combine(stateDir, "user-settings.json")));
         builder.Services.AddSingleton(sp => new InboundDemux(
             sp.GetRequiredService<RhpNodeLink>(), store, sp.GetRequiredService<FbbSessionRunner>(),
-            sp.GetRequiredService<RoutingService>(), consoleConfig, sp.GetRequiredService<IUserSettingsStore>(), time,
+            sp.GetRequiredService<RoutingService>(), consoleConfig, sp.GetRequiredService<IUserSettingsStore>(),
+            version, time,
             TimeSpan.FromSeconds(Math.Max(1, config.DemuxFirstLineWaitSeconds)),
             sp.GetRequiredService<ILogger<InboundDemux>>()));
         builder.Services.AddSingleton(sp => new HousekeepingRunner(

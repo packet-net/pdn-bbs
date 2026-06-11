@@ -116,6 +116,54 @@ public sealed class ConfigTests : IDisposable
     }
 
     [Fact]
+    public void ConnectScriptAndConTimeout_RoundTripToThePartner()
+    {
+        // The full connect-script keys (compat spec §4.4 / §4.1 ConTimeout).
+        BbsHostConfig config = BbsHostConfigFile.Parse("""
+            callsign: GB7PDN
+            partners:
+              - call: GB7BPQ
+                connectScript:
+                  - C GB7BPQ
+                  - BBS
+                conTimeoutSeconds: 30
+            """);
+
+        PartnerConfig partner = Assert.Single(config.Partners);
+        Assert.Equal(["C GB7BPQ", "BBS"], partner.ConnectScript);
+        Assert.Equal(30, partner.ConTimeoutSeconds);
+
+        Partner mapped = partner.ToPartner();
+        Assert.Equal(["C GB7BPQ", "BBS"], mapped.ConnectScript);
+        Assert.Equal(30, mapped.ConTimeoutSeconds);
+    }
+
+    [Fact]
+    public void ConnectScript_TakesPrecedenceOverSimpleConnect()
+    {
+        BbsHostConfig config = BbsHostConfigFile.Parse("""
+            callsign: GB7PDN
+            partners:
+              - call: GB7BPQ
+                connect: GB7BPQ-1
+                connectScript:
+                  - C GB7RDG
+                  - BBS
+            """);
+
+        // Both forms set → the full script wins (documented in DefaultYaml).
+        Partner mapped = Assert.Single(config.Partners).ToPartner();
+        Assert.Equal(["C GB7RDG", "BBS"], mapped.ConnectScript);
+    }
+
+    [Fact]
+    public void ConTimeout_DefaultsTo60AndClampsToAtLeastOneSecond()
+    {
+        Assert.Equal(60, new PartnerConfig { Call = "GB7BPQ" }.ToPartner().ConTimeoutSeconds);
+        Assert.Equal(1, new PartnerConfig { Call = "GB7BPQ", ConTimeoutSeconds = 0 }.ToPartner().ConTimeoutSeconds);
+    }
+
+    [Fact]
     public void SyncPartners_UpsertsConfiguredAndPrunesStale()
     {
         var time = new FakeTimeProvider();

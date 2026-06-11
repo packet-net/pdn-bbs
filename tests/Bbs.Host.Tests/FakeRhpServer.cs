@@ -13,7 +13,7 @@ namespace Bbs.Host.Tests;
 internal sealed record BindRecord(int Handle, string? Local, string? Port);
 
 /// <summary>An `open`(Active) the host performed.</summary>
-internal sealed record OpenRecord(int Handle, string? Local, string? Remote);
+internal sealed record OpenRecord(int Handle, string? Local, string? Remote, string? Port = null);
 
 /// <summary>
 /// A fake RHPv2 node serving the documented wire (packet.net docs/rhp2-server.md) over a
@@ -147,7 +147,9 @@ internal sealed class FakeRhpServer : IAsyncDisposable
         OpenRecord record = await Opens.Reader.ReadAsync().AsTask()
             .WaitAsync(timeout ?? TestTimeout.Default).ConfigureAwait(false);
         Conn conn = _handleConns[record.Handle];
-        return CreatePeer(conn, record.Handle, record.Local, record.Remote);
+        FakeRhpPeer peer = CreatePeer(conn, record.Handle, record.Local, record.Remote);
+        peer.Port = record.Port;
+        return peer;
     }
 
     /// <inheritdoc/>
@@ -283,7 +285,11 @@ internal sealed class FakeRhpServer : IAsyncDisposable
                 case "open":
                 {
                     server.CountOpenAttempt();
-                    var record = new OpenRecord(0, request["local"]?.GetValue<string>(), request["remote"]?.GetValue<string>());
+                    var record = new OpenRecord(
+                        0,
+                        request["local"]?.GetValue<string>(),
+                        request["remote"]?.GetValue<string>(),
+                        request["port"]?.GetValue<string>());
                     int errCode = server.OpenResult(record);
                     if (errCode != 0)
                     {
@@ -445,6 +451,9 @@ internal sealed class FakeRhpPeer
 
     /// <summary>This peer's callsign.</summary>
     public string? Remote { get; }
+
+    /// <summary>The node port the host's `open` named, when it named one.</summary>
+    public string? Port { get; set; }
 
     /// <summary>Sends text to the host (a `recv` push).</summary>
     public Task SendTextAsync(string text) => SendBytesAsync(Encoding.Latin1.GetBytes(text));

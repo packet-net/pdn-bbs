@@ -5,8 +5,8 @@ namespace Bbs.Core;
 /// Host binds config onto; persisted via <see cref="BbsStore.UpsertPartner"/>.
 ///
 /// Named deferrals (config keys in compat spec §4.1 not modelled yet): FWDTimes time bands,
-/// RequestReverse/RevFWDInterval, FWDPersonalsOnly, MaxFBBBlock, SendCTRLZ, ConTimeout, and
-/// the per-partner protocol gates beyond B2 (AllowBlocked/AllowCompressed/UseB1Protocol are
+/// RequestReverse/RevFWDInterval, FWDPersonalsOnly, MaxFBBBlock, SendCTRLZ, and the
+/// per-partner protocol gates beyond B2 (AllowBlocked/AllowCompressed/UseB1Protocol are
 /// effectively constant for our B1F-minimum SID — compat spec §3.2/§8).
 /// </summary>
 public sealed record Partner
@@ -34,6 +34,13 @@ public sealed record Partner
     /// the node" — compat spec §4.4; <c>C &lt;target&gt;</c> semantics belong to the Host).
     /// </summary>
     public IReadOnlyList<string> ConnectScript { get; init; } = [];
+
+    /// <summary>
+    /// Connect handshake timeout, seconds (compat spec §4.1 ConTimeout, default 60). The
+    /// Host applies it to each connect-script response wait — including the post-script
+    /// SID wait (named deviation: per-wait rather than whole-handshake).
+    /// </summary>
+    public int ConTimeoutSeconds { get; init; } = 60;
 
     /// <summary>
     /// TO-field distribution list (compat spec §4.1 TOCalls). Exact match for P/B routing;

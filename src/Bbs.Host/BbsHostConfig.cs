@@ -80,11 +80,26 @@ public sealed record PartnerConfig
     public string Call { get; init; } = "";
 
     /// <summary>
-    /// Connect target for outbound cycles — the callsign/alias the RHP <c>open</c> dials
-    /// (spec §4.4: a bare <c>C &lt;call&gt;</c> line means the open target itself). Defaults
-    /// to the partner call.
+    /// Connect target for outbound cycles, simple form — the callsign/alias the RHP
+    /// <c>open</c> dials (equivalent to a one-line script <c>C &lt;call&gt;</c>). Defaults
+    /// to the partner call. For node navigation use <see cref="ConnectScript"/> instead.
     /// </summary>
     public string? Connect { get; init; }
+
+    /// <summary>
+    /// Full connect script (compat spec §4.4): an optional first <c>C [port] &lt;target&gt;</c>
+    /// names the RHP open; later lines are sent verbatim once connected (e.g. <c>BBS</c> at a
+    /// node prompt), each followed by a response wait; <c>PAUSE n</c> delays. When set, it
+    /// takes precedence over <see cref="Connect"/>.
+    /// </summary>
+    /// <remarks>Concrete <see cref="List{T}"/> because YamlDotNet binds collections, not read-only interfaces.</remarks>
+    public List<string> ConnectScript { get; init; } = [];
+
+    /// <summary>
+    /// Connect handshake timeout in seconds (compat spec §4.1 ConTimeout, default 60) —
+    /// bounds each connect-script response wait, including the post-script SID wait.
+    /// </summary>
+    public int ConTimeoutSeconds { get; init; } = 60;
 
     /// <summary>Auto-dial poll interval, minutes (compat spec §4.1 FwdInterval; default 60).</summary>
     public int IntervalMinutes { get; init; } = 60;
@@ -124,7 +139,12 @@ public sealed record PartnerConfig
         Enabled = Enabled,
         ForwardIntervalSeconds = Math.Max(1, IntervalMinutes) * 60,
         ForwardNewImmediately = SendImmediately,
-        ConnectScript = string.IsNullOrWhiteSpace(Connect) ? [] : [$"C {Connect.Trim()}"],
+
+        // The full script wins over the simple form (documented in DefaultYaml).
+        ConnectScript = ConnectScript.Count > 0
+            ? [.. ConnectScript]
+            : string.IsNullOrWhiteSpace(Connect) ? [] : [$"C {Connect.Trim()}"],
+        ConTimeoutSeconds = Math.Max(1, ConTimeoutSeconds),
         ToCalls = [.. To],
         AtCalls = [.. At],
         HRoutes = [.. Hr],
@@ -225,7 +245,19 @@ public static class BbsHostConfigFile
 
         # partners: BBS forwarding partners (compat spec §4.1, v1 subset).
         #   call:            partner callsign, exact incl. SSID (inbound match is exact)
-        #   connect:         the callsign/alias outbound cycles dial (default: call)
+        #   connect:         simple connect form — the callsign/alias outbound cycles
+        #                    dial (default: call). Equivalent to a one-line script
+        #                    "C <call>".
+        #   connectScript:   full connect script (compat spec §4.4) for node navigation;
+        #                    takes precedence over connect when both are set. An optional
+        #                    FIRST "C [port] <target>" line names the dial; every later
+        #                    line is sent verbatim once connected (e.g. BBS at a node
+        #                    prompt), each followed by a response wait; "PAUSE n" waits n
+        #                    seconds. Node failure text (BUSY/FAILURE/...) or a response
+        #                    wait exceeding conTimeoutSeconds fails the cycle (retried
+        #                    with backoff).
+        #   conTimeoutSeconds: per-response-wait timeout for the script + the final SID
+        #                    wait (compat spec §4.1 ConTimeout; default 60)
         #   intervalMinutes: auto-dial poll interval (default 60)
         #   sendImmediately: dial as soon as a message queues (default false)
         #   to:              TO-field distribution list, e.g. [SYSOP]
@@ -243,10 +275,18 @@ public static class BbsHostConfigFile
         #    at: ["*"]
         #    hr: [GBR.EURO]
         #    bbsHa: GB7BPQ.#23.GBR.EURO
+        #  - call: GB7RDG
+        #    connectScript:        # dial the node, then enter its BBS application
+        #      - C GB7RDG
+        #      - BBS
+        #    at: ["*"]
 
-        # demuxFirstLineWaitSeconds: how long an inbound connect may stay silent before
-        # the BBS assumes a human caller and starts the console (a partner BBS announces
-        # itself with a [SID] first line).
+        # demuxFirstLineWaitSeconds: how long the inbound demux holds the
+        # forwarding-vs-console decision for a SILENT caller. Every caller is greeted
+        # immediately on connect (our [SID] line + the console greeting); a partner BBS
+        # announces itself with a [SID] first line and is handed to the forwarding
+        # answerer. Once the wait expires the session is the console's and later input
+        # is treated as commands.
         demuxFirstLineWaitSeconds: 30
         """;
 }

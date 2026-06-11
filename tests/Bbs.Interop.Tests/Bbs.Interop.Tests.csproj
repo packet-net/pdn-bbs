@@ -11,6 +11,12 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <!-- The host-path tests boot the REAL composed host (HostComposition.Build →
+         WebApplication), so the interop assembly needs the ASP.NET shared framework. -->
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+
+  <ItemGroup>
     <PackageReference Include="coverlet.collector" />
     <PackageReference Include="Microsoft.NET.Test.Sdk" />
     <!-- The published packet.net libraries (public interfaces only — design.md
@@ -21,6 +27,15 @@
     <PackageReference Include="Packet.Kiss" />
     <PackageReference Include="xunit" />
     <PackageReference Include="xunit.runner.visualstudio" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- The wire-faithful fake RHP node from the W5 unit lane, compile-linked so the
+         RHPv2 wire (packet.net docs/rhp2-server.md framing/shapes) has exactly one
+         test implementation. The host-path interop tests front it with the AX.25 leg
+         (RhpAx25Bridge): the REAL composed host speaks its REAL RHP client wire while
+         the session bytes ride the simulated RF channel to the oracle. -->
+    <Compile Include="..\Bbs.Host.Tests\FakeRhpServer.cs" Link="FakeRhpServer.cs" />
   </ItemGroup>
 
   <ItemGroup>

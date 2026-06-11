@@ -157,16 +157,18 @@ public sealed class RhpNodeLink : IAsyncDisposable
     /// <summary>
     /// Opens an outbound connection (RHP <c>open</c>, Active) from the BBS callsign to
     /// <paramref name="remote"/> — the forwarding scheduler's dial path.
+    /// <paramref name="port"/> pins the node port (a connect script's
+    /// <c>C &lt;port&gt; &lt;call&gt;</c>); null lets the node choose.
     /// </summary>
     /// <exception cref="InvalidOperationException">The link is down.</exception>
-    public async Task<RhpChildConnection> OpenAsync(string remote, CancellationToken cancellationToken)
+    public async Task<RhpChildConnection> OpenAsync(string remote, string? port, CancellationToken cancellationToken)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(remote);
         RhpClient client = _client ?? throw new InvalidOperationException("The RHP link is down.");
         int handle = await client.OpenAsync(
             ProtocolFamily.Ax25,
             SocketMode.Stream,
-            port: null,
+            port,
             local: _options.BindCallsign,
             remote: remote,
             OpenFlags.Active,

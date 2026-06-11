@@ -59,6 +59,7 @@ internal sealed class HostHarness : IAsyncDisposable
                 Version = Version,
             },
             UserSettings,
+            Version,
             Time,
             firstLineWait ?? TimeSpan.FromSeconds(30),
             NullLogger<InboundDemux>.Instance);

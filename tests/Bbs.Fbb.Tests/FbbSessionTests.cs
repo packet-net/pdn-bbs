@@ -231,6 +231,44 @@ public class FbbSessionTests
         Assert.True(Assert.Single(endActions.OfType<FbbSessionOver>()).Graceful);
     }
 
+    // --- Continue-mode (SidAlreadySent): the host already greeted the caller ---
+
+    [Fact]
+    public void ContinueModeAnswerer_StartEmitsNothing()
+    {
+        // The host's greet-immediately flow put our SID (and prompt) on the wire
+        // before the FSM exists, so FbbStart emits neither (spec §3.1 step 2 is
+        // host-owned in this mode).
+        var session = new FbbSession(Config(FbbRole.Answerer) with { SidAlreadySent = true });
+        Assert.Empty(session.Advance(new FbbStart()));
+        Assert.Equal(FbbSessionPhase.AwaitingPeerSid, session.Phase);
+    }
+
+    [Fact]
+    public void ContinueModeAnswerer_EmptyBothSides_RunsToGracefulFq()
+    {
+        // The whole continue-mode happy path: the peeked SID is fed in, then the
+        // exchange proceeds exactly as a normal answerer's (FF with empty queues
+        // becomes FQ — spec §3.1 step 5).
+        var session = new FbbSession(Config(FbbRole.Answerer) with { SidAlreadySent = true });
+        Assert.Empty(session.Advance(new FbbStart()));
+        Assert.Empty(FeedLine(session, PeerSidLine));
+        Assert.Equal(FbbSessionPhase.PeerTurn, session.Phase);
+
+        var actions = FeedLine(session, "FF");
+        Assert.Equal(["FQ"], Lines(actions));
+        Assert.True(Assert.Single(actions.OfType<FbbSessionOver>()).Graceful);
+        Assert.Equal(FbbSessionPhase.Finished, session.Phase);
+    }
+
+    [Fact]
+    public void ContinueModeCaller_IsRejectedAtConstruction()
+    {
+        // A caller never pre-sends its SID — it answers the peer's (spec §3.1 step 3).
+        Assert.Throws<ArgumentException>(
+            () => new FbbSession(Config(FbbRole.Caller) with { SidAlreadySent = true }));
+    }
+
     // --- Checksum failures abort with the exact error lines ---
 
     [Fact]

@@ -144,10 +144,27 @@ public sealed class ForwardingScheduler
         }
 
         LogCycleStart(_logger, partner.Call, plan.Target, outbound.Count, null);
-        RhpChildConnection child = await _link.OpenAsync(plan.Target, cancellationToken).ConfigureAwait(false);
+        RhpChildConnection child = await _link.OpenAsync(plan.Target, plan.Port, cancellationToken).ConfigureAwait(false);
         try
         {
-            FbbSessionResult result = await _runner.RunCallerAsync(child, partner, outbound, cancellationToken)
+            // Navigate per the connect script (spec §4.4); a script failure (node
+            // failure text / response timeout) fails the cycle and rides the same
+            // backoff-retry path as a refused open.
+            byte[] initial;
+            try
+            {
+                initial = await ConnectScriptRunner.RunAsync(
+                    child, plan, TimeSpan.FromSeconds(Math.Max(1, partner.ConTimeoutSeconds)),
+                    _time, _logger, cancellationToken).ConfigureAwait(false);
+            }
+            catch (ConnectScriptException ex)
+            {
+                LogScriptFailed(_logger, partner.Call, ex.Message, null);
+                return false;
+            }
+
+            FbbSessionResult result = await _runner
+                .RunCallerAsync(child, partner, outbound, cancellationToken, initial)
                 .ConfigureAwait(false);
             return result.Graceful;
         }
@@ -199,4 +216,8 @@ public sealed class ForwardingScheduler
     private static readonly Action<ILogger, string, string, int, Exception?> LogCycleFailed =
         LoggerMessage.Define<string, string, int>(LogLevel.Warning, new EventId(3, "CycleFailed"),
             "Forwarding cycle to {Partner} failed ({Reason}); retry with backoff (failure #{Failures})");
+
+    private static readonly Action<ILogger, string, string, Exception?> LogScriptFailed =
+        LoggerMessage.Define<string, string>(LogLevel.Warning, new EventId(4, "ConnectScriptFailed"),
+            "Partner {Partner}: {Reason}; cycle abandoned, will retry with backoff");
 }

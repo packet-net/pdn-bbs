@@ -33,7 +33,7 @@ public class OutboundForwardingTests
         });
         host.Routing.RouteMessage(stored);
 
-        // The cycle opens the script target (spec §4.4: the last C <target> is the dial).
+        // The cycle opens the script target (spec §4.4: the first C <target> names the dial).
         FakeRhpPeer peer = await host.Server.NextOpenAsync();
         Assert.Equal("GB7BPQ-1", peer.Remote);
         Assert.Equal(HostHarness.OwnCall, peer.Local);

@@ -55,10 +55,13 @@ public sealed class FbbSessionRunner
     }
 
     /// <summary>
-    /// Runs the answerer side for an accepted inbound connection whose first line was
-    /// SID-shaped. <paramref name="initialData"/> is everything the demux consumed while
-    /// peeking (the peer's SID line and any tail) — fed to the FSM right after start, so
-    /// nothing is lost. A configured partner contributes its queue for reverse forwarding
+    /// Runs the answerer side for an accepted inbound connection whose first line announced
+    /// a forwarding partner. The session runs in continue-mode
+    /// (<see cref="FbbSessionConfig.SidAlreadySent"/>): the demux's greet-immediately flow
+    /// already put our SID (and the console prompt) on the wire, so the FSM starts at the
+    /// SID-parse phase. <paramref name="initialData"/> is everything the demux consumed
+    /// while peeking (the peer's SID line and any tail) — fed to the FSM right after start,
+    /// so nothing is lost. A configured partner contributes its queue for reverse forwarding
     /// (spec §3.11) and its size caps; an unknown SID-shaped caller is still served with
     /// defaults (messages stored with its callsign as ReceivedFrom).
     /// </summary>
@@ -78,17 +81,22 @@ public sealed class FbbSessionRunner
         return RunAsync(FbbRole.Answerer, child, partner, partnerCall, outbound, initialData, cancellationToken);
     }
 
-    /// <summary>Runs the caller side of an outbound forwarding cycle (the scheduler's path).</summary>
+    /// <summary>
+    /// Runs the caller side of an outbound forwarding cycle (the scheduler's path).
+    /// <paramref name="initialData"/> carries any bytes a connect script left unconsumed
+    /// (the partner's SID line and tail when the script's SID-wait completed — spec §4.4).
+    /// </summary>
     public Task<FbbSessionResult> RunCallerAsync(
         RhpChildConnection child,
         Partner partner,
         IReadOnlyList<OutboundItem> outbound,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        byte[]? initialData = null)
     {
         ArgumentNullException.ThrowIfNull(child);
         ArgumentNullException.ThrowIfNull(partner);
         ArgumentNullException.ThrowIfNull(outbound);
-        return RunAsync(FbbRole.Caller, child, partner, partner.Call, outbound, initialData: null, cancellationToken);
+        return RunAsync(FbbRole.Caller, child, partner, partner.Call, outbound, initialData, cancellationToken);
     }
 
     private async Task<FbbSessionResult> RunAsync(
@@ -106,6 +114,9 @@ public sealed class FbbSessionRunner
                 Role = role,
                 OwnCallsign = _identity.Callsign,
                 SidVersion = _sidVersion,
+
+                // Answerer = continue-mode: the demux greeted (SID + prompt) on accept.
+                SidAlreadySent = role == FbbRole.Answerer,
             },
             outbound.Select(o => o.Wire));
 

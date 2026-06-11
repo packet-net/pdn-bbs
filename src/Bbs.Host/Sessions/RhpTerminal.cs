@@ -11,19 +11,35 @@ namespace Bbs.Host.Sessions;
 /// line assembler plus any lines completed during the first-line sniff — so typed-ahead
 /// input is not lost.
 /// </summary>
+/// <remarks>
+/// First-line gate (the greet-immediately demux, design decision 1): the console session
+/// starts the moment a child is accepted so its greeting flows immediately, but its FIRST
+/// read parks on <paramref name="firstLineGate"/> until the demux has decided Fbb-vs-console
+/// from the first inbound line. The gate resolving <see langword="true"/> releases input to
+/// the console; <see langword="false"/> means the stream was handed to the FBB answerer (or
+/// died during the peek) — reads return <see langword="null"/> and the console unwinds as a
+/// Drop having consumed no input and written nothing further. This is what guarantees a
+/// partner's SID is never eaten by the new-user name prompt (compat spec §1.1).
+/// </remarks>
 public sealed class RhpTerminal : IBbsTerminal
 {
     private readonly RhpChildConnection _child;
     private readonly LineAssembler _assembler;
     private readonly Queue<string> _pending;
+    private Task<bool>? _gate;
 
-    /// <summary>Wraps <paramref name="child"/>, optionally adopting demux peek state.</summary>
-    public RhpTerminal(RhpChildConnection child, LineAssembler? assembler = null, Queue<string>? pendingLines = null)
+    /// <summary>Wraps <paramref name="child"/>, optionally adopting demux peek state and a first-line gate.</summary>
+    public RhpTerminal(
+        RhpChildConnection child,
+        LineAssembler? assembler = null,
+        Queue<string>? pendingLines = null,
+        Task<bool>? firstLineGate = null)
     {
         ArgumentNullException.ThrowIfNull(child);
         _child = child;
         _assembler = assembler ?? new LineAssembler();
         _pending = pendingLines ?? new Queue<string>();
+        _gate = firstLineGate;
     }
 
     /// <inheritdoc/>
@@ -32,6 +48,16 @@ public sealed class RhpTerminal : IBbsTerminal
     /// <inheritdoc/>
     public async ValueTask<string?> ReadLineAsync(CancellationToken cancellationToken)
     {
+        if (_gate is { } gate)
+        {
+            if (!await gate.WaitAsync(cancellationToken).ConfigureAwait(false))
+            {
+                return null; // handed off to the FBB answerer (or closed during the peek)
+            }
+
+            _gate = null;
+        }
+
         while (_pending.Count == 0)
         {
             byte[]? data = await _child.ReceiveAsync(cancellationToken).ConfigureAwait(false);

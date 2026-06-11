@@ -1,3 +1,4 @@
+using System.Text;
 using Bbs.Console;
 using Bbs.Core;
 using Bbs.Fbb;
@@ -9,13 +10,33 @@ namespace Bbs.Host.Sessions;
 
 /// <summary>
 /// The inbound session demultiplexer (design decision 1): one RHP-bound callsign serves
-/// both users and partner BBSes. Every accepted child gets a bounded TimeProvider-driven
-/// peek at its first inbound line — a SID-shaped line (<see cref="Sid.IsSidShaped"/>)
-/// selects the Fbb answerer (forwarding partner); anything else, including silence
-/// followed by a first command, gets a <see cref="BbsConsoleSession"/> over an
-/// <see cref="RhpTerminal"/>. Console end reasons: Bye and too-many-errors close the
-/// child; NODE also closes it (v1 — an RHP child has no return-to-node hand-back);
-/// Drop just cleans up.
+/// both users and partner BBSes, and the BBS speaks FIRST — the greet-immediately flow.
+///
+/// On accept the demux instantly sends our SID line (<see cref="Sid.Build"/>, the same
+/// <c>[PDN-&lt;ver&gt;-B1FHM$]</c> the FBB answerer would emit — compat spec §1.1/§3.1:
+/// the called BBS always sends its SID first) and starts the
+/// <see cref="BbsConsoleSession"/> so its greeting/prompt flows immediately. Human
+/// callers ignore the SID line (real BPQ BBSes show exactly this); a partner caller
+/// parses it and answers with its own SID. The console's input is held behind a
+/// first-line gate (see <see cref="RhpTerminal"/>) while the demux peeks the first
+/// inbound line — a forwarding opener (<see cref="Sid.IsSidShaped"/>, or a Winlink-style
+/// <c>;FW:</c> line, spec §1.1) hands the stream to the FBB answerer in continue-mode
+/// (<see cref="FbbSessionConfig.SidAlreadySent"/> — our SID is already on the wire);
+/// anything else releases the gate and the line is the console's first input (the
+/// new-user name prompt can therefore never eat a partner's SID — the SID check happens
+/// before any console input consumption). A SILENT caller sees the greeting while the
+/// demux waits; at <c>demuxFirstLineWaitSeconds</c> expiry the session is the console's
+/// and input flows normally from then on (a SID arriving after expiry is treated as
+/// console input).
+///
+/// On the FBB handoff the console task is aborted via the gate and awaited to completion
+/// BEFORE the answerer pumps, so every console write (greeting/prompt) is on the wire
+/// ahead of any FBB output; FBB callers tolerate banner text around the SID exchange
+/// (spec §3.1 — and for a known partner the console writes only the <c>de CALL&gt;</c>
+/// prompt, reproducing the classic SID+prompt transcript).
+///
+/// Console end reasons: Bye and too-many-errors close the child; NODE also closes it
+/// (v1 — an RHP child has no return-to-node hand-back); Drop just cleans up.
 /// </summary>
 public sealed class InboundDemux
 {
@@ -27,9 +48,10 @@ public sealed class InboundDemux
     private readonly IUserSettingsStore _userSettings;
     private readonly TimeProvider _time;
     private readonly TimeSpan _firstLineWait;
+    private readonly string _sidLine;
     private readonly ILogger _logger;
 
-    /// <summary>Creates the demux.</summary>
+    /// <summary>Creates the demux. <paramref name="sidVersion"/> feeds the greet-immediately SID line.</summary>
     public InboundDemux(
         RhpNodeLink link,
         BbsStore store,
@@ -37,6 +59,7 @@ public sealed class InboundDemux
         RoutingService routing,
         BbsConsoleConfig consoleConfig,
         IUserSettingsStore userSettings,
+        string sidVersion,
         TimeProvider time,
         TimeSpan firstLineWait,
         ILogger<InboundDemux> logger)
@@ -47,6 +70,7 @@ public sealed class InboundDemux
         ArgumentNullException.ThrowIfNull(routing);
         ArgumentNullException.ThrowIfNull(consoleConfig);
         ArgumentNullException.ThrowIfNull(userSettings);
+        ArgumentException.ThrowIfNullOrWhiteSpace(sidVersion);
         ArgumentNullException.ThrowIfNull(time);
         ArgumentNullException.ThrowIfNull(logger);
         _link = link;
@@ -55,6 +79,7 @@ public sealed class InboundDemux
         _routing = routing;
         _consoleConfig = consoleConfig;
         _userSettings = userSettings;
+        _sidLine = Sid.Build(sidVersion);
         _time = time;
         _firstLineWait = firstLineWait;
         _logger = logger;
@@ -80,13 +105,24 @@ public sealed class InboundDemux
         await Task.WhenAll(sessions).ConfigureAwait(false);
     }
 
-    /// <summary>One child's whole lifetime: peek, dispatch, cleanup. Never throws.</summary>
+    /// <summary>One child's whole lifetime: greet, peek, dispatch, cleanup. Never throws.</summary>
     internal async Task HandleChildAsync(RhpChildConnection child, CancellationToken cancellationToken)
     {
+        var gate = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        Task<BbsSessionEndReason>? console = null;
         try
         {
+            // Greet immediately: our SID is the first thing on the wire — a real LinBPQ
+            // caller (dialling us to forward) sends nothing until it has seen it, so the
+            // old silent peek deadlocked both sides into the timeout (compat spec §1.1).
+            await child.SendAsync(Encoding.Latin1.GetBytes(_sidLine + "\r\n"), cancellationToken).ConfigureAwait(false);
+
+            // Start the console greeting flow now; its input parks on the gate.
             var assembler = new LineAssembler();
             var pending = new Queue<string>();
+            var terminal = new RhpTerminal(child, assembler, pending, gate.Task);
+            console = BbsConsoleSession.RunAsync(terminal, _store, _consoleConfig, _time, _userSettings, cancellationToken);
+
             var consumed = new List<byte>();
             bool closedDuringPeek = false;
 
@@ -113,29 +149,37 @@ public sealed class InboundDemux
                 }
                 catch (OperationCanceledException) when (timeout.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
                 {
-                    // Silence: a human caller waiting for the BBS — run the console.
+                    // Silence: a human caller who has already seen the greeting — the
+                    // session is the console's from here on.
                 }
             }
 
             if (closedDuringPeek)
             {
+                gate.TrySetResult(false);
+                await console.ConfigureAwait(false); // unwinds as Drop, nothing consumed
                 await child.CloseAsync(CancellationToken.None).ConfigureAwait(false);
                 return;
             }
 
-            if (pending.Count > 0 && Sid.IsSidShaped(pending.Peek()))
+            if (pending.Count > 0 && IsForwardingOpener(pending.Peek()))
             {
+                // Hand off to the FBB answerer. Abort the console first and wait for it
+                // to finish so its greeting/prompt writes are all on the wire before any
+                // FBB output; it has consumed no input (the gate never opened).
+                gate.TrySetResult(false);
+                await console.ConfigureAwait(false);
+
                 LogFbbSession(_logger, child.RemoteCallsign, null);
                 await _fbbRunner.RunAnswererAsync(child, [.. consumed], cancellationToken).ConfigureAwait(false);
                 await child.CloseAsync(CancellationToken.None).ConfigureAwait(false);
                 return;
             }
 
+            // A console caller (first line was ordinary input, or the wait expired).
+            gate.TrySetResult(true);
             LogConsoleSession(_logger, child.RemoteCallsign, null);
-            var terminal = new RhpTerminal(child, assembler, pending);
-            BbsSessionEndReason reason = await BbsConsoleSession
-                .RunAsync(terminal, _store, _consoleConfig, _time, _userSettings, cancellationToken)
-                .ConfigureAwait(false);
+            BbsSessionEndReason reason = await console.ConfigureAwait(false);
 
             // Messages entered during the session (S family) join the forward queues now.
             _routing.RouteNewMessages();
@@ -151,13 +195,42 @@ public sealed class InboundDemux
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
-            await child.CloseAsync(CancellationToken.None).ConfigureAwait(false);
+            await CleanUpAsync(gate, console, child).ConfigureAwait(false);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             LogSessionFailed(_logger, child.RemoteCallsign, ex);
-            await child.CloseAsync(CancellationToken.None).ConfigureAwait(false);
+            await CleanUpAsync(gate, console, child).ConfigureAwait(false);
         }
+    }
+
+    /// <summary>
+    /// A first line that announces a forwarding partner: a SID, or the Winlink-style
+    /// <c>;FW:</c> preamble that precedes one (compat spec §1.1 — LinBPQ classifies on
+    /// exactly these two shapes; the FBB answerer skips <c>;</c> comment lines while
+    /// awaiting the SID proper).
+    /// </summary>
+    private static bool IsForwardingOpener(string line) =>
+        Sid.IsSidShaped(line) || line.TrimStart().StartsWith(";FW:", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>Failure-path cleanup: release the console (as an abort) and close the child.</summary>
+    private static async Task CleanUpAsync(
+        TaskCompletionSource<bool> gate, Task<BbsSessionEndReason>? console, RhpChildConnection child)
+    {
+        gate.TrySetResult(false);
+        if (console is not null)
+        {
+            try
+            {
+                await console.ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                // Cancelled with the session — expected during shutdown.
+            }
+        }
+
+        await child.CloseAsync(CancellationToken.None).ConfigureAwait(false);
     }
 
     private static readonly Action<ILogger, string, Exception?> LogFbbSession =
