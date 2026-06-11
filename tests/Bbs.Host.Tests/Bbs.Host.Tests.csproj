@@ -1,15 +1,23 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <IsPackable>false</IsPackable>
+    <!-- xunit convention: Method_Scenario_Expectation test names. -->
+    <NoWarn>$(NoWarn);CA1707</NoWarn>
   </PropertyGroup>
 
   <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+
+  <ItemGroup>
     <PackageReference Include="coverlet.collector" />
+    <PackageReference Include="Microsoft.Extensions.TimeProvider.Testing" />
     <PackageReference Include="Microsoft.NET.Test.Sdk" />
+    <PackageReference Include="RhpV2.Client" />
     <PackageReference Include="xunit" />
     <PackageReference Include="xunit.runner.visualstudio" />
   </ItemGroup>
@@ -20,6 +28,9 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\Bbs.Host\Bbs.Host.csproj" />
+    <ProjectReference Include="..\..\src\Bbs.Fbb\Bbs.Fbb.csproj" />
+    <ProjectReference Include="..\..\src\Bbs.Core\Bbs.Core.csproj" />
+    <ProjectReference Include="..\..\src\Bbs.Console\Bbs.Console.csproj" />
   </ItemGroup>
 
 </Project>

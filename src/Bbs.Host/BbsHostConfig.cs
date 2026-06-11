@@ -1,0 +1,252 @@
+using Bbs.Core;
+using YamlDotNet.Serialization;
+using YamlDotNet.Serialization.NamingConventions;
+
+namespace Bbs.Host;
+
+/// <summary>
+/// The host configuration, loaded from <c>$PDN_APP_STATE/bbs.yaml</c> (design.md "YAML
+/// config"). A commented default file is written on first run. RHP endpoint defaults come
+/// from the supervisor environment (<c>PDN_RHP_HOST</c>/<c>PDN_RHP_PORT</c> — see
+/// packet.net docs/app-packages.md) with a 127.0.0.1:9000 fallback.
+/// </summary>
+public sealed record BbsHostConfig
+{
+    /// <summary>The callsign placeholder a fresh default config carries until the owner edits it.</summary>
+    public const string PlaceholderCallsign = "N0CALL";
+
+    /// <summary>BBS callsign (+ optional SSID) — the RHP bind identity.</summary>
+    public string Callsign { get; init; } = PlaceholderCallsign;
+
+    /// <summary>Sysop callsign (console sysop rights; webmail sysop view).</summary>
+    public string Sysop { get; init; } = "";
+
+    /// <summary>
+    /// Our hierarchical route <b>without</b> the callsign (the linmail.cfg H-Route shape,
+    /// e.g. <c>#23.GBR.EURO</c>) — feeds <see cref="RoutingEngine"/> and the R: line.
+    /// </summary>
+    public string HRoute { get; init; } = "";
+
+    /// <summary>Webmail bind (loopback per the app-gateway contract).</summary>
+    public WebConfig Web { get; init; } = new();
+
+    /// <summary>The node's RHPv2 endpoint.</summary>
+    public RhpConfig Rhp { get; init; } = new();
+
+    /// <summary>Forwarding partners — the source of truth for partner config (v1); upserted into the store at startup.</summary>
+    /// <remarks>Concrete <see cref="List{T}"/> because YamlDotNet binds collections, not read-only interfaces.</remarks>
+    public List<PartnerConfig> Partners { get; init; } = [];
+
+    /// <summary>
+    /// How long the inbound demux waits for a first line before assuming a human caller
+    /// (design decision 1: a SID-shaped first line selects the Fbb answerer).
+    /// </summary>
+    public int DemuxFirstLineWaitSeconds { get; init; } = 30;
+}
+
+/// <summary>Webmail bind configuration. MUST stay loopback (app-gateway contract).</summary>
+public sealed record WebConfig
+{
+    /// <summary>Bind address; the gateway identity headers are only trustworthy on loopback.</summary>
+    public string Bind { get; init; } = "127.0.0.1";
+
+    /// <summary>Port; must match the <c>ui.upstream</c> in pdn-app.yaml.</summary>
+    public int Port { get; init; } = 18090;
+}
+
+/// <summary>RHPv2 endpoint + credentials. Null host/port defer to the supervisor environment.</summary>
+public sealed record RhpConfig
+{
+    /// <summary>RHP host; null → <c>PDN_RHP_HOST</c> → 127.0.0.1.</summary>
+    public string? Host { get; init; }
+
+    /// <summary>RHP port; null → <c>PDN_RHP_PORT</c> → 9000.</summary>
+    public int? Port { get; init; }
+
+    /// <summary>RHP auth user (only when the node sets <c>rhp.requireAuth</c>).</summary>
+    public string? User { get; init; }
+
+    /// <summary>RHP auth password.</summary>
+    public string? Pass { get; init; }
+}
+
+/// <summary>
+/// One forwarding partner (compat spec §4.1, the v1 subset). Maps onto
+/// <see cref="Partner"/> for the store.
+/// </summary>
+public sealed record PartnerConfig
+{
+    /// <summary>Partner callsign, exact incl. SSID (inbound match is by exact source call — compat spec §2.5).</summary>
+    public string Call { get; init; } = "";
+
+    /// <summary>
+    /// Connect target for outbound cycles — the callsign/alias the RHP <c>open</c> dials
+    /// (spec §4.4: a bare <c>C &lt;call&gt;</c> line means the open target itself). Defaults
+    /// to the partner call.
+    /// </summary>
+    public string? Connect { get; init; }
+
+    /// <summary>Auto-dial poll interval, minutes (compat spec §4.1 FwdInterval; default 60).</summary>
+    public int IntervalMinutes { get; init; } = 60;
+
+    /// <summary>Dial as soon as a message is queued (compat spec §4.1 FWDNewImmediately).</summary>
+    public bool SendImmediately { get; init; }
+
+    /// <summary>TO-field distribution list (compat spec §4.1 TOCalls).</summary>
+    public List<string> To { get; init; } = [];
+
+    /// <summary>AT-field list; entries with <c>*</c> are the wildcard default route (compat spec §4.1 ATCalls).</summary>
+    public List<string> At { get; init; } = [];
+
+    /// <summary>
+    /// Hierarchical routes (compat spec §4.1). v1 maps one list onto both HRoutes (flood)
+    /// and HRoutesP (personals + directed bulls); flood matching additionally needs
+    /// <see cref="BbsHa"/>.
+    /// </summary>
+    public List<string> Hr { get; init; } = [];
+
+    /// <summary>The partner's own full HA — enables flood-bulletin HR matching (compat spec §4.1 BBSHA).</summary>
+    public string? BbsHa { get; init; }
+
+    /// <summary>Largest message accepted from this partner, bytes (bigger inbound → FS '-').</summary>
+    public int MaxRx { get; init; } = 99999;
+
+    /// <summary>Largest message proposed to this partner, bytes.</summary>
+    public int MaxTx { get; init; } = 99999;
+
+    /// <summary>Auto-dialling enabled (messages still queue when disabled).</summary>
+    public bool Enabled { get; init; } = true;
+
+    /// <summary>Maps to the store's partner record (compat spec §4.1 keys).</summary>
+    public Partner ToPartner() => new()
+    {
+        Call = Call,
+        Enabled = Enabled,
+        ForwardIntervalSeconds = Math.Max(1, IntervalMinutes) * 60,
+        ForwardNewImmediately = SendImmediately,
+        ConnectScript = string.IsNullOrWhiteSpace(Connect) ? [] : [$"C {Connect.Trim()}"],
+        ToCalls = [.. To],
+        AtCalls = [.. At],
+        HRoutes = [.. Hr],
+        HRoutesP = [.. Hr],
+        BbsHa = BbsHa,
+        MaxRxSize = MaxRx,
+        MaxTxSize = MaxTx,
+    };
+}
+
+/// <summary>Loads <c>bbs.yaml</c> from the state dir, creating a commented default on first run.</summary>
+public static class BbsHostConfigFile
+{
+    /// <summary>The config file name inside <c>$PDN_APP_STATE</c>.</summary>
+    public const string FileName = "bbs.yaml";
+
+    /// <summary>
+    /// Loads the config, writing <see cref="DefaultYaml"/> first when the file does not
+    /// exist. <paramref name="getEnv"/> supplies <c>PDN_RHP_HOST</c>/<c>PDN_RHP_PORT</c>
+    /// defaults for an unset RHP endpoint.
+    /// </summary>
+    public static (BbsHostConfig Config, bool CreatedDefault) LoadOrCreate(string stateDir, Func<string, string?> getEnv)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(stateDir);
+        ArgumentNullException.ThrowIfNull(getEnv);
+
+        string path = Path.Combine(stateDir, FileName);
+        bool created = false;
+        if (!File.Exists(path))
+        {
+            Directory.CreateDirectory(stateDir);
+            File.WriteAllText(path, DefaultYaml);
+            created = true;
+        }
+
+        BbsHostConfig config = Parse(File.ReadAllText(path));
+        return (ApplyEnvironment(config, getEnv), created);
+    }
+
+    /// <summary>Parses a YAML config document (camelCase keys; unknown keys ignored).</summary>
+    public static BbsHostConfig Parse(string yaml)
+    {
+        ArgumentNullException.ThrowIfNull(yaml);
+        IDeserializer deserializer = new DeserializerBuilder()
+            .WithNamingConvention(CamelCaseNamingConvention.Instance)
+            .IgnoreUnmatchedProperties()
+            .Build();
+        return deserializer.Deserialize<BbsHostConfig>(yaml) ?? new BbsHostConfig();
+    }
+
+    /// <summary>Resolves the RHP endpoint: explicit config → supervisor env → 127.0.0.1:9000.</summary>
+    public static BbsHostConfig ApplyEnvironment(BbsHostConfig config, Func<string, string?> getEnv)
+    {
+        ArgumentNullException.ThrowIfNull(config);
+        ArgumentNullException.ThrowIfNull(getEnv);
+
+        string host = config.Rhp.Host is { Length: > 0 } h ? h
+            : getEnv("PDN_RHP_HOST") is { Length: > 0 } envHost ? envHost
+            : "127.0.0.1";
+        int port = config.Rhp.Port
+            ?? (int.TryParse(getEnv("PDN_RHP_PORT"), System.Globalization.NumberStyles.None,
+                    System.Globalization.CultureInfo.InvariantCulture, out int envPort)
+                ? envPort
+                : 9000);
+        return config with { Rhp = config.Rhp with { Host = host, Port = port } };
+    }
+
+    /// <summary>The commented default written on first run.</summary>
+    public const string DefaultYaml = """
+        # pdn-bbs configuration — created on first run; edit and restart the app.
+        #
+        # callsign: the BBS callsign (+ optional SSID). This is the callsign the BBS
+        #           binds over RHPv2 — users and partner BBSes connect to it.
+        callsign: N0CALL
+
+        # sysop: the sysop's callsign (sysop rights on the console; sysop view in webmail).
+        sysop: ""
+
+        # hRoute: this BBS's hierarchical route WITHOUT the callsign, e.g. "#23.GBR.EURO"
+        #         (the linmail.cfg H-Route shape). Drives routing and the R: trace line.
+        hRoute: ""
+
+        # web: the webmail bind. MUST stay loopback — pdn's app gateway is the trust
+        #      boundary for the X-Pdn-* identity headers. The port must match the
+        #      ui.upstream in pdn-app.yaml.
+        web:
+          bind: 127.0.0.1
+          port: 18090
+
+        # rhp: the node's RHPv2 endpoint. When omitted (or null) the supervisor
+        #      environment (PDN_RHP_HOST / PDN_RHP_PORT) is used, falling back to
+        #      127.0.0.1:9000. user/pass only matter when the node sets rhp.requireAuth.
+        rhp:
+          host: null
+          port: null
+          user: null
+          pass: null
+
+        # partners: BBS forwarding partners (compat spec §4.1, v1 subset).
+        #   call:            partner callsign, exact incl. SSID (inbound match is exact)
+        #   connect:         the callsign/alias outbound cycles dial (default: call)
+        #   intervalMinutes: auto-dial poll interval (default 60)
+        #   sendImmediately: dial as soon as a message queues (default false)
+        #   to:              TO-field distribution list, e.g. [SYSOP]
+        #   at:              AT-field list; "*" entries are the wildcard default route
+        #   hr:              hierarchical routes, e.g. [GBR.EURO] (flood matching also
+        #                    needs bbsHa — the partner's own full HA)
+        #   bbsHa:           partner's full HA, e.g. GB7BPQ.#23.GBR.EURO
+        #   maxRx / maxTx:   per-partner inbound/outbound size caps in bytes (default 99999)
+        #   enabled:         auto-dialling on/off (messages still queue when off)
+        partners: []
+        #  - call: GB7BPQ
+        #    connect: GB7BPQ
+        #    intervalMinutes: 60
+        #    sendImmediately: true
+        #    at: ["*"]
+        #    hr: [GBR.EURO]
+        #    bbsHa: GB7BPQ.#23.GBR.EURO
+
+        # demuxFirstLineWaitSeconds: how long an inbound connect may stay silent before
+        # the BBS assumes a human caller and starts the console (a partner BBS announces
+        # itself with a [SID] first line).
+        demuxFirstLineWaitSeconds: 30
+        """;
+}

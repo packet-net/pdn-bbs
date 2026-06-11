@@ -1,0 +1,35 @@
+# pdn-app.yaml — the pdn-bbs app package manifest (packet.net docs/app-packages.md).
+#
+# This manifest is authored by the app (this repo) and ships alongside the published
+# self-contained binary; pdn discovers it under /usr/share/packetnet/apps/bbs (or
+# /var/lib/packetnet/apps/bbs for an owner-installed copy) and never special-cases
+# the app id. The BBS reaches pdn through public interfaces only: RHPv2 for the
+# packet plane, the app-gateway identity contract for webmail.
+#
+# FIRST-RUN CONFIG — read before enabling: on first start pdn-bbs writes a commented
+# default bbs.yaml into its state dir (/var/lib/packetnet/apps/bbs) and keeps running
+# with the N0CALL placeholder callsign. Edit bbs.yaml — at minimum `callsign:` (the
+# callsign the BBS binds over RHPv2), plus `sysop:`, `hRoute:` and your forwarding
+# `partners:` — then disable/enable (or restart) the app. PDN_RHP_HOST/PDN_RHP_PORT
+# come from the supervisor environment; the message store (bbs.db) lives in the same
+# state dir. The webmail port below MUST match `web.port` in bbs.yaml.
+manifest: 1
+id: bbs                       # must equal the package directory name
+name: BBS
+version: "0.1.0"
+description: Packet-radio mailbox — personal mail, bulletins and NTS traffic with FBB-compatible store-and-forward and webmail.
+icon: mail
+capabilities: [network, web]  # binds its own callsign over RHPv2; serves its own web UI
+
+# The .NET daemon pdn supervises while the app is enabled. No `session:` block — the
+# BBS is not a console verb; users and partner BBSes connect to its bound callsign
+# over RF, and the node owner uses the webmail tile.
+service:
+  command: ./pdn-bbs          # relative — resolves to the published binary in this package dir
+  environment: {}             # PDN_APP_STATE / PDN_RHP_HOST / PDN_RHP_PORT come from the supervisor
+
+# pdn reverse-proxies /apps/bbs/ to the loopback upstream and shows a launcher tile.
+ui:
+  upstream: http://127.0.0.1:18090
+  name: BBS
+  icon: mail

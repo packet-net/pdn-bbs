@@ -1,15 +1,22 @@
 <Project Sdk="Microsoft.NET.Sdk.Web">
 
+  <PropertyGroup>
+    <!-- The pdn-app.yaml manifest's `service.command: ./pdn-bbs` names the published binary. -->
+    <AssemblyName>pdn-bbs</AssemblyName>
+    <RootNamespace>Bbs.Host</RootNamespace>
+    <!-- Keep in lockstep with pdn-app.yaml `version:` — this stamp feeds the SID and the R: line. -->
+    <Version>0.1.0</Version>
+  </PropertyGroup>
+
   <ItemGroup>
     <ProjectReference Include="..\Bbs.Fbb\Bbs.Fbb.csproj" />
     <ProjectReference Include="..\Bbs.Core\Bbs.Core.csproj" />
     <ProjectReference Include="..\Bbs.Console\Bbs.Console.csproj" />
   </ItemGroup>
 
-  <PropertyGroup>
-    <TargetFramework>net10.0</TargetFramework>
-    <Nullable>enable</Nullable>
-    <ImplicitUsings>enable</ImplicitUsings>
-  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="RhpV2.Client" />
+    <PackageReference Include="YamlDotNet" />
+  </ItemGroup>
 
 </Project>
