@@ -129,13 +129,14 @@ internal sealed class FakeRhpServer : IAsyncDisposable
             ["handle"] = conn.ListenerHandle,
             ["child"] = child,
             ["remote"] = remoteCallsign,
+            ["local"] = conn.BoundLocal,
             ["port"] = "1",
         }).ConfigureAwait(false);
         await conn.PushAsync(new JsonObject
         {
             ["type"] = "status",
             ["handle"] = child,
-            ["flags"] = 2, // Connected
+            ["flags"] = 3, // ConOk | Connected — the pdn child-status push (RhpServer.OnInboundAcceptedAsync)
         }).ConfigureAwait(false);
         return peer;
     }
@@ -293,7 +294,7 @@ internal sealed class FakeRhpServer : IAsyncDisposable
                     int child = server.NextHandle();
                     server.OnHandleOwned(child, this);
                     await ReplyAsync("openReply", id, 0, child).ConfigureAwait(false);
-                    await PushAsync(new JsonObject { ["type"] = "status", ["handle"] = child, ["flags"] = 2 })
+                    await PushAsync(new JsonObject { ["type"] = "status", ["handle"] = child, ["flags"] = 3 })
                         .ConfigureAwait(false);
                     server.Opens.Writer.TryWrite(record with { Handle = child });
                     break;
