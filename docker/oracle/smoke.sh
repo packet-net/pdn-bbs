@@ -182,14 +182,15 @@ if b"@PDNBBS" not in listing or nonce.encode() not in listing:
 
 # Forwarding queue — proves (a) the seeded F_SYSOP user record grants
 # BBS-sysop on this Secure_Session telnet login and (b) the message
-# routed to the PDNBBS-1 partner queue (`%s %d Msgs` rows, spec §4.4).
+# routed to the PDNBBS partner queue (`%s %d Msgs` rows, spec §4.4 —
+# the record is keyed by BASE call; the dial still targets PDNBBS-1).
 # The BBS log corroborates with `Routing Trace PDNBBS Matches AT
-# PDNBBS-1` followed by `Connecting to BBS PDNBBS-1` dial-out attempts.
+# PDNBBS` followed by `Connecting to BBS PDNBBS` dial-out attempts.
 t.line("FWD QUEUE")
 queue = t.read_until(b"de GB7BPQ-1>", timeout=15)
 show("fwd-queue", queue)
-if b"PDNBBS-1" not in queue or b"Msgs" not in queue:
-    raise SystemExit(f"FAIL: message not queued for partner PDNBBS-1: {queue!r}")
+if b"PDNBBS" not in queue or b"Msgs" not in queue:
+    raise SystemExit(f"FAIL: message not queued for partner PDNBBS: {queue!r}")
 
 # Sign off. Spec §1.2 says `73 de <BBSNAME>` — but over the telnet host
 # path the 73 text never reaches the client (verified live); the node

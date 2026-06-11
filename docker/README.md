@@ -21,6 +21,8 @@ docker compose -f docker/compose.oracle.yml down -v         # tear down
 
 `smoke.sh` needs `docker compose` v2, `bash`, and `python3` (the telnet driver is an embedded here-script). It is self-contained: it starts from, and returns to, a torn-down state.
 
+The oracle is a **stateful singleton** (one forwarding-partner identity, one RF channel): two actors driving one instance poison each other's sessions (observed delta 9 below). If somebody else is using the stack on this box, run a private copy (clone the compose file with offset host ports / a distinct subnet+project, and sed the `bpq32.cfg` netsim IP to match) and point the tests at it via `PDNBBS_ORACLE_KISS_PORT` / `PDNBBS_ORACLE_TELNET_PORT` / `PDNBBS_ORACLE_CONTAINER` (see `OracleFixture`). CI and ordinary local runs need none of these.
+
 ## Port map (all loopback-only on the host)
 
 | Host | Container | What |
@@ -46,7 +48,7 @@ Files are root-owned (the container runs as root); `smoke.sh` wipes the director
 
 ## The partner entry (what the oracle is configured to do with us)
 
-`docker/oracle/linmail.cfg` seeds a `BBSForwarding.PDNBBS-1` record plus the mandatory `BBSUsers.PDNBBS-1` record with the **F_BBS flag (0x10)** — that user record, keyed by the *exact* source callsign incl. SSID, is what makes LinBPQ treat an inbound connect from `PDNBBS-1` as a forwarding session at all (SID exchange instead of the chatty user banner). Semantics, for the future outbound test:
+`docker/oracle/linmail.cfg` seeds a `BBSForwarding.PDNBBS` record plus the mandatory `BBSUsers.PDNBBS` record with the **F_BBS flag (0x10)** — that user record is what makes LinBPQ treat an inbound connect from our BBS as a forwarding session at all (SID exchange instead of the chatty user banner). It is keyed by the **base callsign** (`PDNBBS`, no SSID): LinBPQ strips the SSID on inbound AX.25 connects *before* the user lookup (`BBSUtilities.c` ~10827), so an SSID-keyed record never matches an AX.25 partner — and worse, the dial-in lands on an auto-created plain user whose identity doesn't join to the partner's forward-queue bits, so **in-session reverse toward a dialling `PDNBBS-1` silently never proposes anything** (found by `BidirectionalForwardingInteropTests`; the GB7RDG production snapshot confirms real deployments base-key all partner records). Semantics, for the future outbound test:
 
 - **Protocol: FBB compressed B1 ("B1F"), not B2F** — `AllowBlocked=1, AllowCompressed=1, UseB1Protocol=1, UseB2Protocol=0`. Expect FA proposals, `F>` checksum, FS `+ - =`, SOH/STX/EOT framing with the LZHUF N=2048 payload (spec §3.6–3.7).
 - **Routing to us**: `ATCalls = PDNBBS|PDNBBS-1` (a message `@ PDNBBS` or `@ PDNBBS-1` queues for us — plus the implied-AT rule on the partner's own call), `HRoutes = WW` (all flood bulletins), `HRoutesP = GBR.EURO`, `BBSHA = PDNBBS.#23.GBR.EURO`.

@@ -169,7 +169,7 @@ There is **no archive status** in BPQMail. Transitions: new = `N` (or `H` if hel
 
 ### 2.5 User flags relevant to interop
 
-**BBS** flag = the partner switch: "Allows the BBS to queue messages for forwarding to it, to use compressed (B/B1/B2) forwarding protocols and to accept messages sent on behalf of other users" [BPQ-DOC MailServerConfiguration]. **PMS** = compressed forwarding for non-BBS clients (Winpack-style). Incoming forwarding connects are matched **by exact source callsign including SSID** against a BBS-flagged user record — if it doesn't match, no SID is sent and no forwarding happens [M0LTE-IT test_two_instance_bbs_forwarding.py]. Others: Expert, Excluded, Hold-messages (default ON for new users unless `Don't Hold messages from new users`), NTS MPS, RMS-related.
+**BBS** flag = the partner switch: "Allows the BBS to queue messages for forwarding to it, to use compressed (B/B1/B2) forwarding protocols and to accept messages sent on behalf of other users" [BPQ-DOC MailServerConfiguration]. **PMS** = compressed forwarding for non-BBS clients (Winpack-style). Incoming forwarding connects over **AX.25 are SSID-stripped before the lookup** (`BBSUtilities.c` ~10827 `strlop(call,'-')`) and matched by **base callsign** against a BBS-flagged user record — key partner records by base call, or the connect lands on an auto-created plain user (no SID, no forwarding, and no in-session reverse since the forward-queue bits don't join). Telnet/FBBPORT logins, by contrast, present the literal login name, which is how the SSID-keyed two-instance test passed [M0LTE-IT test_two_instance_bbs_forwarding.py; corrected live via BidirectionalForwardingInteropTests + the GB7RDG production snapshot, 2026-06-11]. Others: Expert, Excluded, Hold-messages (default ON for new users unless `Don't Hold messages from new users`), NTS MPS, RMS-related.
 
 ---
 
@@ -636,7 +636,7 @@ BBSForwarding:
 BBSUsers:
 {
   ; ^-delimited: Name^Address^HomeBBS^QRA^pass^ZIP^CMSPass^lastmsg^flags^PageLen^BBSNumber^RMSSSIDBits^WebSeqNo^TimeLastConnected^Stats^LastStats
-  ; flags 0x10 = F_BBS — REQUIRED, keyed by EXACT source callsign incl. SSID
+  ; flags 0x10 = F_BBS — REQUIRED, keyed by BASE callsign (AX.25 connects are SSID-stripped before lookup — see the BBS-flag note above)
   GB7PDN = "BBS^^^^^^^0^16^0^1^0^0^0^^";
 };
 Housekeeping:
