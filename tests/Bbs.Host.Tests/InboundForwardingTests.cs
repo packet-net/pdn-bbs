@@ -155,7 +155,7 @@ public class InboundForwardingTests
         Assert.Equal("Outbound", reader.Title);
         byte[] plaintext = LzhufContainer.Decode(LzhufContainerKind.B1, reader.Payload.Span);
         string text = Encoding.Latin1.GetString(plaintext);
-        Assert.StartsWith("R:260611/1200Z 1@GB7PDN.#23.GBR.EURO PDN0.1.0\r\r", text, StringComparison.Ordinal);
+        Assert.StartsWith("R:260611/1200Z 1@GB7PDN.#23.GBR.EURO PDN0.1.0\r\n\r\n", text, StringComparison.Ordinal);
         Assert.EndsWith("Reverse test.\r", text, StringComparison.Ordinal);
 
         // The turn reverses; the peer still has nothing → FF; we are empty → FQ, done.

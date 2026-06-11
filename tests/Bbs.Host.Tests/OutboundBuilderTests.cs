@@ -55,8 +55,10 @@ public sealed class OutboundBuilderTests : IDisposable
         Assert.Equal(message.Number, item.Number);
         string payload = Encoding.Latin1.GetString(item.Wire.Body.Span);
 
-        // R: line, blank separator (first hop), then the body — spec §3.7/§3.14.
-        Assert.Equal("R:260611/1200Z 1@GB7PDN.#23.GBR.EURO PDN0.1.0\r\rHello.\r", payload);
+        // R: line (CRLF-terminated, BPQ-conformant), CRLF blank separator (first hop),
+        // then the body — spec §3.7/§3.14. The CRLF is load-bearing: LinBPQ's packet-map
+        // reporter NULL-derefs on a bare-CR R: line (see ComposePayload doc comment).
+        Assert.Equal("R:260611/1200Z 1@GB7PDN.#23.GBR.EURO PDN0.1.0\r\n\r\nHello.\r", payload);
         Assert.Equal(payload.Length, item.Wire.Body.Length); // the advisory FA size includes the R: line
     }
 
@@ -69,7 +71,7 @@ public sealed class OutboundBuilderTests : IDisposable
             OutboundBuilder.Build([message], Bpq(), Identity, _time, NullLogger.Instance));
 
         string payload = Encoding.Latin1.GetString(item.Wire.Body.Span);
-        Assert.Equal("R:260611/1200Z 1@GB7PDN.#23.GBR.EURO PDN0.1.0\r" + relayedBody, payload);
+        Assert.Equal("R:260611/1200Z 1@GB7PDN.#23.GBR.EURO PDN0.1.0\r\n" + relayedBody, payload);
     }
 
     [Fact]
@@ -112,6 +114,30 @@ public sealed class OutboundBuilderTests : IDisposable
         OutboundItem item = Assert.Single(
             OutboundBuilder.Build([message], Bpq(), identity, _time, NullLogger.Instance));
         string payload = Encoding.Latin1.GetString(item.Wire.Body.Span);
-        Assert.StartsWith("R:260611/1200Z 1@GB7PDN.WW PDN0.1.0\r", payload, StringComparison.Ordinal);
+        Assert.StartsWith("R:260611/1200Z 1@GB7PDN.WW PDN0.1.0\r\n", payload, StringComparison.Ordinal);
+    }
+
+    // Regression: pdn forwarded bare-CR R: lines and SIGSEGV-crash-looped GB7RDG's real BPQ —
+    // its packet-map reporter walks the R: chain with strstr(line, "\r\n") and dereferences the
+    // result unguarded, so an all-CR message (no LF anywhere) returns NULL and kills the BBS on
+    // every mail-start. The structural invariant that makes that NULL-deref impossible: every
+    // forwarded payload contains at least one CRLF, and our prepended R: line is CRLF-terminated.
+    [Theory]
+    [InlineData("Hello.\r")]                                              // originated, bare-CR body, no LF
+    [InlineData("Single line no terminator")]                            // originated, no line break at all
+    [InlineData("R:260610/0900Z 7@GB7BPQ.#23.GBR.EURO BPQ6.0.24\r\rOriginal.\r")] // relayed
+    public void EveryForwardedPayload_ContainsCrlf_SoABpqRChainWalkerCannotNullDeref(string body)
+    {
+        Message message = Add(body);
+        OutboundItem item = Assert.Single(
+            OutboundBuilder.Build([message], Bpq(), Identity, _time, NullLogger.Instance));
+        string payload = Encoding.Latin1.GetString(item.Wire.Body.Span);
+
+        Assert.StartsWith("R:", payload, StringComparison.Ordinal);
+        Assert.Contains("\r\n", payload, StringComparison.Ordinal);   // strstr(payload, "\r\n") != NULL
+        // The first R: line specifically must end CRLF (that is the line BPQ's walker parses first).
+        int firstLineEnd = payload.IndexOf('\r');
+        Assert.True(firstLineEnd >= 0 && firstLineEnd + 1 < payload.Length && payload[firstLineEnd + 1] == '\n',
+            "the prepended R: line must be terminated with CRLF, not a bare CR");
     }
 }

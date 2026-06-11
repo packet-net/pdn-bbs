@@ -91,6 +91,14 @@ public static class OutboundBuilder
     /// spec §3.3). A body that already starts with an R: chain was relayed to us (the
     /// upstream chain + separator are already in place); anything else originated here and
     /// gets the §3.7 "blank line if first hop" separator.
+    ///
+    /// R: lines are terminated with CRLF, NOT a bare CR. This is the format every LinBPQ
+    /// R: writer emits (FBBRoutines.c:443/1387, BBSUtilities.c:6886 forwarding header, etc.)
+    /// and, critically, the one its parsers REQUIRE: LinBPQ's packet-map reporter walks the
+    /// R: chain with strstr(line, "\r\n") and dereferences the result unguarded — a bare-CR
+    /// R: line (no LF anywhere in the message) returns NULL and SIGSEGVs the BBS on every
+    /// mail-start. We emitted bare CR and crash-looped GB7RDG (see plan.md §17 / pdn-bbs-arc).
+    /// Keep CRLF so the chain is conformant and a NULL-deref is structurally impossible.
     /// </summary>
     internal static byte[] ComposePayload(Message message, BbsIdentity identity, DateTimeOffset now)
     {
@@ -103,7 +111,7 @@ public static class OutboundBuilder
 
         ReadOnlySpan<byte> body = message.Body.Span;
         bool relayed = body.Length >= 2 && body[0] == (byte)'R' && body[1] == (byte)':';
-        string prefix = relayed ? rLine + "\r" : rLine + "\r\r";
+        string prefix = relayed ? rLine + "\r\n" : rLine + "\r\n\r\n";
 
         byte[] prefixBytes = Encoding.Latin1.GetBytes(prefix);
         byte[] payload = new byte[prefixBytes.Length + body.Length];

@@ -57,8 +57,9 @@ public class OutboundForwardingTests
         Assert.Equal("Hi", reader.Title);
         string plaintext = Encoding.Latin1.GetString(LzhufContainer.Decode(LzhufContainerKind.B1, reader.Payload.Span));
 
-        // Send-time R: line + first-hop blank separator + the stored body (spec §3.7/§3.14).
-        Assert.Equal("R:260611/1200Z 1@GB7PDN.#23.GBR.EURO PDN0.1.0\r\rLocal test body.\r", plaintext);
+        // Send-time R: line (CRLF-terminated) + first-hop CRLF blank separator + the stored
+        // body (spec §3.7/§3.14). CRLF is required: a bare-CR R: line NULL-derefs LinBPQ.
+        Assert.Equal("R:260611/1200Z 1@GB7PDN.#23.GBR.EURO PDN0.1.0\r\n\r\nLocal test body.\r", plaintext);
 
         // Peer has nothing for us → FF; we are done → FQ; the host hangs up.
         await peer.SendLineAsync("FF");
