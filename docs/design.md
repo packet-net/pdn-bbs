@@ -47,6 +47,18 @@ Although rare, a user MUST be able to adopt an instance as their **home BBS** wi
 3. **WP announcements** (spec SHOULD, promoted by this requirement) — emitting White Pages updates for homed users is how the rest of the network learns to route `<call> @ here`.
 4. The RF console is already the full management surface (read/kill/send, `Home`/name/QTH persistence) — no node-owner involvement needed; callsign-is-identity per network norms.
 
+## The plain-language mandate (Tom, 2026-06-11 — supersedes the compat-spec §8 "classic user surface" MUST)
+
+**All of the arcane knowledge goes: L/R/K/S, status letters, hierarchical-route incantations, the lot.** Interop compatibility is a *wire* property (FBB forwarding with partner BBSes — untouched); it was never a reason to make humans speak W0RLI. The console becomes a plain-language line-mode surface that a TNC2 user on a dumb terminal can drive without folklore:
+
+- **Canonical commands are words**: `help`, `list` (new mail), `read <n>`, `send <call>`, `reply`, `delete <n>`, `bulletins`, `topics`, `name`, `home`, `quit`. Single letters survive only as *accidental abbreviations* — any unambiguous prefix of a word works (`l`, `r 3`, `q`), so a die-hard's fingers still work, but nothing requires the folklore and `help` explains everything in sentences.
+- **Listings are sentences, not column dumps with status letters**: "3 new messages — 1) from G4ABC, 12 Jun: Antenna party …", paclen-friendly lines, paged with a plain "more? (yes/no)".
+- **Addressing is just a callsign**: `send g4abc` — the system resolves where G4ABC lives via the network directory; the power form `send g4abc@gb7bsk` exists; regions/hierarchies NEVER surface to users.
+- **Onboarding in sentences**: the first-connect flow asks for a name and offers "make this your home mailbox?" — no Z/QTH/Home command trivia.
+- **Sysop surface likewise**: `forwarding` (status), `queue`, `route <call>` (explain) — see forwarding.md's vocabulary table.
+- **Recorded consequence**: legacy *automated* user-side clients that pattern-match W0RLI prompts (Winpack-era) will not drive this console. Partner BBS forwarding is unaffected (SID-triggered, wire-level). If a real need appears, a classic-mode shim can be an opt-in later — it is deliberately NOT being built now.
+- The W3 console engine (session lifecycle, store wiring, paging, persistence) is kept; its command table and output shapes are re-languaged. This is wave **U-1**, runnable in parallel with F-1.
+
 ## Load-bearing decisions
 
 1. **Session demux**: one RHP-bound callsign serves both users and partners. The answerer sniffs the first inbound line: `[...-...$]`-shaped SID → Fbb answerer FSM; anything else → Console. (LinBPQ does the same on its BBS port.)

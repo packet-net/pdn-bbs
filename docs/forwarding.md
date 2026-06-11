@@ -101,7 +101,7 @@ partners:
 
 ## Operations surface (the end state)
 
-- **Console (sysop):** `FWD` (status table: per-partner queue depth, health, last cycle), `FWD <partner>` (cycle now), `FWD QUEUE [partner]`, `ROUTE? <to> [@at]` (explain).
+- **Console (sysop):** `forwarding` (status: per-partner queue depth, health, last cycle), `forward <partner>` (cycle now), `queue [partner]`, `route <call>` (explain) — plain words per the vocabulary section; no FWD/REROUTE incantations.
 - **Webmail (sysop view):** the same as pages — partner health cards (with script transcripts and session stats), queue browser, BID browser, routing explain, requeue.
 - **Logs:** one structured line per cycle outcome; loud after N consecutive failures; the re-route diff on config apply.
 
