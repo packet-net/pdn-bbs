@@ -1,0 +1,14 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Bbs.Console/Bbs.Console.csproj" />
+    <Project Path="src/Bbs.Core/Bbs.Core.csproj" />
+    <Project Path="src/Bbs.Fbb/Bbs.Fbb.csproj" />
+    <Project Path="src/Bbs.Host/Bbs.Host.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Bbs.Console.Tests/Bbs.Console.Tests.csproj" />
+    <Project Path="tests/Bbs.Core.Tests/Bbs.Core.Tests.csproj" />
+    <Project Path="tests/Bbs.Fbb.Tests/Bbs.Fbb.Tests.csproj" />
+    <Project Path="tests/Bbs.Host.Tests/Bbs.Host.Tests.csproj" />
+  </Folder>
+</Solution>

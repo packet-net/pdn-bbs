@@ -1,0 +1,15 @@
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: [self-hosted, Linux, X64]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build (Release)
+        run: dotnet build -c Release
+      - name: Test
+        run: dotnet test -c Release --no-build --filter "Category!=Interop"
