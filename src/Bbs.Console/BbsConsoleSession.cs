@@ -31,6 +31,14 @@ public sealed partial class BbsConsoleSession
     private int _pageLength;
     private int _errorCount;
 
+    /// <summary>
+    /// The active command surface (the plain-language mandate). Resolved at connect from the
+    /// user's saved <see cref="UserSettings.InterfaceMode"/> (config default = Plain), and
+    /// flipped in-session by the plain <c>classic</c> / classic <c>plain</c> commands — the
+    /// new surface takes effect from the next prompt and persists via the settings store.
+    /// </summary>
+    private InterfaceMode _mode;
+
     // Note: every timestamp the session causes (logins, message receipt, read/kill stamps)
     // is recorded by BbsStore against the TimeProvider it was opened with; the session itself
     // never reads a wall clock. RunAsync still takes the TimeProvider so the composition
@@ -62,6 +70,7 @@ public sealed partial class BbsConsoleSession
         UserSettings settingsRecord = settings.Load(_userCall);
         _expert = settingsRecord.Expert ?? config.ExpertDefault;
         _pageLength = settingsRecord.PageLength ?? config.DefaultPageLength;
+        _mode = settingsRecord.InterfaceMode ?? config.DefaultInterfaceMode;
     }
 
     /// <summary>
@@ -119,6 +128,15 @@ public sealed partial class BbsConsoleSession
     {
         _store.TouchLastLogin(_userCall);
 
+        // A BBS-flagged caller (a forwarding partner that fell through to the console, or an
+        // automated peer) always gets the terse classic surface regardless of preference — its
+        // client pattern-matches the legacy prompts and never types `plain`/`classic`. The
+        // mandate is about *humans*: the plain default applies to interactive callers.
+        if (_isBbs)
+        {
+            _mode = InterfaceMode.Classic;
+        }
+
         if (!_isBbs)
         {
             await GreetAsync().ConfigureAwait(false);
@@ -128,7 +146,9 @@ public sealed partial class BbsConsoleSession
         {
             await WritePromptAsync().ConfigureAwait(false);
             string line = await ReadLineAsync().ConfigureAwait(false);
-            SessionAction action = await DispatchAsync(line).ConfigureAwait(false);
+            SessionAction action = _mode == InterfaceMode.Plain
+                ? await DispatchPlainAsync(line).ConfigureAwait(false)
+                : await DispatchAsync(line).ConfigureAwait(false);
             switch (action)
             {
                 case SessionAction.Bye:
@@ -153,6 +173,12 @@ public sealed partial class BbsConsoleSession
     /// </summary>
     private async Task GreetAsync()
     {
+        if (_mode == InterfaceMode.Plain)
+        {
+            await GreetPlainAsync().ConfigureAwait(false);
+            return;
+        }
+
         User user = _store.GetUser(_userCall)!;
 
         if (user.Name is null)
@@ -186,7 +212,9 @@ public sealed partial class BbsConsoleSession
     /// is the same for normal/new/expert users ([VERIFY-ORACLE #6]) so expert mode does not
     /// change it here.
     /// </summary>
-    private ValueTask WritePromptAsync() => WriteAsync(Inv($"de {_bbsName}>\r\n"));
+    private ValueTask WritePromptAsync() => _mode == InterfaceMode.Plain
+        ? WritePlainPromptAsync()
+        : WriteAsync(Inv($"de {_bbsName}>\r\n"));
 
     /// <summary>Sign-off line for B/Bye/NODE: <c>73 de &lt;BBSNAME&gt;</c> + CR (compat spec §1.2).</summary>
     private ValueTask WriteSignOffAsync() => WriteLineAsync(Inv($"73 de {_bbsName}"));
@@ -280,6 +308,14 @@ public sealed partial class BbsConsoleSession
                 await HandlePageLengthAsync(args).ConfigureAwait(false);
                 return SessionAction.Continue;
 
+            case "PLAIN":
+                // The escape hatch back to the plain-language surface (the plain-language
+                // mandate): a classic user types `plain` to flip + persist. Effective from the
+                // next prompt. Classic stays byte-identical otherwise — `plain` was never a
+                // W0RLI verb, so this adds a command without changing any existing one's bytes.
+                await SwitchToPlainAsync().ConfigureAwait(false);
+                return SessionAction.Continue;
+
             default:
                 break;
         }
@@ -336,6 +372,18 @@ public sealed partial class BbsConsoleSession
             "S[P|B|T] call [@ bbs] Send  SR n Reply  SC n call Copy  (end text with /ex or ctrl/z)\r" +
             "N name  Q qth  Z zip  Home bbs  I Info  I call User lookup  OP n Page length  D n Delivered\r";
         await WritePagedAsync(SplitConfigText(text), listing: false).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// The classic <c>plain</c> command: flip the surface back to plain, persist it and confirm
+    /// in plain English (the plain-language mandate). Effective from the next prompt — so this
+    /// reply is the last classic-surface output. Not a W0RLI verb, so it never collides with one.
+    /// </summary>
+    private async Task SwitchToPlainAsync()
+    {
+        _mode = InterfaceMode.Plain;
+        _settings.Save(_userCall, _settings.Load(_userCall) with { InterfaceMode = InterfaceMode.Plain });
+        await WriteLineAsync("Switched to the plain-language surface. Type classic to come back here.").ConfigureAwait(false);
     }
 
     /// <summary>

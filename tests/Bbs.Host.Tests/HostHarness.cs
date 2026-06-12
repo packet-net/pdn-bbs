@@ -58,6 +58,10 @@ internal sealed class HostHarness : IAsyncDisposable
                 BbsCallsign = OwnCall,
                 SysopCallsigns = [SysopCall],
                 Version = Version,
+                // These demux/wiring tests assert the byte-exact classic transcript (the surface
+                // is still supported); plain is the production default (HostComposition) and has
+                // its own coverage in Bbs.Console.Tests. Keep this harness on classic.
+                DefaultInterfaceMode = InterfaceMode.Classic,
             },
             UserSettings,
             Version,

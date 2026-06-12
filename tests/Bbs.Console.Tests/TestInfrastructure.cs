@@ -59,7 +59,13 @@ internal sealed class SessionHarness : IDisposable
 
     private readonly DirectoryInfo _dir;
 
-    public SessionHarness()
+    /// <param name="defaultMode">
+    /// The surface a never-set caller gets. Defaults to <see cref="InterfaceMode.Classic"/> so
+    /// the existing 193-test classic suite (the "classic is kept whole" guarantee) keeps
+    /// exercising the byte-exact W0RLI surface. The plain-surface tests pass
+    /// <see cref="InterfaceMode.Plain"/> — the real production default.
+    /// </param>
+    public SessionHarness(InterfaceMode defaultMode = InterfaceMode.Classic)
     {
         _dir = Directory.CreateTempSubdirectory("bbs-console-test-");
         Time = new FakeTimeProvider();
@@ -71,6 +77,7 @@ internal sealed class SessionHarness : IDisposable
             SysopCallsigns = [SysopCall],
             Version = "0.1.0",
             NodeVersion = "pdn 1.2.3",
+            DefaultInterfaceMode = defaultMode,
         };
     }
 

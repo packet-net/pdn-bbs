@@ -39,8 +39,10 @@ public sealed class HostCompositionTests
 
         // The lab flow: accept push + child Connected status push, then the caller's first
         // I-frame — through the real RhpNodeLink + InboundDemux as Program composes them.
+        // The production default surface is plain (the plain-language mandate), so this pins
+        // the plain greeting reaching the wire end-to-end and the plain `quit` signing off.
         FakeRhpPeer peer = await host.Server.AcceptChildAsync("M0ABC");
-        await peer.SendLineAsync("B");
+        await peer.SendLineAsync("quit");
 
         // Greet-immediately (compat spec §1.1/§3.1): the SID line leads. The composed
         // host's version is the assembly informational version, so pin the shape only.
@@ -48,9 +50,9 @@ public sealed class HostCompositionTests
         Assert.True(Sid.IsSidShaped(sidLine), $"First line was not SID-shaped: \"{sidLine}\"");
         Assert.StartsWith("[PDN-", sidLine, StringComparison.Ordinal);
 
-        Assert.Equal("Hello Alice. Latest Message is 0, Last listed is 0", await peer.ReadLineAsync());
-        Assert.Equal("de GB7PDN>", await peer.ReadLineAsync());
-        Assert.Equal("73 de GB7PDN", await peer.ReadLineAsync());
+        Assert.Equal("Hello and welcome to the GB7PDN mailbox.", await peer.ReadLineAsync());
+        Assert.Equal("You have no new mail. Type help if you'd like a hand.", await peer.ReadLineAsync());
+        Assert.Equal("GB7PDN ready, what next? 73 - thanks for calling GB7PDN. See you next time.", await peer.ReadLineAsync());
         await peer.WaitForHostCloseAsync();
     }
 }

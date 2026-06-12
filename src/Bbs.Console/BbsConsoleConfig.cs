@@ -27,6 +27,13 @@ public sealed record BbsConsoleConfig
     /// <summary>Default expert-mode state for users who have not toggled X (compat spec §1.3).</summary>
     public bool ExpertDefault { get; init; }
 
+    /// <summary>
+    /// The command surface a user sees when they have never chosen one (the plain-language
+    /// mandate, design.md). Defaults to <see cref="InterfaceMode.Plain"/> — plain is the
+    /// default; classic is opt-in. A sysop can pin a deployment to classic by setting this.
+    /// </summary>
+    public InterfaceMode DefaultInterfaceMode { get; init; } = InterfaceMode.Plain;
+
     /// <summary>BBS version string for the V command (compat spec §1.3 "BBS Version %s").</summary>
     public required string Version { get; init; }
 
