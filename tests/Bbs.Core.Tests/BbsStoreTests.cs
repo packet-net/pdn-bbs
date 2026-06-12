@@ -1,3 +1,4 @@
+using System.Text;
 using Microsoft.Data.Sqlite;
 
 namespace Bbs.Core.Tests;
@@ -169,6 +170,150 @@ public sealed class BbsStoreTests : IDisposable
 
         // Duplicate (case/SSID-collapsed) recipients fold; both targets present.
         Assert.Equal(["G8BPQ", "M0LTE"], stored.Recipients.Select(r => r.ToCall).Order());
+    }
+
+    // ------------------------------------------------ B2 completeness: To/Cc + attachments (§3.9)
+
+    [Fact]
+    public void AddMessage_StoresMultipleToAndCc_AndAttachments_RoundTrips()
+    {
+        byte[] a1 = [0x01, 0x02, 0x03, 0xFF, 0x00, 0x80];
+        byte[] a2 = Encoding.Latin1.GetBytes("attachment two\r\n");
+        Message stored = _ts.Store.AddMessage(new MessageDraft
+        {
+            Type = MessageType.Personal,
+            From = "M0LTE",
+            Recipients = ["G8BPQ", "G4XYZ"],   // two To
+            CcRecipients = ["M0ABC"],            // one Cc
+            Subject = "with files",
+            Body = Encoding.Latin1.GetBytes("body\r"),
+            Attachments =
+            [
+                new MessageAttachment("DATA.BIN", a1),
+                new MessageAttachment("notes.txt", a2),
+            ],
+        });
+
+        // Reopen so we assert the persisted rows, not an in-memory echo.
+        BbsStore reopened = _ts.Reopen();
+        Message loaded = reopened.GetMessage(stored.Number)!;
+
+        // Two To (cc=false) and one Cc (cc=true), To-first then Cc.
+        Assert.Equal(["G4XYZ", "G8BPQ"], loaded.Recipients.Where(r => !r.Cc).Select(r => r.ToCall).Order());
+        MessageRecipient cc = Assert.Single(loaded.Recipients, r => r.Cc);
+        Assert.Equal("M0ABC", cc.ToCall);
+
+        // Attachments present, in wire order, byte-exact.
+        Assert.Equal(2, loaded.Attachments.Count);
+        Assert.Equal("DATA.BIN", loaded.Attachments[0].Name);
+        Assert.Equal(a1, loaded.Attachments[0].Content.ToArray());
+        Assert.Equal("notes.txt", loaded.Attachments[1].Name);
+        Assert.Equal(a2, loaded.Attachments[1].Content.ToArray());
+
+        // The download accessor returns the bytes by exact stored name, and null for a name that
+        // does not match a stored row — including a traversal-shaped name (it can only ever match a
+        // row whose name is that exact string, and no stored name contains a path separator).
+        Assert.Equal(a1, reopened.GetAttachment(stored.Number, "DATA.BIN")!.Value.ToArray());
+        Assert.Null(reopened.GetAttachment(stored.Number, "../DATA.BIN"));
+        Assert.Null(reopened.GetAttachment(stored.Number, "DATA"));
+        Assert.Null(reopened.GetAttachment(stored.Number, "nope.bin"));
+    }
+
+    [Fact]
+    public void AddMessage_CcThatIsAlsoTo_FoldsToTheToRow()
+    {
+        // A callsign appearing in both To and Cc is one row, kept as a To (one row per callsign).
+        Message stored = _ts.Store.AddMessage(Drafts.Personal() with
+        {
+            Recipients = ["G8BPQ"],
+            CcRecipients = ["G8BPQ", "M0ABC"],
+        });
+
+        Assert.Equal("G8BPQ", Assert.Single(stored.Recipients, r => !r.Cc).ToCall);
+        Assert.Equal("M0ABC", Assert.Single(stored.Recipients, r => r.Cc).ToCall);
+    }
+
+    [Fact]
+    public void NoAttachmentsNoCc_LeavesCollectionsEmpty()
+    {
+        // The common path (B1/console/webmail compose) is unchanged: empty Cc + attachments.
+        Message stored = _ts.Store.AddMessage(Drafts.Personal());
+        Message loaded = _ts.Reopen().GetMessage(stored.Number)!;
+        Assert.Empty(loaded.Attachments);
+        Assert.All(loaded.Recipients, r => Assert.False(r.Cc));
+    }
+
+    [Fact]
+    public void Migration_FromV1Database_AddsCcColumnAndAttachmentsTable_DataSurvives()
+    {
+        // A v1 database (no `cc` column, no attachments table) with real data must upgrade on open
+        // — the live lab bbs.db predates this change and the change is additive. Produce a genuine
+        // v1 db: open at the current version (which has the full v1 surface), store a real message,
+        // then strip the v2 additions and reset the version stamp to 1 — exactly the on-disk shape a
+        // pre-v2 build left behind. Reopening must migrate it forward without touching the data.
+        string path = Path.Combine(Directory.CreateTempSubdirectory("bbs-migrate-").FullName, "v1.db");
+        long legacyNumber;
+        using (BbsStore seed = BbsStore.Open(path, "GB7PDN", _ts.Time))
+        {
+            legacyNumber = seed.AddMessage(Drafts.Personal(from: "G4XYZ", to: "M0LTE", subject: "legacy subject")).Number;
+        }
+
+        DowngradeToV1(path);
+
+        using BbsStore upgraded = BbsStore.Open(path, "GB7PDN", _ts.Time);
+        Assert.Equal(2, upgraded.SchemaVersion); // upgraded to current
+
+        // The pre-existing row survived and now reads through the v2 code (cc=false, no attachments).
+        Message loaded = upgraded.GetMessage(legacyNumber)!;
+        Assert.Equal("legacy subject", loaded.Subject);
+        MessageRecipient r = Assert.Single(loaded.Recipients);
+        Assert.Equal("M0LTE", r.ToCall);
+        Assert.False(r.Cc);
+        Assert.Empty(loaded.Attachments);
+
+        // And the new columns/table are writable on the upgraded db.
+        Message withFiles = upgraded.AddMessage(new MessageDraft
+        {
+            Type = MessageType.Personal,
+            From = "G4XYZ",
+            Recipients = ["M0LTE"],
+            CcRecipients = ["G8BPQ"],
+            Subject = "post-upgrade",
+            Body = Encoding.Latin1.GetBytes("x\r"),
+            Attachments = [new MessageAttachment("F.BIN", new byte[] { 9, 8, 7 })],
+        });
+        Message back = upgraded.GetMessage(withFiles.Number)!;
+        Assert.Contains(back.Recipients, x => x.Cc && x.ToCall == "G8BPQ");
+        Assert.Equal(new byte[] { 9, 8, 7 }, Assert.Single(back.Attachments).Content.ToArray());
+    }
+
+    /// <summary>Strips the v2 schema additions and resets the version stamp, leaving a genuine v1 db on disk.</summary>
+    private static void DowngradeToV1(string path)
+    {
+        using var connection = new SqliteConnection($"Data Source={path};Mode=ReadWrite;Pooling=False");
+        connection.Open();
+        Exec(connection, "DROP TABLE IF EXISTS attachments;");
+        // SQLite can't DROP COLUMN on a WITHOUT ROWID legacy table cleanly across versions; rebuild
+        // recipients without `cc` to reproduce the v1 shape exactly.
+        Exec(connection, "ALTER TABLE recipients RENAME TO recipients_v2;");
+        Exec(connection,
+            """
+            CREATE TABLE recipients(
+                message_number INTEGER NOT NULL REFERENCES messages(number) ON DELETE CASCADE,
+                to_call TEXT NOT NULL, read_utc INTEGER,
+                PRIMARY KEY(message_number, to_call)) WITHOUT ROWID;
+            """);
+        Exec(connection, "INSERT INTO recipients(message_number,to_call,read_utc) SELECT message_number,to_call,read_utc FROM recipients_v2;");
+        Exec(connection, "DROP TABLE recipients_v2;");
+        Exec(connection, "CREATE INDEX IF NOT EXISTS idx_recipients_to ON recipients(to_call);");
+        Exec(connection, "UPDATE meta SET value='1' WHERE key='schema_version';");
+    }
+
+    private static void Exec(SqliteConnection connection, string sql)
+    {
+        using var cmd = connection.CreateCommand();
+        cmd.CommandText = sql;
+        cmd.ExecuteNonQuery();
     }
 
     [Fact]

@@ -128,6 +128,219 @@ public class B2ForwardingInteropTests
     }
 
     /// <summary>
+    /// Outbound B2 COMPLETENESS: pdn proposes an FC for a message with TWO To-recipients, one Cc,
+    /// and one File: attachment, and the live LinBPQ oracle accepts (FS '+') and stores it. This
+    /// is the controllable direction (we author the exact B2 object), so it is the gold-standard
+    /// evidence for what real BPQMail does with a multi-recipient + attachment B2 object.
+    /// </summary>
+    /// <remarks>
+    /// ORACLE FINDING (multi-To / Cc / File on a received B2 — recorded from a LIVE run, .mes
+    /// captured below). The oracle accepts the FC and stores the object, but — unlike the raw
+    /// pass-through it does for a single-recipient B2 — it NORMALISES the recipient envelope on
+    /// receipt:
+    /// <list type="bullet">
+    /// <item>It STRIPS ITS OWN CALL from the To: list. We sent <c>To: GB7BPQ</c> + <c>To: G4ABC</c>;
+    /// the stored .mes keeps only <c>To: G4ABC</c> (GB7BPQ is the receiving BBS's own address — the
+    /// implied-AT — so BPQMail removes it as "already here"). It does NOT split into per-recipient
+    /// copies toward a single partner.</item>
+    /// <item>It DROPS the <c>Cc:</c> line entirely — a received B2's Cc is not retained in the .mes.</item>
+    /// <item>It FAITHFULLY PRESERVES the attachment: the <c>File: 45 PAYLOAD.TXT</c> header, the
+    /// name, and the exact attachment bytes all land in the stored file.</item>
+    /// </list>
+    /// So our codec emits the full multi-To/Cc/File object correctly (asserted on the wire below,
+    /// and end-to-end against another pdn in the host tests); a REAL LinBPQ then normalises To/Cc
+    /// at receipt but keeps the attachment. We assert what the oracle ACTUALLY does (the surviving
+    /// To, the dropped Cc, the preserved File + bytes) rather than forcing it to match our emission
+    /// — the finding the brief asked us to surface. Captured .mes from the live run:
+    /// <code>
+    /// MID: 69972_PDNBM
+    /// Type: Private
+    /// From: M0LTE
+    /// To: G4ABC            ← GB7BPQ (our own-call To) stripped; Cc: M0CCC dropped
+    /// Subject: pdn-b2-multi …
+    /// Body: 121
+    /// File: 45 PAYLOAD.TXT ← attachment header + name + bytes preserved
+    /// (R: line, body, then the attachment payload follow)
+    /// </code>
+    /// </remarks>
+    [Fact]
+    public async Task OutboundB2_MultiRecipientAndAttachment_OracleAcceptsAndStoresAllParts()
+    {
+        using var deadline = new CancellationTokenSource(TimeSpan.FromMinutes(3));
+        CancellationToken ct = deadline.Token;
+        using var host = new InteropBbsHost();
+
+        string nonce = string.Create(
+            CultureInfo.InvariantCulture,
+            $"{DateTimeOffset.UtcNow.ToUnixTimeSeconds()}-{Environment.ProcessId}-b2multi");
+        string bid = string.Create(
+            CultureInfo.InvariantCulture,
+            $"{DateTimeOffset.UtcNow.ToUnixTimeSeconds() % 100000:D5}_PDNBM");
+        string title = $"pdn-b2-multi {nonce}";
+        string bodyText = $"pdn-bbs B2 multi-recipient + attachment body {nonce}";
+        string attachmentText = $"attachment-payload-{nonce}";
+
+        var partner = new Partner { Call = "GB7BPQ", AtCalls = ["GB7BPQ"], AllowB2F = true };
+        host.Store.UpsertPartner(partner);
+
+        // 2 To + 1 Cc + 1 attachment. The primary To is GB7BPQ (routes onto this partner's queue);
+        // the second To + Cc ride the same object (the F-1 per-home model — one hop, full list).
+        Message stored = host.Store.AddMessage(new MessageDraft
+        {
+            Type = MessageType.Personal,
+            From = "M0LTE",
+            Recipients = ["GB7BPQ", "G4ABC"],
+            CcRecipients = ["M0CCC"],
+            At = "GB7BPQ",
+            Bid = bid,
+            Subject = title,
+            Body = Encoding.Latin1.GetBytes(bodyText + "\r"),
+            Attachments = [new MessageAttachment("PAYLOAD.TXT", Encoding.ASCII.GetBytes(attachmentText))],
+        });
+        host.Routing.RouteMessage(stored);
+        Assert.Equal(stored.Number, Assert.Single(host.Store.GetForwardQueue("GB7BPQ")).Number);
+
+        await using var endpoint = await Ax25Endpoint.AttachAsync(
+            OracleFixture.KissHost, OracleFixture.KissPort, InteropBbsHost.AxCall, ct);
+        Ax25ByteSession link = await endpoint.ConnectAsync(OracleFixture.OracleBbsCall, ct);
+
+        IReadOnlyList<OutboundItem> outbound = OutboundBuilder.Build(
+            host.Store.GetForwardQueue(partner.Call), partner, host.Identity,
+            TimeProvider.System, NullLogger.Instance);
+
+        // Sanity on the object we put on the wire: all parts present before the oracle sees it.
+        ReadOnlyMemory<byte>? wireObject = Assert.Single(outbound).Wire.B2Object;
+        Assert.NotNull(wireObject);
+        B2Message onWire = B2Message.Decode(wireObject.Value.Span);
+        Assert.Equal(2, onWire.To.Count);
+        Assert.Single(onWire.Cc);
+        Assert.Single(onWire.Files);
+
+        InteropFbbResult result = await host.Runner.RunCallerAsync(link, partner, outbound, ct);
+        await link.CloseAsync(ct);
+
+        Assert.True(
+            result.PeerSidRaw is { } sid && Sid.Parse(sid).SupportsB2,
+            $"the live oracle's SID did not advertise B2: '{result.PeerSidRaw}'");
+        Assert.True(result.B2Active, $"B2 was NOT negotiated; peer SID='{result.PeerSidRaw}'");
+        Assert.True(result.Completed, $"session did not complete; errors: {string.Join(" | ", result.ProtocolErrors)}");
+        Assert.Equal(FsAnswerKind.Accept, result.Verdicts[stored.Number]);
+        Assert.Empty(host.Store.GetForwardQueue("GB7BPQ"));
+
+        // The oracle decoded the FC, received the B2 object and stored it — poll the .mes.
+        string mes = await OracleFixture.WaitForMailFileAsync(nonce, TimeSpan.FromSeconds(20), ct);
+
+        // What a REAL LinBPQ does with our multi-To/Cc/File B2 (see the remarks' captured .mes):
+        Assert.Contains($"MID: {bid}", mes, StringComparison.Ordinal);
+        Assert.Contains(bodyText, mes, StringComparison.Ordinal);         // body survived
+
+        // The remaining (non-own-call) To survived; the oracle stripped its OWN call (GB7BPQ) from
+        // the To list — proving the multi-To envelope was decoded, then normalised "already here".
+        Assert.Contains("To: G4ABC", mes, StringComparison.Ordinal);
+        Assert.DoesNotContain("To: GB7BPQ", mes, StringComparison.Ordinal);
+
+        // The oracle dropped the Cc line at receipt (a documented BPQMail normalisation).
+        Assert.DoesNotContain("Cc: M0CCC", mes, StringComparison.Ordinal);
+
+        // The attachment is FAITHFULLY preserved — header, name, and exact bytes all on disk. This
+        // is the load-bearing evidence: a real node accepted + stored our File: part intact.
+        Assert.Contains("File: ", mes, StringComparison.Ordinal);
+        Assert.Contains("PAYLOAD.TXT", mes, StringComparison.Ordinal);
+        Assert.Contains(attachmentText, mes, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Inbound B2 receive path against the live node: the oracle dials pdn holding a B2 message and
+    /// pdn decodes + stores it through the multi-recipient/attachment-capable receiver. This pins
+    /// that the FC receive path a real LinBPQ drives lands a message intact; the genuine multi-To /
+    /// attachment DECODE is pinned at the host level (see the ORACLE FINDING).
+    /// </summary>
+    /// <remarks>
+    /// ORACLE FINDING (why inbound multi-To / attachment is NOT driven from a real LinBPQ here) —
+    /// recorded from live runs:
+    /// <list type="bullet">
+    /// <item>BPQMail's user message-entry rejects space-separated recipients
+    /// (<c>S M0LTE G4ABC @ …</c> → <c>*** Error: Invalid Format</c>).</item>
+    /// <item>The comma form (<c>S M0LTE,G4ABC @ …</c>) is ACCEPTED for entry but is treated as ONE
+    /// addressee token — it arrives over the wire as a single <c>To: M0LTE,</c> (truncated), NOT as
+    /// two <c>To:</c> lines. So a real LinBPQ's user-entry surface cannot ORIGINATE a genuine
+    /// multi-To B2 here.</item>
+    /// <item>The telnet entry surface (S / Title / Text / /EX) likewise has no attachment-upload
+    /// step, so it cannot originate a File:-bearing B2 either.</item>
+    /// </list>
+    /// Therefore the multi-To/Cc/File path is proven against a real node in the OUTBOUND direction
+    /// (the test above: we author the full object, the oracle accepts + stores it — attachment bytes
+    /// intact, To/Cc normalised per BPQMail), and the inbound DECODE of multi-To/Cc/File is pinned
+    /// at the host level (B2ForwardingTests.FullInboundB2Cycle_MultiRecipientAndAttachment_* and
+    /// InboundB2_MultiRecipientAndAttachments_*). This test confirms the live inbound FC receive +
+    /// store works end-to-end; it does not pretend the oracle can originate what it cannot. Precise,
+    /// surfaced boundary — not a silent gap.
+    /// </remarks>
+    [Fact]
+    public async Task InboundB2_LiveReceive_PdnDecodesAndStores()
+    {
+        using var deadline = new CancellationTokenSource(TimeSpan.FromMinutes(5));
+        CancellationToken ct = deadline.Token;
+        using var host = new InteropBbsHost();
+
+        string nonce = string.Create(
+            CultureInfo.InvariantCulture,
+            $"{DateTimeOffset.UtcNow.ToUnixTimeSeconds()}-{Environment.ProcessId}-b2recv");
+        string bodyText = $"oracle to pdn-bbs B2 inbound receive body {nonce}";
+
+        host.Store.UpsertPartner(new Partner { Call = "GB7BPQ-1", AtCalls = ["GB7BPQ"], AllowB2F = true });
+
+        await using var endpoint = await Ax25Endpoint.AttachAsync(
+            OracleFixture.KissHost, OracleFixture.KissPort, InteropBbsHost.AxCall, ct);
+
+        using (var telnet = await TelnetBbsClient.ConnectAsync(OracleFixture.KissHost, OracleFixture.TelnetPort, ct))
+        {
+            await telnet.LoginAndEnterBbsAsync(ct);
+            await telnet.PostMessageAsync("S M0LTE @ PDNBBS", $"pdn-b2-recv {nonce}", bodyText, ct);
+            await telnet.SignOffAsync(ct);
+        }
+
+        InteropFbbResult? delivered = null;
+        try
+        {
+            while (delivered is null)
+            {
+                Ax25ByteSession link;
+                try
+                {
+                    link = await endpoint.AcceptAsync(ct);
+                }
+                catch (OperationCanceledException)
+                {
+                    throw new TimeoutException("the oracle never dialled and delivered our B2 inbound message");
+                }
+
+                bool before = FindBySubject(host, nonce) is not null;
+                InteropFbbResult result = await host.Runner.RunAnswererAsync(link, ct);
+                await link.CloseAsync(ct);
+
+                if (!before && FindBySubject(host, nonce) is not null)
+                {
+                    delivered = result;
+                }
+            }
+        }
+        finally
+        {
+            await DrainOracleRedialsAsync(endpoint, host);
+        }
+
+        Assert.Contains(delivered.InboundProposals, p => p is FcProposal); // FC, not a B1 fallback
+        Assert.True(delivered.B2Active, "B2 was not negotiated for the oracle-dialled session");
+
+        // pdn decoded the B2 object and stored it through the (now multi-recipient-capable) receiver.
+        Message received = FindBySubject(host, nonce)!;
+        Assert.Equal(MessageType.Personal, received.Type);
+        Assert.Contains(received.Recipients, r => r.ToCall == "M0LTE" && !r.Cc);
+        Assert.Contains(bodyText, Encoding.Latin1.GetString(received.Body.Span), StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// Inbound: the live LinBPQ oracle dials pdn (as <c>GB7BPQ-1</c>) holding a personal queued
     /// for us, and — because the partner record is now <c>UseB2Protocol = 1</c> AND our answerer
     /// SID advertises B2 — proposes it as <c>FC EM</c> (B2), not FA (B1). pdn accepts the FC,

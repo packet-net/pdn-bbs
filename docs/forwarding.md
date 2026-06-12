@@ -23,7 +23,7 @@ Everything BPQMail's forwarding configuration can express, ours must too. The in
 | `FWD <partner> NOW` | console `FWD` sysop verb + webmail button + the scheduler nudge | F-2 |
 | `FWD QUEUE` inspection | console verb + webmail sysop view | F-2 |
 | `REROUTEMSGS` | **automatic** re-route on config apply (see wart 8) + explicit requeue surface | F-2 |
-| Per-recipient fan-out (BPQ copies per recipient) | currently first-recipient-only (named deferral) | F-1 |
+| Per-recipient fan-out (BPQ copies per recipient) | B2: full multi-To/Cc + File: attachments stored, relayed & downloadable (✅ shipped — see "B2F negotiation"); per-*home* fan-out (split into per-`@home` copies) still deferred — the message forwards once on the primary route carrying the full To: list, FBB's next hop re-distributes | ✅ B2 multi-recipient/attachment / per-home split F-1 |
 | Multi-partner topologies | any number of partners; deterministic tie-breaks | ✅ shipped |
 | WP-driven completion | WP consume (spec SHOULD) | F-3 |
 
@@ -95,7 +95,13 @@ B1 compressed forwarding is the lingua franca between BBSes and stays the defaul
 
 **Receiving a B2 object** runs through the *same* store/route path as a B1 inbound: the object decodes (`Mid → BID`, `From`, `To`, `Subject`, `Body`), is stored verbatim, and is subject to the identical dup-BID / size / R-chain loop-and-age holds and the home-BBS rules (local-delivery-beats-forwarding + auto-create-homed-user). The B2 `Body` we *send* is the same plaintext B1 would (R: chain + first-hop blank + body), so the receive-side loop/age guard is protocol-agnostic and B2 needs no special R-line handling.
 
-**Scope (slice 2, named deferrals):** the single-recipient personal/bulletin path — the one GB7RDG↔pdn exercises. B2F's *multi-recipient fan-out* (multiple `To:`/`Cc:`) and *File: attachment* transfer/storage are deferred (the codec handles them; the builder/receiver name only the first recipient and carry no attachments — the same first-recipient deferral the `FA` path already takes). That is the F-1 per-recipient fan-out work, tracked by a skipped test.
+**Scope — B2 completeness (multi-recipient + attachments) ✅ shipped (2026-06-12).** A received-or-relayed B2 carries its full envelope end-to-end: ALL `To:` are stored as To-recipients and ALL `Cc:` as Cc-recipients (the store's `recipients` table gained a `cc` flag), and ALL `File:` parts are stored byte-exact (a new `attachments` table) — `InboundMessageReceiver.DeliverFc` stores them; `OutboundBuilder.BuildB2Object` emits them so a relayed message carries its attachments + full recipient list onward; webmail renders the Cc list and offers per-attachment download links (`GET /messages/{n}/attachments/{name}`, recipient/sysop-gated, served from the DB BLOB by exact name — no filesystem path). The single-To/no-attachment wire is byte-identical to before (the GB7RDG↔pdn path is untouched). Schema migration is additive (`ALTER TABLE recipients ADD cc`; `CREATE TABLE attachments`) so the live lab db upgrades on open.
+
+Two **named deferrals remain** (visible, not silent):
+- **Per-*home* fan-out (F-1).** Recipients with a different `@home` than the primary are stored as recipients, but the message is forwarded ONCE on the primary's route carrying the full To: list (FBB's next hop re-distributes); we do not split into per-`@home` copies. This matches the single-`At` store model + the webmail compose.
+- **Webmail compose *upload* of attachments (local origination).** Out of scope for this slice — the receive + relay + download path is the slice. Composing a new message with an attachment from webmail is a follow-up.
+
+**Oracle finding (what a real LinBPQ does with a multi-To/Cc/File B2 — `B2ForwardingInteropTests`):** outbound, the live oracle accepts our FC and stores the object but NORMALISES the recipient envelope on receipt — it strips its OWN call from the `To:` list (the implied-AT "already here"), DROPS the `Cc:` line, and FAITHFULLY PRESERVES the `File:` attachment (header, name, exact bytes). Inbound, the oracle's telnet user-entry surface cannot ORIGINATE a genuine multi-To (space-separated → "Invalid Format"; comma → one literal addressee token) nor a File: attachment (no upload step), so the inbound multi-To/Cc/File DECODE is pinned at the host level; the live inbound FC receive + store is oracle-proven for the single-recipient object. We assert what the oracle actually does, not what our codec emits — surfaced, not forced.
 
 ## Configuration shape (the end state)
 
