@@ -1,0 +1,24 @@
+7plus golden-vector test data — provenance
+===========================================
+
+These files are reused verbatim as a validation oracle for the Bbs.SevenPlus
+codec. They are amateur-radio test data licensed "no commercial use, no sale,
+circulate freely" (the 7plus terms of Axel Bauda, DG1BBQ).
+
+Source: the reference implementation
+  https://github.com/packethacking/7plus-browser
+  (sample-data/ and test/fixtures/), itself built to be byte-faithful to the
+  original 7plus C (https://github.com/hb9xar/7plus, v2.21 / 990411).
+
+Files
+-----
+  fields.jpg          the original 145173-byte JPEG (decode target)
+  fields.p01 .. p11   the 17 encoded 7plus parts of fields.jpg
+                      (hex part numbers .p01..p11 = parts 1..17)
+  bbs-mail.txt        a real multi-file BBS mail dump containing 25 parts of
+                      four files (NORDKAPP.JPG x9, PINKSK_1.JPG x3,
+                      22-1-2_1.JPG x7 in scrambled order, SUNDAY.JPG x6),
+                      surrounded by mail headers/quoting — the scanner oracle.
+
+The C# codec is independent/clean-room; these vectors only pin that it agrees
+with the reference on the wire.
