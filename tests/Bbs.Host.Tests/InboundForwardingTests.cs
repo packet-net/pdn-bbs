@@ -57,8 +57,50 @@ public class InboundForwardingTests
         Assert.Equal("GB7BPQ", bid.FirstSeenFrom);
         Assert.Equal(stored.Number, bid.MessageNumber);
 
-        // Routing re-enqueued it for onward forwarding — to the wildcard partner, never
-        // back toward GB7BPQ (ReceivedFrom/BID/R-chain guards).
+        // Local delivery beats forwarding (design.md rule #1): this personal is @GB7PDN — our
+        // own callsign — so it is for a mailbox here and stays local. It must NOT leak onward to
+        // the wildcard partner, and of course never back toward GB7BPQ. (Onward forwarding of a
+        // genuinely-remote-addressed inbound message is covered by RoutesGenuinelyOnward below.)
+        Assert.Empty(host.Store.GetForwardQueue("GB7RDG"));
+        Assert.Empty(host.Store.GetForwardQueue("GB7BPQ"));
+    }
+
+    [Fact]
+    public async Task RoutesGenuinelyOnward_WhenInboundIsAddressedElsewhere()
+    {
+        // Companion to the test above: an inbound personal whose AT is NOT us and whose TO is
+        // not a local user is genuine transit — it still routes onward through the wildcard
+        // partner, never back toward the sender. Confirms the local-first rule does not block
+        // legitimate forwarding.
+        await using var host = new HostHarness();
+        host.Store.UpsertPartner(new Partner { Call = "GB7BPQ" });
+        host.Store.UpsertPartner(new Partner { Call = "GB7RDG", AtCalls = ["*"] });
+        await host.StartLinkAsync();
+        host.StartDemux();
+
+        FakeRhpPeer peer = await host.Server.AcceptChildAsync("GB7BPQ");
+        await peer.SendLineAsync(PeerSid);
+        Assert.Equal("[PDN-0.1.0-B1FHM$]", await peer.ReadLineAsync());
+        Assert.Equal("de GB7PDN>", await peer.ReadLineAsync());
+
+        const string body = "R:260611/1000Z 44@GB7BPQ.#23.GBR.EURO BPQ6.0.24\r\rOnward.\r";
+        // @GB7BSK — a remote BBS, not us — so this is genuine onward transit.
+        string proposal = string.Create(
+            CultureInfo.InvariantCulture, $"FA P M0XYZ GB7BSK G4XYZ 124_GB7BPQ {body.Length}");
+        await peer.SendLineAsync(proposal);
+        await peer.SendLineAsync(ProposalBlock.BuildTerminator(ProposalBlock.ComputeChecksum([proposal])));
+
+        Assert.Equal("FS +", await peer.ReadLineAsync());
+
+        byte[] wire = BlockFraming.EncodeMessage(
+            "Onward subject", 0, LzhufContainer.Encode(LzhufContainerKind.B1, Encoding.Latin1.GetBytes(body)));
+        await peer.SendBytesAsync(wire);
+
+        Assert.Equal("FF", await peer.ReadLineAsync());
+        await peer.SendLineAsync("FQ");
+        await peer.WaitForHostCloseAsync();
+
+        Message stored = Assert.Single(host.Store.ListMessages(new MessageQuery()));
         Assert.Equal(stored.Number, Assert.Single(host.Store.GetForwardQueue("GB7RDG")).Number);
         Assert.Empty(host.Store.GetForwardQueue("GB7BPQ"));
     }

@@ -203,6 +203,29 @@ public sealed class BbsStoreTests : IDisposable
     }
 
     [Fact]
+    public void UserExists_MatchesOnBaseCallsign_CaseAndSsidInsensitive()
+    {
+        Assert.False(_ts.Store.UserExists("M0LTE"));
+
+        _ts.Store.UpsertUser(new User { Callsign = "m0lte", Name = "Tom" });
+
+        // Case-insensitive and SSID-agnostic on the lookup side (the routing TO is base-call).
+        Assert.True(_ts.Store.UserExists("M0LTE"));
+        Assert.True(_ts.Store.UserExists("m0lte"));
+        Assert.True(_ts.Store.UserExists("M0LTE-7"));
+        Assert.False(_ts.Store.UserExists("M0XYZ"));
+
+        // A stored record carrying an SSID is still found by its base call.
+        _ts.Store.UpsertUser(new User { Callsign = "G4ABC-2", Name = "Ann" });
+        Assert.True(_ts.Store.UserExists("G4ABC"));
+        Assert.True(_ts.Store.UserExists("G4ABC-9"));
+
+        // A base call must not match an unrelated call that merely shares a prefix.
+        Assert.False(_ts.Store.UserExists("G4AB"));
+        Assert.False(_ts.Store.UserExists("G4ABCD"));
+    }
+
+    [Fact]
     public void Partners_RoundTrip_AndListOrderedByCall()
     {
         var partner = new Partner

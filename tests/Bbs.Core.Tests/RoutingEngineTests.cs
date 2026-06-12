@@ -33,6 +33,105 @@ public sealed class RoutingEngineTests
         RouteChainCalls = chain,
     };
 
+    private static RoutingRequest LocalUserPersonal(string to, string? at) => new()
+    {
+        Type = MessageType.Personal,
+        ToCall = to,
+        At = at,
+        ToIsLocalUser = true,
+    };
+
+    // ------------------------------------------- local delivery beats forwarding (design.md #1)
+
+    [Fact]
+    public void LocalDelivery_NoAt_ToLocalUser_NeverLeaksToWildcardPartner()
+    {
+        // THE leak: a wildcard-AT default route (GB7RDG's @WW/* — already live on the lab)
+        // must never swallow a local user's personal mail with no AT. design.md "The home-BBS
+        // requirement" rule #1: this stays local — zero forward targets. Restores LinBPQ's own
+        // "already here" local-first behaviour [BPQ-SRC CheckAndSend].
+        var wildcard = P("GB7RDG", at: ["WW", "*"]);
+
+        RoutingDecision decision = Engine.Route(LocalUserPersonal("M0LTE", null), [wildcard]);
+
+        Assert.Empty(decision.Targets);
+        Assert.False(decision.IsFlood);
+    }
+
+    [Fact]
+    public void LocalDelivery_AtIsOurOwnCall_ZeroTargets()
+    {
+        // AT names our own callsign → for a local mailbox here, never forwarded.
+        var wildcard = P("GB7RDG", at: ["*"]);
+        RoutingDecision decision = Engine.Route(Personal("M0LTE", "GB7PDN"), [wildcard]);
+        Assert.Empty(decision.Targets);
+    }
+
+    [Fact]
+    public void LocalDelivery_AtUnderOurHa_ZeroTargets()
+    {
+        // AT is a full address under our own H-Route (GB7PDN.#23.GBR.EURO) → resolves to us.
+        var wildcard = P("GB7RDG", at: ["*"]);
+        RoutingDecision decision = Engine.Route(Personal("M0LTE", "GB7PDN.#23.GBR.EURO"), [wildcard]);
+        Assert.Empty(decision.Targets);
+    }
+
+    [Fact]
+    public void LocalDelivery_NoAt_NonLocalUser_StillRoutesToWildcard()
+    {
+        // The rule must not over-suppress: a no-AT personal whose TO is NOT a local user still
+        // falls through to the wildcard default route, exactly as before.
+        var wildcard = P("GB7RDG", at: ["*"]);
+        RoutingDecision decision = Engine.Route(Personal("G8ABC", null), [wildcard]);
+        Assert.Equal("GB7RDG", Assert.Single(decision.Targets).PartnerCall);
+        Assert.Equal(RouteReason.WildcardAt, decision.Targets[0].Reason);
+    }
+
+    [Fact]
+    public void LocalDelivery_ExplicitRemoteAt_StillForwards_EvenIfToIsLocalUser()
+    {
+        // Explicit AT naming a REMOTE bbs wins: even when TO happens to be a known local user,
+        // the message is addressed elsewhere and must still forward there.
+        var remote = P("GB7BSK", at: ["GB7BSK"]);
+
+        RoutingDecision decision = Engine.Route(
+            new RoutingRequest
+            {
+                Type = MessageType.Personal,
+                ToCall = "M0LTE",
+                At = "GB7BSK",
+                ToIsLocalUser = true,
+            },
+            [remote]);
+
+        RouteTarget target = Assert.Single(decision.Targets);
+        Assert.Equal("GB7BSK", target.PartnerCall);
+    }
+
+    [Fact]
+    public void LocalDelivery_DoesNotAffectBulletins()
+    {
+        // Regression guard: the pre-empt is P-only. A flood bulletin in our target area still
+        // floods even though ToIsLocalUser is meaningless for it (and would be false anyway).
+        var partner = P("GB7AAA", hr: ["WW"], bbsHa: "GB7AAA.#23.GBR.EURO");
+        RoutingDecision decision = Engine.Route(
+            new RoutingRequest { Type = MessageType.Bulletin, ToCall = "ALL", At = "GBR.EU" },
+            [partner]);
+        Assert.True(decision.IsFlood);
+        Assert.Single(decision.Targets);
+    }
+
+    [Fact]
+    public void LocalDelivery_DoesNotAffectTraffic()
+    {
+        // Regression guard: NTS traffic routing is untouched by the personal local-first rule.
+        var partner = P("W4NFL", to: ["321*"]);
+        RoutingDecision decision = Engine.Route(
+            new RoutingRequest { Type = MessageType.Traffic, ToCall = "32118", At = "NTSFL" },
+            [partner]);
+        Assert.Equal("W4NFL", Assert.Single(decision.Targets).PartnerCall);
+    }
+
     // ---------------------------------------------------------------- P: the single-copy chain
 
     [Fact]

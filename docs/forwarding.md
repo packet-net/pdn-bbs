@@ -14,6 +14,7 @@ Everything BPQMail's forwarding configuration can express, ours must too. The in
 | Forward time windows (`FWDTimes`) | `times: ["02:00-06:00", …]` — human-readable ranges, TimeProvider-scheduled | F-1 |
 | TO / AT (incl. implied-AT) / HR routing lists | `to`/`at`/`hr` + `bbsHa` | ✅ shipped |
 | Single-copy best-HR-depth for P; bulletin flood | RoutingEngine | ✅ shipped (oracle-proven) |
+| **Local delivery beats forwarding** (the home-BBS rule) | RoutingEngine pre-empt for personals: AT-is-us (own call / under our HA) or no-AT + TO-is-a-local-user → **zero forward targets**; the wildcard-AT leak that a faithful single-copy port otherwise opens. Restores LinBPQ's own "already here" local-first behaviour [BPQ-SRC CheckAndSend] | ✅ shipped — pinned by tests (the leak test verified red on the pre-rule code), see design.md § The home-BBS requirement rule #1 |
 | NTS routing by TO wildcards | T-type routing | F-3 (spec SHOULD) |
 | Per-partner protocol options (B/B1/B2, MaxBlock) | `protocol:` block (b1 default; maxBlock F-1; **b2 promoted to F-1** — the GB7RDG config snapshot shows B2F is the production lingua franca, 7 of its 9 enabled partners; B1F suffices for the GB7RDG↔us pair itself) | F-1 |
 | Per-partner size caps (MaxRX/MaxTX) | `maxRx`/`maxTx` | ✅ shipped |
@@ -116,7 +117,7 @@ partners:
 ## Build waves
 
 - **F-0 (in flight):** greet-first demux + full §4.4 connect scripts with per-step timeouts and attempt transcripts.
-- **F-1 — parity + the home-BBS rule:** **local-delivery-beats-forwarding** (at-is-us / TO-is-local-user → zero targets; the wildcard-AT leak pinned by tests — see design.md § The home-BBS requirement) + auto-create users on inbound personals; time windows, `collect` (timed empty-queue polling — opt-in safety net for partners that cannot dial us; in-session reverse already shipped), per-recipient fan-out, the `protocol:` block (maxBlock enforcement; B2F — promoted, it is the production lingua franca), `priority`.
+- **F-1 — parity + the home-BBS rule:** **local-delivery-beats-forwarding** (at-is-us / TO-is-local-user → zero targets; the wildcard-AT leak pinned by tests — see design.md § The home-BBS requirement) — **✅ landed** (feat/local-delivery-rule: the `RoutingEngine` personal pre-empt + `BbsStore.UserExists` + the leak/regression test suite) + auto-create users on inbound personals (still F-1); time windows, `collect` (timed empty-queue polling — opt-in safety net for partners that cannot dial us; in-session reverse already shipped), per-recipient fan-out, the `protocol:` block (maxBlock enforcement; B2F — promoted, it is the production lingua franca), `priority`.
 - **F-2 — the de-warting ops layer:** health tracking + session stats, auto-re-route-on-config-apply, console `FWD`/`ROUTE?` verbs, the webmail sysop pages.
 - **F-3 — spec SHOULDs that touch forwarding:** NTS routing, WP consumption AND emission (announcing homed users to the network — promoted by the home-BBS requirement), B2F.
 
