@@ -4,6 +4,7 @@
     <Project Path="src/Bbs.Core/Bbs.Core.csproj" />
     <Project Path="src/Bbs.Fbb/Bbs.Fbb.csproj" />
     <Project Path="src/Bbs.Host/Bbs.Host.csproj" />
+    <Project Path="src/Bbs.SevenPlus/Bbs.SevenPlus.csproj" />
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/Bbs.Console.Tests/Bbs.Console.Tests.csproj" />
@@ -11,5 +12,6 @@
     <Project Path="tests/Bbs.Fbb.Tests/Bbs.Fbb.Tests.csproj" />
     <Project Path="tests/Bbs.Host.Tests/Bbs.Host.Tests.csproj" />
     <Project Path="tests/Bbs.Interop.Tests/Bbs.Interop.Tests.csproj" />
+    <Project Path="tests/Bbs.SevenPlus.Tests/Bbs.SevenPlus.Tests.csproj" />
   </Folder>
 </Solution>
