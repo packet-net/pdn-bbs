@@ -36,9 +36,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: '10.0.x'
+      # dotnet is pre-installed on the self-hosted runners (as in ci.yml + packet.net's
+      # workflows); setup-dotnet@v4 fails on them ("mkdir: Permission denied" — it can't
+      # write its install dir as the runner user). Use the runner's SDK directly.
+      - name: dotnet version
+        run: dotnet --version
 
       - id: v
         name: Resolve version
