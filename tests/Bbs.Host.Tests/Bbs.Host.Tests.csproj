@@ -31,6 +31,15 @@
     <ProjectReference Include="..\..\src\Bbs.Fbb\Bbs.Fbb.csproj" />
     <ProjectReference Include="..\..\src\Bbs.Core\Bbs.Core.csproj" />
     <ProjectReference Include="..\..\src\Bbs.Console\Bbs.Console.csproj" />
+    <ProjectReference Include="..\..\src\Bbs.SevenPlus\Bbs.SevenPlus.csproj" />
+  </ItemGroup>
+
+  <!-- The reference 7plus golden-vector payload (fields.jpg): encoded at test time into the exact
+       reference parts (GoldenVectorTests proves encode reproduces them byte-for-byte) and fed as
+       inbound part-bulletins for the end-to-end assembly test. Same provenance as the SevenPlus
+       fixtures — freely-circulatable amateur test data. -->
+  <ItemGroup>
+    <EmbeddedResource Include="Resources\**" />
   </ItemGroup>
 
 </Project>

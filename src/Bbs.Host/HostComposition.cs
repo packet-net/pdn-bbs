@@ -86,8 +86,11 @@ public static class HostComposition
             new RhpNodeLink(linkOptions, time, sp.GetRequiredService<ILogger<RhpNodeLink>>()));
         builder.Services.AddSingleton(sp =>
             new RoutingService(store, engine, sp.GetRequiredService<ILogger<RoutingService>>()));
+        builder.Services.AddSingleton(sp => new SevenPlusAssembler(
+            store, sp.GetRequiredService<ILogger<SevenPlusAssembler>>()));
         builder.Services.AddSingleton(sp => new InboundMessageReceiver(
-            store, sp.GetRequiredService<RoutingService>(), engine, baseCallsign, time,
+            store, sp.GetRequiredService<RoutingService>(), engine,
+            sp.GetRequiredService<SevenPlusAssembler>(), baseCallsign, time,
             sp.GetRequiredService<ILogger<InboundMessageReceiver>>()));
         builder.Services.AddSingleton(sp => new FbbSessionRunner(
             store, sp.GetRequiredService<InboundMessageReceiver>(), identity, version, time,

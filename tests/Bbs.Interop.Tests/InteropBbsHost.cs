@@ -35,8 +35,9 @@ internal sealed class InteropBbsHost : IDisposable
         Identity = new BbsIdentity { Callsign = OwnCall, HRoute = HRoute, SoftwareVersion = "PDN" + Version };
         var engine = new RoutingEngine(OwnCall, HRoute);
         Routing = new RoutingService(Store, engine, NullLogger<RoutingService>.Instance);
+        var sevenPlus = new SevenPlusAssembler(Store, NullLogger<SevenPlusAssembler>.Instance);
         Receiver = new InboundMessageReceiver(
-            Store, Routing, engine, OwnCall, TimeProvider.System, NullLogger<InboundMessageReceiver>.Instance);
+            Store, Routing, engine, sevenPlus, OwnCall, TimeProvider.System, NullLogger<InboundMessageReceiver>.Instance);
         Runner = new Ax25FbbSessionRunner(Store, Receiver, Identity, Version, TimeProvider.System);
     }
 

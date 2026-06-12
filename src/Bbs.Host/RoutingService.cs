@@ -89,6 +89,16 @@ public sealed class RoutingService
             return;
         }
 
+        // local_only is a local presentation artifact (the synthesized 7plus assembled-file message,
+        // schema v3) — it MUST never reach a forward queue. Skip it before any partner is considered
+        // (the store also keeps its BID out of the dedup store; together these are the forward-safety
+        // guarantee). design.md "abstract 7plus away from the user".
+        if (message.LocalOnly)
+        {
+            LogLocalOnly(_logger, message.Number, null);
+            return;
+        }
+
         IReadOnlyList<Partner> partners = _store.ListPartners();
         if (partners.Count == 0)
         {
@@ -176,6 +186,10 @@ public sealed class RoutingService
     private static readonly Action<ILogger, long, Exception?> LogNoRoute =
         LoggerMessage.Define<long>(LogLevel.Debug, new EventId(1, "NoRoute"),
             "Routing trace: no match for message {Number}");
+
+    private static readonly Action<ILogger, long, Exception?> LogLocalOnly =
+        LoggerMessage.Define<long>(LogLevel.Debug, new EventId(3, "LocalOnly"),
+            "Routing trace: message {Number} is local_only — never forwarded");
 
     private static readonly Action<ILogger, long, string, Exception?> LogRouted =
         LoggerMessage.Define<long, string>(LogLevel.Information, new EventId(2, "Routed"),
