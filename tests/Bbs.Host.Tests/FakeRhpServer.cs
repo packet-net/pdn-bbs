@@ -29,6 +29,7 @@ internal sealed class FakeRhpServer : IAsyncDisposable
     private readonly List<Conn> _conns = [];
     private readonly ConcurrentDictionary<int, Channel<byte[]>> _hostBytes = new();
     private readonly ConcurrentDictionary<int, Conn> _handleConns = new();
+    private readonly ConcurrentDictionary<int, byte> _disconnectedHandles = new();
     private TcpListener? _listener;
     private CancellationTokenSource? _cts;
     private int _nextHandle = 100;
@@ -164,6 +165,15 @@ internal sealed class FakeRhpServer : IAsyncDisposable
 
     internal void OnHandleOwned(int handle, Conn conn) => _handleConns[handle] = conn;
 
+    /// <summary>
+    /// Marks a child handle as far-end-disconnected: a subsequent host `send` on it is
+    /// refused with errCode 17 ("Not connected"), exactly as the real node reports a write
+    /// to a stream whose peer has already dropped the AX.25 link.
+    /// </summary>
+    internal void MarkHandleDisconnected(int handle) => _disconnectedHandles[handle] = 1;
+
+    internal bool IsHandleDisconnected(int handle) => _disconnectedHandles.ContainsKey(handle);
+
     internal void OnClosedByHost(int handle)
     {
         Closes.Writer.TryWrite(handle);
@@ -213,6 +223,9 @@ internal sealed class FakeRhpServer : IAsyncDisposable
 
         /// <summary>Drops the TCP connection (the host sees a dead node).</summary>
         public void Kill() => tcp.Dispose();
+
+        /// <summary>Marks one child handle far-end-disconnected (sends on it then fail).</summary>
+        public void MarkDisconnected(int handle) => server.MarkHandleDisconnected(handle);
 
         /// <inheritdoc/>
         public void Dispose()
@@ -308,6 +321,15 @@ internal sealed class FakeRhpServer : IAsyncDisposable
 
                 case "send":
                 {
+                    if (server.IsHandleDisconnected(handle))
+                    {
+                        // A write to a stream whose far end has dropped: errCode 17 "Not
+                        // connected" (the real node's reply — RhpChildConnection surfaces it
+                        // as a throw from SendAsync).
+                        await ReplyAsync("sendReply", id, 17, handle, "Not connected").ConfigureAwait(false);
+                        break;
+                    }
+
                     byte[] data = FromWireString(request["data"]?.GetValue<string>() ?? "");
                     server.HostBytes(handle).Writer.TryWrite(data);
                     await ReplyAsync("sendReply", id, 0, handle).ConfigureAwait(false);
@@ -326,13 +348,13 @@ internal sealed class FakeRhpServer : IAsyncDisposable
             }
         }
 
-        private Task ReplyAsync(string type, JsonNode? id, int errCode, int? handle = null)
+        private Task ReplyAsync(string type, JsonNode? id, int errCode, int? handle = null, string? errText = null)
         {
             var reply = new JsonObject
             {
                 ["type"] = type,
                 ["errCode"] = errCode,
-                ["errText"] = errCode == 0 ? "Ok" : "Error",
+                ["errText"] = errText ?? (errCode == 0 ? "Ok" : "Error"),
             };
             if (id is not null)
             {
@@ -475,6 +497,13 @@ internal sealed class FakeRhpPeer
         ["type"] = "close",
         ["handle"] = Handle,
     });
+
+    /// <summary>
+    /// Simulates the far end dropping the AX.25 link without a tidy close: subsequent host
+    /// sends on this handle are refused ("17 Not connected"). Models a LinBPQ that disconnects
+    /// the instant it has received everything — before our closing <c>FQ</c> reaches the wire.
+    /// </summary>
+    public void MarkDisconnected() => _conn.MarkDisconnected(Handle);
 
     /// <summary>Non-blocking line read: drains whatever the host already sent.</summary>
     public bool TryReadLine(out string line)

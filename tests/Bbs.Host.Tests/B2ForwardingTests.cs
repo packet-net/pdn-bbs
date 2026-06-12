@@ -2,6 +2,9 @@ using System.Globalization;
 using System.Text;
 using Bbs.Core;
 using Bbs.Fbb;
+using Bbs.Host.Forwarding;
+using Bbs.Host.Rhp;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace Bbs.Host.Tests;
 
@@ -301,6 +304,72 @@ public class B2ForwardingTests
         Assert.Equal("FQ", await peer.ReadLineAsync());
         await peer.WaitForHostCloseAsync();
 
+        Assert.Empty(host.Store.GetForwardQueue("GB7BPQ"));
+        Assert.Equal(MessageStatus.Forwarded, host.Store.GetMessage(stored.Number)!.Status);
+    }
+
+    // --- Teardown race: the caller's closing FQ vs a peer that drops on its FF ---
+
+    [Fact]
+    public async Task OutboundB2Cycle_PeerDropsLinkOnItsFf_StillGracefulAndForwarded()
+    {
+        // The live GB7RDG B2 go-live (2026-06-12) surfaced this: a real LinBPQ that has
+        // FS-accepted and received our message drops the AX.25 link the instant it sends its
+        // closing FF — before our courtesy FQ reaches the wire (spec §3.1 step 5, "the side
+        // receiving FQ disconnects", taken eagerly). The node then refuses our FQ ("17 Not
+        // connected"). That MUST NOT turn a fully delivered cycle into a failure + backoff
+        // retry: every message was delivered and FS-resolved, so the close is graceful. The
+        // fix is protocol-agnostic; exercised here on the B2 path that surfaced it.
+        await using var host = new HostHarness();
+        host.Store.UpsertPartner(new Partner
+        {
+            Call = "GB7BPQ",
+            AllowB2F = true,
+            AtCalls = ["*"],
+            ConnectScript = ["C GB7BPQ-1"],
+            ForwardNewImmediately = true,
+        });
+        await host.StartLinkAsync();
+
+        Message stored = host.Store.AddMessage(new MessageDraft
+        {
+            Type = MessageType.Personal,
+            From = "M0LTE",
+            Recipients = ["G8ABC"],
+            Subject = "B2 teardown",
+            Body = Encoding.Latin1.GetBytes("B2 body, peer hangs up on its FF.\r"),
+        });
+        host.Routing.RouteMessage(stored);
+
+        Partner partner = host.Store.GetPartner("GB7BPQ")!;
+        IReadOnlyList<OutboundItem> outbound = OutboundBuilder.Build(
+            host.Store.GetForwardQueue("GB7BPQ"), partner, host.Identity, host.Time, NullLogger.Instance);
+
+        // Drive the caller directly so we can assert the session's graceful verdict (the
+        // scheduler would swallow the difference — the message is MarkForwarded either way).
+        RhpChildConnection child = await host.Link.OpenAsync("GB7BPQ-1", null, host.Token);
+        FakeRhpPeer peer = await host.Server.NextOpenAsync();
+        Task<FbbSessionResult> run = host.Runner.RunCallerAsync(child, partner, outbound, host.Token);
+
+        await peer.SendLineAsync(B2PeerSid);
+        await peer.SendTextAsync("de GB7BPQ>\r");
+        Assert.Equal(OurB2Sid, await peer.ReadLineAsync());
+        Assert.StartsWith("FC EM ", await peer.ReadLineAsync(), StringComparison.Ordinal);
+        await peer.ReadLineAsync(); // F> checksum terminator
+
+        await peer.SendLineAsync("FS +");
+        var reader = new FbbBlockReader();
+        byte[] leftover = await InboundForwardingTests.ReadOneTransferAsync(peer, reader);
+        peer.PushBackForLines(leftover);
+
+        // The peer drops the link, THEN sends its closing FF: the host reacts to FF by sending
+        // its FQ, and that send is refused ("Not connected") because the far end is already gone.
+        peer.MarkDisconnected();
+        await peer.SendLineAsync("FF");
+
+        FbbSessionResult result = await run.WaitAsync(TestTimeout.Default);
+        Assert.True(result.Completed);
+        Assert.True(result.Graceful); // the dropped closing FQ is not a cycle failure
         Assert.Empty(host.Store.GetForwardQueue("GB7BPQ"));
         Assert.Equal(MessageStatus.Forwarded, host.Store.GetMessage(stored.Number)!.Status);
     }

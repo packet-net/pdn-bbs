@@ -187,12 +187,14 @@ public sealed class FbbSessionRunner
             {
                 case FbbSendLine line:
                     // "the transport MUST append CRLF" (FbbSendLine contract, spec §3.13.2).
-                    await child.SendAsync(Encoding.Latin1.GetBytes(line.Line + "\r\n"), cancellationToken)
+                    await SendToleratingCloseAsync(
+                        child, session, state, Encoding.Latin1.GetBytes(line.Line + "\r\n"), cancellationToken)
                         .ConfigureAwait(false);
                     break;
 
                 case FbbSendBytes bytes:
-                    await child.SendAsync(bytes.Data, cancellationToken).ConfigureAwait(false);
+                    await SendToleratingCloseAsync(child, session, state, bytes.Data, cancellationToken)
+                        .ConfigureAwait(false);
                     break;
 
                 case FbbProposalsReceived proposals:
@@ -224,6 +226,36 @@ public sealed class FbbSessionRunner
                 default:
                     break;
             }
+        }
+    }
+
+    /// <summary>
+    /// Sends one chunk, tolerating a peer disconnect once the FSM has already reached a
+    /// terminal phase. The caller's closing courtesy is <c>FQ</c> after the peer's final
+    /// <c>FF</c> (spec §3.1 step 5: "the side receiving FQ disconnects") — but a real LinBPQ
+    /// that has received everything drops the link the instant it sends that <c>FF</c>, before
+    /// our <c>FQ</c> goes out, so the node reports the handle gone ("Not connected"). Every
+    /// message was already proposed, FS-resolved and (for accepts) transferred — the FSM's
+    /// graceful verdict stands — so a failure on the *closing* line is logged, not raised: it
+    /// must not turn a fully delivered cycle into a scheduler failure + backoff retry. A send
+    /// that fails BEFORE the FSM terminated (a mid-session body or proposal) is a genuine drop
+    /// and propagates unchanged.
+    /// </summary>
+    private async Task SendToleratingCloseAsync(
+        RhpChildConnection child,
+        FbbSession session,
+        RunState state,
+        ReadOnlyMemory<byte> data,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            await child.SendAsync(data, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException
+            && session.Phase is FbbSessionPhase.Finished or FbbSessionPhase.Failed)
+        {
+            LogCloseRace(_logger, state.PartnerCall, ex.Message, null);
         }
     }
 
@@ -287,4 +319,9 @@ public sealed class FbbSessionRunner
     private static readonly Action<ILogger, long, string, Exception?> LogDeferred =
         LoggerMessage.Define<long, string>(LogLevel.Information, new EventId(5, "Deferred"),
             "Message {Number} deferred by {Partner}; left queued");
+
+    private static readonly Action<ILogger, string, string, Exception?> LogCloseRace =
+        LoggerMessage.Define<string, string>(LogLevel.Information, new EventId(6, "CloseRace"),
+            "Forwarding session with {Partner} closed: peer dropped the link before our FQ ({Detail}); "
+            + "all messages were delivered — treated as a graceful close");
 }
