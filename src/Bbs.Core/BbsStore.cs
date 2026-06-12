@@ -634,6 +634,40 @@ public sealed class BbsStore : IDisposable
         }
     }
 
+    /// <summary>
+    /// True when <paramref name="callsign"/> is a known local user, compared on the base
+    /// (SSID-stripped) callsign — a personal mailbox is owned by the base call, while a stored
+    /// record may or may not carry an SSID (<see cref="Callsigns.BaseEquals"/> semantics). Used
+    /// by the host's routing to keep local users' mail local rather than letting a wildcard-AT
+    /// partner swallow it (design.md "The home-BBS requirement" rule #1).
+    /// </summary>
+    public bool UserExists(string callsign)
+    {
+        ArgumentNullException.ThrowIfNull(callsign);
+        string baseCall = Callsigns.StripSsid(Callsigns.Normalize(callsign));
+        if (baseCall.Length == 0)
+        {
+            return false;
+        }
+
+        lock (_gate)
+        {
+            // Match a stored bare base call ($base) or one carrying an SSID ($base-…).
+            using SqliteCommand cmd = Command(null,
+                "SELECT 1 FROM users WHERE callsign=$base OR callsign LIKE $prefix ESCAPE '\\' LIMIT 1;");
+            cmd.Parameters.AddWithValue("$base", baseCall);
+            cmd.Parameters.AddWithValue("$prefix", EscapeLike(baseCall) + "-%");
+            using SqliteDataReader reader = cmd.ExecuteReader();
+            return reader.Read();
+        }
+    }
+
+    /// <summary>Escapes SQL LIKE metacharacters in a literal prefix (used with <c>ESCAPE '\'</c>).</summary>
+    private static string EscapeLike(string value)
+        => value.Replace("\\", "\\\\", StringComparison.Ordinal)
+            .Replace("%", "\\%", StringComparison.Ordinal)
+            .Replace("_", "\\_", StringComparison.Ordinal);
+
     /// <summary>All users, ordered by callsign.</summary>
     public IReadOnlyList<User> ListUsers()
     {

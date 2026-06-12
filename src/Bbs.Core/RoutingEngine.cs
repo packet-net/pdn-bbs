@@ -17,6 +17,13 @@ public enum RouteReason
 
     /// <summary>Wildcarded ATCalls match — the last-resort default route [BPQ-SRC CheckBBSATListWildCarded].</summary>
     WildcardAt,
+
+    /// <summary>
+    /// Local delivery — the message resolves to a mailbox on this BBS, so it is never forwarded
+    /// ("already here" [BPQ-SRC CheckAndSend]). A <see cref="RouteReason.Local"/> decision carries
+    /// <b>no</b> <see cref="RouteTarget"/>s; see <see cref="RoutingDecision.IsLocal"/>.
+    /// </summary>
+    Local,
 }
 
 /// <summary>One partner queue selected for a message.</summary>
@@ -59,6 +66,14 @@ public sealed record RoutingRequest
     /// §3.14 loop prevention, applied here on the send side).
     /// </summary>
     public IReadOnlyList<string> RouteChainCalls { get; init; } = [];
+
+    /// <summary>
+    /// True when <see cref="ToCall"/> is a known local user of this BBS (the host layer answers
+    /// this from the user store). Used by the "local delivery beats forwarding" pre-empt: a
+    /// personal with no AT addressed to a local user stays here rather than matching a partner's
+    /// wildcard-AT default route (design.md "The home-BBS requirement" rule #1). Default false.
+    /// </summary>
+    public bool ToIsLocalUser { get; init; }
 }
 
 /// <summary>The per-partner queues a message should join.</summary>
@@ -72,6 +87,14 @@ public sealed record RoutingDecision
 
     /// <summary>True when the message was routed as a flood bulletin (compat spec §4.2).</summary>
     public required bool IsFlood { get; init; }
+
+    /// <summary>
+    /// True when the message resolves to a local mailbox here and so was deliberately given
+    /// <b>zero</b> forward targets ("already here" [BPQ-SRC CheckAndSend]; design.md rule #1).
+    /// Distinguishes an intended local delivery from a no-partner-matched miss — both have empty
+    /// <see cref="Targets"/>, but only this one is a positive "stays here" decision.
+    /// </summary>
+    public bool IsLocal { get; init; }
 }
 
 /// <summary>
@@ -132,6 +155,20 @@ public sealed class RoutingEngine
         HierarchicalAddress at = HierarchicalAddress.Parse(request.At);
         string atBbs = at.AtBbs;
 
+        // Local delivery beats forwarding (design.md "The home-BBS requirement" rule #1). This
+        // restores LinBPQ's own local-first behaviour — "Don't forward to ourself - already
+        // here!" [BPQ-SRC CheckAndSend] — which the faithful single-copy/flood port otherwise
+        // lacks once a wildcard-AT partner is configured. A personal whose AT resolves to us, or
+        // whose TO is a known local user when there is no AT, is for a mailbox on this BBS: it
+        // stays here with zero forward targets, never matching any partner's default route. The
+        // message itself is already stored against its recipient; this only suppresses the
+        // forward fan-out, so the dangerous silent leak (a wildcard default swallowing local
+        // mail) cannot happen.
+        if (request.Type == MessageType.Personal && ResolvesToLocal(at, atBbs, request.ToIsLocalUser))
+        {
+            return new RoutingDecision { Targets = [], IsFlood = false, IsLocal = true };
+        }
+
         List<Partner> eligible = [];
         foreach (Partner partner in partners)
         {
@@ -158,6 +195,31 @@ public sealed class RoutingEngine
         }
 
         return RouteFlood(to, at, atBbs, eligible);
+    }
+
+    /// <summary>
+    /// True when a personal resolves to a mailbox on this BBS (design.md rule #1). Two cases,
+    /// mirroring the flood test's <c>at.AreaContains(_ownHa)</c> / <see cref="HierarchicalAddress.IsWwRooted"/>
+    /// style:
+    /// <list type="number">
+    /// <item>The AT names us — its leaf element is our own call (same base-call comparison as
+    /// implied-AT, <see cref="ImpliedAtMatches"/>), or it is a WW-rooted address sitting under
+    /// our own HA (<c>_ownHa.AreaContains(at)</c>: all of our HA elements, including our call,
+    /// match the AT root-first).</item>
+    /// <item>There is no AT and the TO is a known local user — the caller resolved that against
+    /// the user store. This is the case a wildcard-AT partner would otherwise swallow.</item>
+    /// </list>
+    /// </summary>
+    private bool ResolvesToLocal(HierarchicalAddress at, string atBbs, bool toIsLocalUser)
+    {
+        if (atBbs.Length == 0)
+        {
+            // No AT: stays here only when the recipient is one of our own users.
+            return toIsLocalUser;
+        }
+
+        return Callsigns.BaseEquals(atBbs, _ownCall)
+            || (at.IsWwRooted && _ownHa.AreaContains(at));
     }
 
     private bool IsEligible(Partner partner, RoutingRequest request)

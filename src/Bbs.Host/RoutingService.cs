@@ -110,6 +110,9 @@ public sealed class RoutingService
                     ReceivedFrom = message.ReceivedFrom,
                     BidSeenFrom = bidSeenFrom,
                     RouteChainCalls = chainCalls,
+                    // Local delivery beats forwarding (design.md rule #1): a personal for one of
+                    // our own users stays here rather than matching a partner's wildcard-AT route.
+                    ToIsLocalUser = _store.UserExists(recipient.ToCall),
                 },
                 partners);
             foreach (RouteTarget target in decision.Targets)
