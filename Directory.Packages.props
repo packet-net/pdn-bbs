@@ -6,6 +6,7 @@
     <PackageVersion Include="Microsoft.Data.Sqlite" Version="10.0.0" />
     <PackageVersion Include="Microsoft.Extensions.Hosting" Version="10.0.0" />
     <PackageVersion Include="Microsoft.Extensions.TimeProvider.Testing" Version="10.7.0" />
+    <PackageVersion Include="MimeKit" Version="4.17.0" />
     <PackageVersion Include="Packet.Ax25" Version="0.7.0" />
     <PackageVersion Include="Packet.Kiss" Version="0.7.0" />
     <PackageVersion Include="RhpV2.Client" Version="0.3.0" />

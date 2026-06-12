@@ -8,6 +8,21 @@ jobs:
   test:
     runs-on: [self-hosted, Linux, X64]
     steps:
+      - name: Pre-checkout — clear root-owned oracle state (self-heal interrupted runs)
+        # The interop lane's LinBPQ container writes docker/oracle/state as root.
+        # If a prior run was interrupted (e.g. the self-hosted runner dropped
+        # mid-job), those root-owned files survive in the shared workspace and the
+        # next actions/checkout --clean hits EACCES deleting them — wedging EVERY
+        # job, this build-only one included. Wipe them in a throwaway root container
+        # (same image the oracle wipes use) before checkout. No-op on a clean tree.
+        run: |
+          state="$GITHUB_WORKSPACE/docker/oracle/state"
+          if [ -d "$state" ]; then
+            docker run --rm --entrypoint /bin/sh \
+              -v "$state:/data" \
+              m0lte/linbpq@sha256:872343ffb76a52316b1ae42a42d3c0893f545ccd577301ebc7c4455b292a8025 \
+              -c 'rm -rf /data/* /data/.[!.]* /data/..?* 2>/dev/null; true' || true
+          fi
       - uses: actions/checkout@v4
       - name: Build (Release)
         run: dotnet build -c Release
@@ -24,6 +39,17 @@ jobs:
       group: pdnbbs-oracle-stack
       cancel-in-progress: false
     steps:
+      - name: Pre-checkout — clear root-owned oracle state (self-heal interrupted runs)
+        # See the test job: root-owned docker/oracle/state left by an interrupted
+        # run wedges actions/checkout --clean with EACCES. Clear it before checkout.
+        run: |
+          state="$GITHUB_WORKSPACE/docker/oracle/state"
+          if [ -d "$state" ]; then
+            docker run --rm --entrypoint /bin/sh \
+              -v "$state:/data" \
+              m0lte/linbpq@sha256:872343ffb76a52316b1ae42a42d3c0893f545ccd577301ebc7c4455b292a8025 \
+              -c 'rm -rf /data/* /data/.[!.]* /data/..?* 2>/dev/null; true' || true
+          fi
       - uses: actions/checkout@v4
       - name: Oracle clean slate (down -v + state wipe)
         # `down -v` does not clear the bind mount; the state wipe runs in a
