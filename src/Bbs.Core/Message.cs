@@ -79,6 +79,16 @@ public sealed record Message
     public DateTimeOffset? KilledAt { get; init; }
 
     /// <summary>
+    /// A local presentation artifact that MUST never forward (schema v3): the synthesized message
+    /// carrying a decoded inbound 7plus file as an attachment (design.md "abstract 7plus away from
+    /// the user"). The routing path skips a <c>local_only</c> message entirely and the store never
+    /// records its BID in the network dedup store, so it can neither leak onto the wire nor collide
+    /// on BID. Defaults false — every normal message (B1/B2 inbound, console/webmail compose) is
+    /// forwardable and network-visible exactly as before.
+    /// </summary>
+    public bool LocalOnly { get; init; }
+
+    /// <summary>
     /// All recipients (To and Cc). A multi-recipient message (S-line recipients separated by ';',
     /// compat spec §1.5, or a B2 message's repeated <c>To:</c>/<c>Cc:</c> lines, spec §3.9) is
     /// stored once with one row per recipient so it lists per-user; <see cref="MessageRecipient.Cc"/>

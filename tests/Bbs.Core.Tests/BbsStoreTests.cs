@@ -261,7 +261,7 @@ public sealed class BbsStoreTests : IDisposable
         DowngradeToV1(path);
 
         using BbsStore upgraded = BbsStore.Open(path, "GB7PDN", _ts.Time);
-        Assert.Equal(2, upgraded.SchemaVersion); // upgraded to current
+        Assert.Equal(BbsStore.CurrentSchemaVersion, upgraded.SchemaVersion); // upgraded to current (v1 → … → v3)
 
         // The pre-existing row survived and now reads through the v2 code (cc=false, no attachments).
         Message loaded = upgraded.GetMessage(legacyNumber)!;
@@ -292,6 +292,12 @@ public sealed class BbsStoreTests : IDisposable
     {
         using var connection = new SqliteConnection($"Data Source={path};Mode=ReadWrite;Pooling=False");
         connection.Open();
+        // Strip the v3 additions too (the seed was created at the current version, which has them):
+        // a genuine v1 messages table has no local_only column, and the 7plus tracking tables don't
+        // exist yet. Without this the v3 ALTER on reopen fails with "duplicate column name".
+        Exec(connection, "DROP TABLE IF EXISTS sevenplus_parts;");
+        Exec(connection, "DROP TABLE IF EXISTS sevenplus_files;");
+        Exec(connection, "ALTER TABLE messages DROP COLUMN local_only;");
         Exec(connection, "DROP TABLE IF EXISTS attachments;");
         // SQLite can't DROP COLUMN on a WITHOUT ROWID legacy table cleanly across versions; rebuild
         // recipients without `cc` to reproduce the v1 shape exactly.
