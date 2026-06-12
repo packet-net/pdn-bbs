@@ -1,0 +1,33 @@
+#!/bin/sh
+set -e
+
+# pdn-bbs postinst.
+#
+# This package ships CODE only — the single-file binary + the app manifest —
+# into the packetnet SYSTEM app dir /usr/share/packetnet/apps/bbs (dpkg creates
+# that dir as it unpacks the payload; nothing to do here). All runtime STATE
+# (bbs.db, bbs.yaml, WAL/SHM sidecars) lives in the packetnet OWNER app-state
+# dir /var/lib/packetnet/apps/bbs and is NEVER shipped or clobbered by this
+# package (see docs/release-pipeline.md for the code-vs-state split).
+#
+# The packetnet node host package owns the `packetnet` system user and the
+# /var/lib/packetnet root. The BBS package is a soft Recommends of packetnet, so
+# the user may not exist yet at configure time (apt may not have configured
+# packetnet first, or this may be a standalone install). We therefore only
+# prepare the state dir when the user already exists, and never fail if it does
+# not — pdn itself creates the per-app state dir at runtime (packetnet-owned,
+# 0750), so an absent dir here is harmless.
+#
+# Idempotent, and deliberately does NOT (re)start the packetnet service — that
+# is the deploy script's job (scripts/deploy-bbs.sh) / the node owner's choice.
+
+case "$1" in
+  configure)
+    if getent passwd packetnet >/dev/null; then
+      # Match the node package's per-app state convention: packetnet-owned, 0750.
+      install -d -o packetnet -g packetnet -m 0750 /var/lib/packetnet/apps/bbs
+    fi
+    ;;
+esac
+
+exit 0

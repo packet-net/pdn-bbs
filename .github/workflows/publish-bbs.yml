@@ -1,0 +1,69 @@
+name: publish-bbs
+
+# Builds the pdn-bbs app-package Debian packages (amd64 / arm64 / armhf) and
+# attaches them to a GitHub Release. Triggered by `v*` tags (or a manual dispatch
+# with an explicit version).
+#
+# Self-hosted x64 only (no GitHub-hosted runners — this repo has no hosted-runner
+# budget, matching the node). The arm builds cross-publish from x64 (plain
+# self-contained, NO ReadyToRun/crossgen2 — it OOMs on cross-publish and the BBS
+# cold-start gain is marginal), so no arch-native runners or cross C-toolchain are
+# needed; scripts/build-deb.sh does the publish + packaging.
+#
+# Single job, no Actions artifacts: the .debs are built and attached to the
+# Release all from one job's local working tree — they never touch the Actions
+# artifact store (mirrors publish-node.yml, which keeps the .debs local to dodge
+# the free-tier artifact-storage quota recalculation lag).
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version without the v prefix, e.g. 0.1.0'
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: [self-hosted, Linux, X64]
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - id: v
+        name: Resolve version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "version=${{ github.event.inputs.version }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build .debs (amd64 / arm64 / armhf)
+        env:
+          VERSION: ${{ steps.v.outputs.version }}
+        run: |
+          for rid in linux-x64 linux-arm64 linux-arm; do
+            scripts/build-deb.sh "$rid" "$VERSION"
+          done
+
+      - name: Checksum + create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.v.outputs.version }}
+        run: |
+          ( cd artifacts && sha256sum pdn-bbs_*.deb > SHA256SUMS && ls -l pdn-bbs_*.deb SHA256SUMS )
+          gh release create "v${VERSION}" artifacts/pdn-bbs_*.deb artifacts/SHA256SUMS \
+            --repo "${{ github.repository }}" \
+            --title "pdn-bbs v${VERSION}" \
+            --notes "Packet-radio BBS app package for the Packet.NET node (pdn) ${VERSION} — self-contained \`.deb\`s for amd64 / arm64 / armhf. Install on a box that already runs the packetnet node host: \`sudo apt install ./pdn-bbs_${VERSION}_<arch>.deb\` (no .NET runtime required); the BBS lands under /usr/share/packetnet/apps/bbs and you enable it from the node control panel. State (bbs.db, bbs.yaml) lives in /var/lib/packetnet/apps/bbs and is preserved across upgrades."

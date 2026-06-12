@@ -1,0 +1,15 @@
+Package: pdn-bbs
+Version: @VERSION@
+Architecture: @ARCH@
+Maintainer: Tom Fanning <tom@m0lte.uk>
+Recommends: packetnet
+Section: misc
+Priority: optional
+Homepage: https://github.com/m0lte/pdn-bbs
+Description: Packet-radio BBS app package for the Packet.NET node (pdn)
+ A ground-up packet-radio mailbox — personal mail, bulletins and NTS traffic
+ with FBB-compatible store-and-forward and webmail. Ships as a Packet.NET app
+ PACKAGE: pdn discovers it under /usr/share/packetnet/apps/bbs and the node
+ owner enables it from the control panel. Self-contained: bundles its own .NET
+ runtime, so no system runtime is required. Inert without the packetnet node
+ host (hence the soft Recommends), but installable standalone.
