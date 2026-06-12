@@ -48,7 +48,7 @@ public sealed class InboundDemux
     private readonly IUserSettingsStore _userSettings;
     private readonly TimeProvider _time;
     private readonly TimeSpan _firstLineWait;
-    private readonly string _sidLine;
+    private readonly string _sidVersion;
     private readonly ILogger _logger;
 
     /// <summary>Creates the demux. <paramref name="sidVersion"/> feeds the greet-immediately SID line.</summary>
@@ -79,7 +79,7 @@ public sealed class InboundDemux
         _routing = routing;
         _consoleConfig = consoleConfig;
         _userSettings = userSettings;
-        _sidLine = Sid.Build(sidVersion);
+        _sidVersion = sidVersion;
         _time = time;
         _firstLineWait = firstLineWait;
         _logger = logger;
@@ -115,7 +115,16 @@ public sealed class InboundDemux
             // Greet immediately: our SID is the first thing on the wire — a real LinBPQ
             // caller (dialling us to forward) sends nothing until it has seen it, so the
             // old silent peek deadlocked both sides into the timeout (compat spec §1.1).
-            await child.SendAsync(Encoding.Latin1.GetBytes(_sidLine + "\r\n"), cancellationToken).ConfigureAwait(false);
+            //
+            // The caller is known at accept time, so we advertise B2F ('2') in this greeting
+            // SID ONLY when this caller matches a partner record we enabled B2 on
+            // (Partner.AllowB2F — keyed by call as in RunAnswererAsync). To every other caller
+            // we send the B1-only SID, so we never accept FC from a partner we didn't offer B2
+            // to (the answerer's B2 gate is consistent with this advertised SID). The greet must
+            // precede the peek, hence the lookup here rather than inside the FBB runner.
+            Partner? partner = _store.GetPartner(child.RemoteCallsign);
+            string sidLine = Sid.Build(_sidVersion, offerB2: partner?.AllowB2F ?? false);
+            await child.SendAsync(Encoding.Latin1.GetBytes(sidLine + "\r\n"), cancellationToken).ConfigureAwait(false);
 
             // Start the console greeting flow now; its input parks on the gate.
             var assembler = new LineAssembler();

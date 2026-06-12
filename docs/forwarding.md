@@ -16,7 +16,7 @@ Everything BPQMail's forwarding configuration can express, ours must too. The in
 | Single-copy best-HR-depth for P; bulletin flood | RoutingEngine | ✅ shipped (oracle-proven) |
 | **Local delivery beats forwarding** (the home-BBS rule) | RoutingEngine pre-empt for personals: AT-is-us (own call / under our HA) or no-AT + TO-is-a-local-user → **zero forward targets**; the wildcard-AT leak that a faithful single-copy port otherwise opens. Restores LinBPQ's own "already here" local-first behaviour [BPQ-SRC CheckAndSend] | ✅ shipped — pinned by tests (the leak test verified red on the pre-rule code), see design.md § The home-BBS requirement rule #1 |
 | NTS routing by TO wildcards | T-type routing | F-3 (spec SHOULD) |
-| Per-partner protocol options (B/B1/B2, MaxBlock) | `protocol:` block (b1 default; maxBlock F-1; **b2 promoted to F-1** — the GB7RDG config snapshot shows B2F is the production lingua franca, 7 of its 9 enabled partners; B1F suffices for the GB7RDG↔us pair itself) | F-1 |
+| Per-partner protocol options (B/B1/B2, MaxBlock) | per-partner `allowB2` (✅ shipped — see "B2F negotiation" below; default off ⇒ B1 unchanged); `maxBlock` still F-1 | ✅ B2 shipped / maxBlock F-1 |
 | Per-partner size caps (MaxRX/MaxTX) | `maxRx`/`maxTx` | ✅ shipped |
 | In-session reverse (`DoReverse`, default on) | inherent — every session drains BOTH directions (FbbSession TakeTurn; oracle-proven both roles vs stock `RequestReverse=0` BPQ, `BidirectionalForwardingInteropTests`) | ✅ shipped |
 | Reverse polling (`RequestReverse`/`RevFWDInterval`) | `collect:` — dial on a timer even with an empty queue. Opt-in safety net ONLY for partners that cannot dial us (asymmetric links, e.g. GB7RDG→GB7CIP for the WW feed); on a symmetric link it is redundant chatter | F-1 (demoted) |
@@ -82,6 +82,21 @@ Mail moves because **whoever holds it dials at once** (`immediately: true`, the 
 
 BPQ trap this design dodges (found live, `BidirectionalForwardingInteropTests`): BPQ SSID-strips inbound AX.25 connects before its partner lookup, so a partner record keyed with an SSID silently breaks the reverse-queue join — the dial-in lands on an auto-created plain user and reverse never proposes. BPQ-side partner records for us must be keyed by **base callsign** (production GB7RDG base-keys all 24 of its records).
 
+## B2F negotiation and the `allowB2` gate (Tom, 2026-06-12)
+
+B1 compressed forwarding is the lingua franca between BBSes and stays the default; B2F (Winlink/FBB "B2") buys multi-recipient + attachment messages and Winlink RMS interop, and a partner can be opted into it per-partner. It is wired through the existing FBB session and codec — a B2 object is just a different plaintext shipped through the *same* B1 LZHUF container + SOH/STX/EOT framing ("B2 uses B1 mode (crc on front of file)"), proposed with an `FC EM` line instead of `FA`.
+
+**The gate — `allowB2`, default FALSE.** Each partner has an `allowB2` flag (maps to `Partner.AllowB2F`). With it unset — the default — nothing changes: we advertise the B1-only SID `[PDN-<ver>-B1FHM$]`, propose `FA`, and refuse any `FC` with `-`, exactly as before. An owner sets `allowB2: true` on a partner to turn it on.
+
+**B2 is active for a session iff `allowB2` AND the partner's parsed SID advertises B2.** The SID intersection makes both directions consistent:
+
+- **Outbound (we dial an `allowB2` partner):** our SID advertises B2 (`[PDN-<ver>-B12FHM$]`). If the partner's SID also offers B2 we propose every queued message as a uniform `FC EM` (MID = the message's network-id/BID, plus the uncompressed and compressed object sizes) and transfer each as a B2 object; if the partner turns out B1-only we fall back to `FA`/B1 with no loss.
+- **Answering an inbound connect:** we advertise B2 in the greeting SID *only* when the caller matches a partner record we set `allowB2` on (keyed by call, as the reverse-forward queue join is). So we only ever accept `FC` from partners we enabled — a non-`allowB2` caller still sees the B1 SID and its `FC` (if it sends one anyway) is refused with `-` (the original guard, intact).
+
+**Receiving a B2 object** runs through the *same* store/route path as a B1 inbound: the object decodes (`Mid → BID`, `From`, `To`, `Subject`, `Body`), is stored verbatim, and is subject to the identical dup-BID / size / R-chain loop-and-age holds and the home-BBS rules (local-delivery-beats-forwarding + auto-create-homed-user). The B2 `Body` we *send* is the same plaintext B1 would (R: chain + first-hop blank + body), so the receive-side loop/age guard is protocol-agnostic and B2 needs no special R-line handling.
+
+**Scope (slice 2, named deferrals):** the single-recipient personal/bulletin path — the one GB7RDG↔pdn exercises. B2F's *multi-recipient fan-out* (multiple `To:`/`Cc:`) and *File: attachment* transfer/storage are deferred (the codec handles them; the builder/receiver name only the first recipient and carry no attachments — the same first-recipient deferral the `FA` path already takes). That is the F-1 per-recipient fan-out work, tracked by a skipped test.
+
 ## Configuration shape (the end state)
 
 ```yaml
@@ -103,8 +118,8 @@ partners:
     limits:
       receive: 99999           # per-message size caps, bytes
       send: 99999
+    allowB2: false             # opt in to B2F (Winlink/FBB B2); default off ⇒ B1. ✅ shipped
     protocol:                  # F-1
-      b2: false                # newer compressed variant, opt-in when built
       maxBlock: 10000
 ```
 
@@ -117,7 +132,7 @@ partners:
 ## Build waves
 
 - **F-0 (in flight):** greet-first demux + full §4.4 connect scripts with per-step timeouts and attempt transcripts.
-- **F-1 — parity + the home-BBS rule:** **local-delivery-beats-forwarding** (at-is-us / TO-is-local-user → zero targets; the wildcard-AT leak pinned by tests — see design.md § The home-BBS requirement) — **✅ landed** (feat/local-delivery-rule: the `RoutingEngine` personal pre-empt + `BbsStore.UserExists` + the leak/regression test suite) + auto-create users on inbound personals (still F-1); time windows, `collect` (timed empty-queue polling — opt-in safety net for partners that cannot dial us; in-session reverse already shipped), per-recipient fan-out, the `protocol:` block (maxBlock enforcement; B2F — promoted, it is the production lingua franca), `priority`.
+- **F-1 — parity + the home-BBS rule:** **local-delivery-beats-forwarding** (at-is-us / TO-is-local-user → zero targets; the wildcard-AT leak pinned by tests — see design.md § The home-BBS requirement) — **✅ landed** (feat/local-delivery-rule: the `RoutingEngine` personal pre-empt + `BbsStore.UserExists` + the leak/regression test suite) + auto-create users on inbound personals (still F-1); time windows, `collect` (timed empty-queue polling — opt-in safety net for partners that cannot dial us; in-session reverse already shipped), per-recipient fan-out, the `protocol:` block (maxBlock enforcement), `priority`. **B2F (per-partner `allowB2`, default off) — ✅ shipped** (single-recipient/no-attachment path; multi-recipient fan-out + attachments remain F-1, see "B2F negotiation").
 - **F-2 — the de-warting ops layer:** health tracking + session stats, auto-re-route-on-config-apply, console `FWD`/`ROUTE?` verbs, the webmail sysop pages.
 - **F-3 — spec SHOULDs that touch forwarding:** NTS routing, WP consumption AND emission (announcing homed users to the network — promoted by the home-BBS requirement), B2F.
 

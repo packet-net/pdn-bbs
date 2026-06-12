@@ -139,6 +139,22 @@ public sealed class ConfigTests : IDisposable
     }
 
     [Fact]
+    public void AllowB2_DefaultsFalse_AndRoundTripsToThePartner()
+    {
+        // Default off → B1 unchanged. An explicit allowB2:true maps to Partner.AllowB2F.
+        Assert.False(new PartnerConfig { Call = "GB7BPQ" }.ToPartner().AllowB2F);
+
+        BbsHostConfig config = BbsHostConfigFile.Parse("""
+            callsign: GB7PDN
+            partners:
+              - call: GB7RDG
+                allowB2: true
+            """);
+        Partner mapped = Assert.Single(config.Partners).ToPartner();
+        Assert.True(mapped.AllowB2F);
+    }
+
+    [Fact]
     public void ConnectScript_TakesPrecedenceOverSimpleConnect()
     {
         BbsHostConfig config = BbsHostConfigFile.Parse("""

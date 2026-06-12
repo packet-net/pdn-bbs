@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text;
 using Bbs.Core;
 using Bbs.Fbb;
@@ -78,6 +79,13 @@ public static class OutboundBuilder
                 Bid = message.Bid,
                 Title = message.Subject,
                 Body = payload,
+
+                // For a B2-enabled partner, also build the B2F object (spec §3.9). The session
+                // ships it (FC + transfer) only when B2 is negotiated; otherwise it falls back
+                // to the FA/B1 Body above. The B2 Body is the SAME plaintext B1 ships (R: chain
+                // + first-hop blank + body), so the receive-side R-chain loop/age guard sees the
+                // identical trace either protocol — B2 R-line handling is therefore no new work.
+                B2Object = partner.AllowB2F ? BuildB2Object(message, to, payload, identity) : null,
             }));
         }
 
@@ -118,6 +126,40 @@ public static class OutboundBuilder
         prefixBytes.CopyTo(payload, 0);
         body.CopyTo(payload.AsSpan(prefixBytes.Length));
         return payload;
+    }
+
+    /// <summary>
+    /// Builds the B2F object (spec §3.9) for a stored message bound to a B2-enabled partner:
+    /// MID = the message BID, From/To from the stored message, Type = Private/Bulletin per the
+    /// message type, Subject, Date, and Mbo = our BBS call. The Body is exactly the plaintext
+    /// B1 would carry (<paramref name="payload"/> = R: chain + first-hop blank + body), so the
+    /// stored R-chain travels intact and the receive-side loop/age guard is protocol-agnostic.
+    ///
+    /// SCOPE (named deferral — slice 2): the single-recipient personal/bulletin path only — the
+    /// one GB7RDG↔pdn exercises. Multi-recipient fan-out (multiple To:/Cc:) and File: attachment
+    /// transfer are NOT built here (only the first recipient is named, matching the FA path's own
+    /// first-recipient deferral); B2F's multi-address/attachment capability is a follow-up
+    /// (forwarding.md F-1 per-recipient fan-out). See the skipped multi-recipient test.
+    /// </summary>
+    internal static byte[] BuildB2Object(Message message, string to, byte[] payload, BbsIdentity identity)
+    {
+        var type = message.Type switch
+        {
+            MessageType.Bulletin => B2MessageType.Bulletin,
+            _ => B2MessageType.Private, // Personal and (v1) NTS/traffic store as Private (BPQ stores all B2 as P)
+        };
+
+        return new B2Message
+        {
+            Mid = message.Bid,
+            Type = type,
+            From = FaProposal.NormalizeCallsign(message.From),
+            To = [FaProposal.NormalizeCallsign(to)],
+            Subject = message.Subject,
+            Date = message.CreatedAt.UtcDateTime.ToString("yyyy/MM/dd HH:mm", CultureInfo.InvariantCulture),
+            Mbo = FaProposal.NormalizeCallsign(identity.Callsign),
+            Body = payload,
+        }.Encode();
     }
 
     private static readonly Action<ILogger, long, int, string, int, Exception?> LogOversize =

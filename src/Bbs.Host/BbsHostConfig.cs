@@ -140,11 +140,20 @@ public sealed record PartnerConfig
     /// <summary>Auto-dialling enabled (messages still queue when disabled).</summary>
     public bool Enabled { get; init; } = true;
 
+    /// <summary>
+    /// Opt in to B2F (Winlink/FBB B2) with this partner — default FALSE ⇒ B1-only, today's
+    /// behaviour unchanged (compat spec §3.2/§8). When true we advertise '2' in our SID to this
+    /// partner and, if its SID also advertises B2, propose/accept FC (B2 objects) instead of
+    /// FA/B1. B1 stays the lingua franca between BBSes; flip this only for a partner that wants B2.
+    /// </summary>
+    public bool AllowB2 { get; init; }
+
     /// <summary>Maps to the store's partner record (compat spec §4.1 keys).</summary>
     public Partner ToPartner() => new()
     {
         Call = Call,
         Enabled = Enabled,
+        AllowB2F = AllowB2,
         ForwardIntervalSeconds = Math.Max(1, IntervalMinutes) * 60,
         ForwardNewImmediately = SendImmediately,
 
@@ -283,6 +292,11 @@ public static class BbsHostConfigFile
         #   bbsHa:           partner's full HA, e.g. GB7BPQ.#23.GBR.EURO
         #   maxRx / maxTx:   per-partner inbound/outbound size caps in bytes (default 99999)
         #   enabled:         auto-dialling on/off (messages still queue when off)
+        #   allowB2:         opt in to B2F (Winlink/FBB B2) with this partner (default false).
+        #                    Off ⇒ B1 compressed forwarding, the lingua franca between BBSes.
+        #                    On ⇒ we advertise '2' and, if the partner's SID also offers B2,
+        #                    exchange FC (B2 objects) instead of FA/B1. Only flip it for a
+        #                    partner that wants B2 (e.g. a Winlink RMS gateway).
         partners: []
         #  - call: GB7BPQ
         #    connect: GB7BPQ
