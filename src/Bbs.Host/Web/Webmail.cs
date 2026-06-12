@@ -140,7 +140,7 @@ public static class Webmail
         });
 
         app.MapGet("/settings", (HttpContext ctx) => WithCallsign(ctx, options,
-            (prefix, call) => SettingsPage(options, prefix, call, saved: false)));
+            (prefix, call) => SettingsPage(options, prefix, call)));
 
         app.MapPost("/settings", async (HttpContext ctx) =>
         {
@@ -154,6 +154,22 @@ public static class Webmail
             IFormCollection form = await ctx.Request.ReadFormAsync().ConfigureAwait(false);
             return SaveSettings(options, prefix, call, form["interface"].ToString());
         });
+
+        app.MapPost("/settings/mailpw", async (HttpContext ctx) =>
+        {
+            string prefix = Prefix(ctx);
+            string? call = FindCallsign(options.Store, PdnUser(ctx));
+            if (call is null)
+            {
+                return Results.Redirect(U(prefix, "/"));
+            }
+
+            IFormCollection form = await ctx.Request.ReadFormAsync().ConfigureAwait(false);
+            return SaveMailPassword(options, prefix, call, form["new"].ToString(), form["confirm"].ToString());
+        });
+
+        app.MapPost("/settings/mailpw/clear", (HttpContext ctx) => WithCallsign(ctx, options,
+            (prefix, call) => ClearMailPassword(options, prefix, call)));
     }
 
     private const string PdnUserKey = "pdnUser";
@@ -568,19 +584,33 @@ public static class Webmail
     // ---------------------------------------------------------------- settings (interface-mode toggle)
 
     /// <summary>
-    /// The settings page: shows the user's current interface mode (plain / classic — the same
-    /// <see cref="UserSettings.InterfaceMode"/> the console session reads) and a control to change
-    /// it. Plain is the default for a never-set user (the plain-language mandate, design.md). The
-    /// form posts back to the prefix-correct <c>/settings</c> mount. A <paramref name="saved"/>
-    /// banner confirms a just-applied change.
+    /// The settings page: the user's interface mode (plain / classic — the same
+    /// <see cref="UserSettings.InterfaceMode"/> the console session reads) and the BBS mail-password
+    /// used by external mail apps (IMAP). Plain is the default for a never-set user (the
+    /// plain-language mandate, design.md). The forms post back to the prefix-correct mounts. An
+    /// optional <paramref name="notice"/> banner confirms (or, with <paramref name="noticeError"/>,
+    /// reports a problem with) a just-applied change.
     /// </summary>
-    private static IResult SettingsPage(WebmailOptions o, string prefix, string call, bool saved)
+    private static IResult SettingsPage(WebmailOptions o, string prefix, string call, string? notice = null, bool noticeError = false)
     {
         // Null InterfaceMode means "never chosen" → the plain default per the mandate.
         InterfaceMode mode = o.Settings.Load(call).InterfaceMode ?? InterfaceMode.Plain;
         bool plain = mode == InterfaceMode.Plain;
-        string banner = saved
-            ? """<p class="saved">Saved. Your choice applies to your next mailbox connection.</p>"""
+        string banner = notice is null
+            ? ""
+            : Inv($"""<p class="{(noticeError ? "err" : "saved")}">{H(notice)}</p>""");
+
+        bool hasMailPw = o.Store.HasMailPassword(call);
+        string mailPwState = hasMailPw
+            ? """<p class="saved">A mail password is set.</p>"""
+            : """<p class="dim">No mail password set yet — set one to read your mail in an app like iPhone Mail.</p>""";
+        // A sibling form (HTML forbids nesting it inside the set/change form below).
+        string removeForm = hasMailPw
+            ? Inv($"""
+                <form method="post" action="{U(prefix, "/settings/mailpw/clear")}">
+                <p><button type="submit" class="link">Remove mail password</button></p>
+                </form>
+                """)
             : "";
 
         return Html(Page(o, prefix, call, "Settings",
@@ -592,9 +622,22 @@ public static class Webmail
             <p>How the RF/console mailbox talks to you when you connect over packet.</p>
             <p><label><input type="radio" name="interface" value="plain"{(plain ? " checked" : "")}> Plain language <span class="dim">— sentences and whole words (the default)</span></label></p>
             <p><label><input type="radio" name="interface" value="classic"{(plain ? "" : " checked")}> Classic <span class="dim">— the terse W0RLI letters, for old automated clients</span></label></p>
-            </fieldset>
             <p><button type="submit">Save</button></p>
+            </fieldset>
             </form>
+            <form method="post" action="{U(prefix, "/settings/mailpw")}">
+            <fieldset><legend>Mail password (external mail apps)</legend>
+            <p>A separate password for reading your mail over IMAP in an app like iPhone Mail.
+            Log in there with your callsign <b>{H(call)}</b> and this password.
+            It is not your packet/console login — keep it different.</p>
+            {mailPwState}
+            <p><label>New mail password<br><input type="password" name="new" minlength="{BbsStore.MinMailPasswordLength}" autocomplete="new-password" required></label></p>
+            <p><label>Confirm<br><input type="password" name="confirm" minlength="{BbsStore.MinMailPasswordLength}" autocomplete="new-password" required></label></p>
+            <p class="dim">At least {BbsStore.MinMailPasswordLength} characters.</p>
+            <p><button type="submit">{(hasMailPw ? "Change" : "Set")} mail password</button></p>
+            </fieldset>
+            </form>
+            {removeForm}
             """));
     }
 
@@ -611,7 +654,40 @@ public static class Webmail
             : InterfaceMode.Plain;
 
         o.Settings.Save(call, o.Settings.Load(call) with { InterfaceMode = mode });
-        return SettingsPage(o, prefix, call, saved: true);
+        return SettingsPage(o, prefix, call, "Saved. Your choice applies to your next mailbox connection.");
+    }
+
+    /// <summary>
+    /// Sets/changes the caller's BBS mail-password from the posted <c>new</c>/<c>confirm</c> fields.
+    /// Requires the two to match and delegates length/format policy to
+    /// <see cref="BbsStore.SetMailPassword"/> (whose <see cref="ArgumentException"/> message is shown
+    /// verbatim). The plaintext is never logged or echoed back — only a pass/fail notice.
+    /// </summary>
+    private static IResult SaveMailPassword(WebmailOptions o, string prefix, string call, string newPw, string confirm)
+    {
+        if (!string.Equals(newPw, confirm, StringComparison.Ordinal))
+        {
+            return SettingsPage(o, prefix, call, "Those passwords didn't match. Nothing was changed.", noticeError: true);
+        }
+
+        try
+        {
+            o.Store.SetMailPassword(call, newPw);
+        }
+        catch (ArgumentException ex)
+        {
+            return SettingsPage(o, prefix, call, ex.Message, noticeError: true);
+        }
+
+        return SettingsPage(o, prefix, call, "Mail password updated. Use it with your callsign in your mail app.");
+    }
+
+    /// <summary>Removes the caller's BBS mail-password (disabling IMAP login for them).</summary>
+    private static IResult ClearMailPassword(WebmailOptions o, string prefix, string call)
+    {
+        bool removed = o.Store.ClearMailPassword(call);
+        return SettingsPage(o, prefix, call,
+            removed ? "Mail password removed. External mail apps can no longer sign in." : "No mail password was set.");
     }
 
     // ---------------------------------------------------------------- rendering
@@ -711,6 +787,7 @@ public static class Webmail
         ul.sevenplus-pending li{padding:.3rem .6rem;border:1px dashed #c9c3b8;background:#fbfaf6;border-radius:3px;margin-bottom:.3rem;font-size:.92rem}
         input,select,textarea{font:inherit}
         button{font:inherit;padding:.2rem .8rem}
+        button.link{padding:0;border:0;background:none;color:#a32014;text-decoration:underline;cursor:pointer}
         </style>
         """;
 

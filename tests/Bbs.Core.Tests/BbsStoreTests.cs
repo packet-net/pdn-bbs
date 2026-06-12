@@ -292,9 +292,11 @@ public sealed class BbsStoreTests : IDisposable
     {
         using var connection = new SqliteConnection($"Data Source={path};Mode=ReadWrite;Pooling=False");
         connection.Open();
-        // Strip the v3 additions too (the seed was created at the current version, which has them):
-        // a genuine v1 messages table has no local_only column, and the 7plus tracking tables don't
-        // exist yet. Without this the v3 ALTER on reopen fails with "duplicate column name".
+        // Strip the v3/v4 additions too (the seed was created at the current version, which has
+        // them): a genuine v1 messages table has no local_only column, and the 7plus tracking tables
+        // and the mail_auth table don't exist yet. Without this the v3 ALTER / v4 CREATE on reopen
+        // fails ("duplicate column name" / "table mail_auth already exists").
+        Exec(connection, "DROP TABLE IF EXISTS mail_auth;");
         Exec(connection, "DROP TABLE IF EXISTS sevenplus_parts;");
         Exec(connection, "DROP TABLE IF EXISTS sevenplus_files;");
         Exec(connection, "ALTER TABLE messages DROP COLUMN local_only;");

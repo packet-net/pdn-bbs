@@ -950,5 +950,142 @@ public sealed class WebmailTests : IAsyncDisposable
         string page = await client.GetStringAsync(new Uri("/settings", UriKind.Relative));
         Assert.Contains("action=\"/apps/bbs/settings\"", page, StringComparison.Ordinal);
         Assert.DoesNotContain("action=\"/settings\"", page, StringComparison.Ordinal); // nothing escapes the mount
+        // The mail-password forms also carry the mount prefix.
+        Assert.Contains("action=\"/apps/bbs/settings/mailpw\"", page, StringComparison.Ordinal);
+    }
+
+    // ------------------------------------------------ mail password (IMAP / external mail apps)
+    // The credential an external mail client logs in with (callsign + this password). Set over the
+    // gateway-authenticated settings page; stored Argon2id-hashed in the BBS user's mail_auth row.
+
+    private const string GoodMailPw = "imap-secret-pw"; // ≥ BbsStore.MinMailPasswordLength
+
+    [Fact]
+    public async Task MailPassword_SettingsPage_ShowsSetForm_WhenNoneSet()
+    {
+        ClaimCallsign("tom", "M0LTE");
+        using HttpClient client = await StartAsync();
+
+        string page = await client.GetStringAsync(new Uri("/settings", UriKind.Relative));
+        Assert.Contains("Mail password", page, StringComparison.Ordinal);
+        Assert.Contains("No mail password set yet", page, StringComparison.Ordinal);
+        Assert.Contains("name=\"new\"", page, StringComparison.Ordinal);
+        Assert.Contains("name=\"confirm\"", page, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task MailPassword_Post_SetsIt_AndShowsConfirmation()
+    {
+        ClaimCallsign("tom", "M0LTE");
+        using HttpClient client = await StartAsync();
+
+        HttpResponseMessage response = await client.PostAsync(
+            new Uri("/settings/mailpw", UriKind.Relative),
+            new FormUrlEncodedContent(
+            [
+                new KeyValuePair<string, string>("new", GoodMailPw),
+                new KeyValuePair<string, string>("confirm", GoodMailPw),
+            ]));
+        response.EnsureSuccessStatusCode();
+        string page = await response.Content.ReadAsStringAsync();
+
+        Assert.Contains("Mail password updated", page, StringComparison.Ordinal);
+        Assert.Contains("A mail password is set", page, StringComparison.Ordinal);
+        Assert.Contains("Remove mail password", page, StringComparison.Ordinal);
+        // Stored + verifiable against the BBS store; never the plaintext.
+        Assert.True(_store.VerifyMailPassword("M0LTE", GoodMailPw));
+        Assert.DoesNotContain(GoodMailPw, page, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task MailPassword_Post_Mismatch_IsRejected()
+    {
+        ClaimCallsign("tom", "M0LTE");
+        using HttpClient client = await StartAsync();
+
+        HttpResponseMessage response = await client.PostAsync(
+            new Uri("/settings/mailpw", UriKind.Relative),
+            new FormUrlEncodedContent(
+            [
+                new KeyValuePair<string, string>("new", GoodMailPw),
+                new KeyValuePair<string, string>("confirm", GoodMailPw + "x"),
+            ]));
+        response.EnsureSuccessStatusCode();
+        string page = await response.Content.ReadAsStringAsync();
+
+        // The notice is HTML-encoded (the apostrophe → &#39;), so match the apostrophe-free part.
+        Assert.Contains("Those passwords", page, StringComparison.Ordinal);
+        Assert.False(_store.HasMailPassword("M0LTE")); // nothing stored
+    }
+
+    [Fact]
+    public async Task MailPassword_Post_TooShort_IsRejected()
+    {
+        ClaimCallsign("tom", "M0LTE");
+        using HttpClient client = await StartAsync();
+
+        HttpResponseMessage response = await client.PostAsync(
+            new Uri("/settings/mailpw", UriKind.Relative),
+            new FormUrlEncodedContent(
+            [
+                new KeyValuePair<string, string>("new", "short"),
+                new KeyValuePair<string, string>("confirm", "short"),
+            ]));
+        response.EnsureSuccessStatusCode();
+        string page = await response.Content.ReadAsStringAsync();
+
+        Assert.Contains("at least", page, StringComparison.OrdinalIgnoreCase);
+        Assert.False(_store.HasMailPassword("M0LTE"));
+    }
+
+    [Fact]
+    public async Task MailPassword_Clear_RemovesIt()
+    {
+        ClaimCallsign("tom", "M0LTE");
+        _store.SetMailPassword("M0LTE", GoodMailPw);
+        using HttpClient client = await StartAsync();
+
+        HttpResponseMessage response = await client.PostAsync(
+            new Uri("/settings/mailpw/clear", UriKind.Relative), content: null);
+        response.EnsureSuccessStatusCode();
+        string page = await response.Content.ReadAsStringAsync();
+
+        Assert.Contains("Mail password removed", page, StringComparison.Ordinal);
+        Assert.False(_store.HasMailPassword("M0LTE"));
+    }
+
+    [Fact]
+    public async Task MailPassword_Post_IsScopedToTheSignedInUser()
+    {
+        ClaimCallsign("tom", "M0LTE");
+        ClaimCallsign("alice", "G4ABC");
+        using HttpClient client = await StartAsync(pdnUser: "tom");
+
+        await client.PostAsync(
+            new Uri("/settings/mailpw", UriKind.Relative),
+            new FormUrlEncodedContent(
+            [
+                new KeyValuePair<string, string>("new", GoodMailPw),
+                new KeyValuePair<string, string>("confirm", GoodMailPw),
+            ]));
+
+        Assert.True(_store.HasMailPassword("M0LTE"));
+        Assert.False(_store.HasMailPassword("G4ABC")); // untouched
+    }
+
+    [Fact]
+    public async Task MailPassword_UnmappedUser_GetsClaimForm_NotSettings()
+    {
+        using HttpClient client = await StartAsync(pdnUser: "stranger");
+        HttpResponseMessage response = await client.PostAsync(
+            new Uri("/settings/mailpw", UriKind.Relative),
+            new FormUrlEncodedContent(
+            [
+                new KeyValuePair<string, string>("new", GoodMailPw),
+                new KeyValuePair<string, string>("confirm", GoodMailPw),
+            ]));
+        response.EnsureSuccessStatusCode();
+        string page = await response.Content.ReadAsStringAsync();
+        Assert.Contains("claim", page, StringComparison.OrdinalIgnoreCase);
     }
 }

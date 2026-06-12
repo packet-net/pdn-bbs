@@ -218,7 +218,9 @@ public sealed class SevenPlusStoreTests : IDisposable
         DowngradeToV2(path);
 
         using BbsStore upgraded = BbsStore.Open(path, "GB7PDN", _ts.Time);
-        Assert.Equal(3, upgraded.SchemaVersion);
+        // Reopening always migrates to the current version (v2 → v3 → … → current); this test asserts
+        // the v3 additions in particular survive the upgrade.
+        Assert.Equal(BbsStore.CurrentSchemaVersion, upgraded.SchemaVersion);
 
         // The pre-existing row survived and now reads local_only=false through the v3 code.
         Message loaded = upgraded.GetMessage(legacyNumber)!;
@@ -236,11 +238,12 @@ public sealed class SevenPlusStoreTests : IDisposable
         Assert.True(upgraded.IsSevenPlusPartMessage(legacyNumber));
     }
 
-    /// <summary>Strips the v3 schema additions and resets the version stamp, leaving a genuine v2 db on disk.</summary>
+    /// <summary>Strips the v3+ schema additions and resets the version stamp, leaving a genuine v2 db on disk.</summary>
     private static void DowngradeToV2(string path)
     {
         using var connection = new SqliteConnection($"Data Source={path};Mode=ReadWrite;Pooling=False");
         connection.Open();
+        Exec(connection, "DROP TABLE IF EXISTS mail_auth;"); // v4 — also a later addition the seed carries
         Exec(connection, "DROP TABLE IF EXISTS sevenplus_parts;");
         Exec(connection, "DROP TABLE IF EXISTS sevenplus_files;");
         // messages is a rowid table here, so DROP COLUMN works on this SQLite — but rebuild to be
