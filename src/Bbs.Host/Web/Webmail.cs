@@ -150,28 +150,97 @@ public static class Webmail
 
     private static IResult Inbox(WebmailOptions o, string prefix, string call, int page)
     {
-        IReadOnlyList<Message> mine = o.Store.ListMessages(new MessageQuery
+        IReadOnlyList<Message> mine = HideSevenPlusParts(o.Store, o.Store.ListMessages(new MessageQuery
         {
             Type = MessageType.Personal,
             ToCall = call,
-        });
+        }));
+        // Personal placeholders are scoped to this user's incoming files only (never leak another
+        // user's private incoming-file name into this inbox).
+        string placeholders = SevenPlusPlaceholders(o.Store, MessageType.Personal, call);
         string rows = MessageRows(mine, page, o.PageSize, call, prefix, "/");
         return Html(Page(o, prefix, call, "Inbox",
             $"""
             <h2>Inbox — personal messages for {H(call)}</h2>
+            {placeholders}
             {rows}
             """));
     }
 
     private static IResult Bulletins(WebmailOptions o, string prefix, string call, int page)
     {
-        IReadOnlyList<Message> bulls = o.Store.ListMessages(new MessageQuery { Type = MessageType.Bulletin });
+        IReadOnlyList<Message> bulls = HideSevenPlusParts(o.Store, o.Store.ListMessages(new MessageQuery { Type = MessageType.Bulletin }));
+        // Bulletins are world-visible, so the bulletin placeholders are not recipient-scoped.
+        string placeholders = SevenPlusPlaceholders(o.Store, MessageType.Bulletin, recipientCall: null);
         string rows = MessageRows(bulls, page, o.PageSize, call, prefix, "/bulletins");
         return Html(Page(o, prefix, call, "Bulletins",
             $"""
             <h2>Bulletins</h2>
+            {placeholders}
             {rows}
             """));
+    }
+
+    /// <summary>
+    /// Drops raw 7plus source part-bulletins from a listing (design.md "the raw 7plus text never
+    /// shown"). The hidden messages stay in the store and still forward — only the listing hides
+    /// them; their read route still works for a direct link. The assembled-file message (a
+    /// <c>local_only</c> message with an attachment) is NOT in the part set, so it lists normally.
+    /// </summary>
+    private static IReadOnlyList<Message> HideSevenPlusParts(BbsStore store, IReadOnlyList<Message> messages)
+    {
+        IReadOnlySet<long> hidden = store.GetSevenPlusPartMessageNumbers();
+        if (hidden.Count == 0)
+        {
+            return messages;
+        }
+
+        var visible = new List<Message>(messages.Count);
+        foreach (Message m in messages)
+        {
+            if (!hidden.Contains(m.Number))
+            {
+                visible.Add(m);
+            }
+        }
+
+        return visible;
+    }
+
+    /// <summary>
+    /// A lightweight, read-only placeholder per in-flight (incomplete, not-yet-assembled) 7plus file
+    /// whose parts arrived as the given type — "FIELDS.JPG — 7plus, 3/5 parts received". No
+    /// attachment, no link: it shows progress until the set completes and a real assembled-file
+    /// message replaces it. Empty when there are none.
+    /// </summary>
+    private static string SevenPlusPlaceholders(BbsStore store, MessageType type, string? recipientCall)
+    {
+        var pending = new List<SevenPlusProgress>();
+        foreach (SevenPlusProgress p in store.ListIncompleteSevenPlusFiles(recipientCall))
+        {
+            // Show under the matching list; default a typeless (no source yet — shouldn't happen) to
+            // the bulletins list since 7plus files conventionally arrive as part-bulletins.
+            MessageType placeholderType = p.SourceType ?? MessageType.Bulletin;
+            if (placeholderType == type)
+            {
+                pending.Add(p);
+            }
+        }
+
+        if (pending.Count == 0)
+        {
+            return "";
+        }
+
+        var sb = new StringBuilder("<ul class=\"sevenplus-pending\">");
+        foreach (SevenPlusProgress p in pending)
+        {
+            sb.Append(Inv(
+                $"""<li>{H(p.HeaderName.Trim())} <span class="dim">— 7plus, {p.ReceivedParts}/{p.TotalParts} parts received</span></li>"""));
+        }
+
+        sb.Append("</ul>");
+        return sb.ToString();
     }
 
     private static IResult ReadMessage(WebmailOptions o, string prefix, string call, long number)
@@ -465,6 +534,8 @@ public static class Webmail
         table.meta th{width:6rem;color:#8a857c;font-weight:normal}
         .err{color:#a32014}.pager{margin-top:.75rem}
         ul.attachments{padding-left:1.2rem}ul.attachments .dim{color:#8a857c}
+        ul.sevenplus-pending{list-style:none;padding:0;margin:0 0 1rem}
+        ul.sevenplus-pending li{padding:.3rem .6rem;border:1px dashed #c9c3b8;background:#fbfaf6;border-radius:3px;margin-bottom:.3rem;font-size:.92rem}
         input,select,textarea{font:inherit}
         button{font:inherit;padding:.2rem .8rem}
         </style>

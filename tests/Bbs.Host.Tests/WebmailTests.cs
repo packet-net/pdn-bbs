@@ -504,4 +504,124 @@ public sealed class WebmailTests : IAsyncDisposable
         Assert.Equal(HttpStatusCode.Found, kill.StatusCode);
         Assert.Equal("/apps/bbs/", kill.Headers.Location!.OriginalString); // not /apps/bbs//
     }
+
+    // ------------------------------------------------ inbound 7plus: hide raw parts + placeholder
+
+    private const string SevenPlusKey = "7p|10|FIELDS.JPG  |145173|5|138";
+
+    /// <summary>Stores a raw 7plus part-bulletin and records it against the file identity.</summary>
+    private Message SeedPart(int partNumber, int total, string subject)
+    {
+        Message part = _store.AddMessage(new MessageDraft
+        {
+            Type = MessageType.Bulletin,
+            From = "M0XYZ",
+            Recipients = ["ALL"],
+            Subject = subject,
+            Body = Encoding.Latin1.GetBytes("raw 7plus go_7+ part text\r"),
+            ReceivedFrom = "GB7BPQ",
+        });
+        _store.RecordSevenPlusPart(SevenPlusKey, "FIELDS.JPG  ", 145173, total, 138, partNumber, part.Number);
+        return part;
+    }
+
+    [Fact]
+    public async Task Bulletins_HideRaw7plusPartMessages_ButShowAPlaceholderForTheIncompleteSet()
+    {
+        ClaimCallsign("tom", "M0LTE");
+        Message p1 = SeedPart(1, total: 5, "FIELDS.P01 of 05");
+        Message p2 = SeedPart(2, total: 5, "FIELDS.P02 of 05");
+        using HttpClient client = await StartAsync();
+
+        string bulletins = await client.GetStringAsync(new Uri("/bulletins", UriKind.Relative));
+
+        // The raw part-bulletin subjects do NOT appear in the listing.
+        Assert.DoesNotContain("FIELDS.P01", bulletins, StringComparison.Ordinal);
+        Assert.DoesNotContain("FIELDS.P02", bulletins, StringComparison.Ordinal);
+        // ...but the lightweight progress placeholder does, clearly distinguished and read-only. The
+        // "N/M parts received" text only renders when a placeholder is present (the class name lives
+        // in the always-present stylesheet, so assert on the visible text instead).
+        Assert.Contains("FIELDS.JPG", bulletins, StringComparison.Ordinal);
+        Assert.Contains("2/5 parts received", bulletins, StringComparison.Ordinal);
+        Assert.Contains("<ul class=\"sevenplus-pending\">", bulletins, StringComparison.Ordinal);
+
+        // The hidden messages are still in the store + still forward (only the listing hides them):
+        // their read route still works for a direct link.
+        string read = await client.GetStringAsync(new Uri($"/messages/{p1.Number}", UriKind.Relative));
+        Assert.Contains("go_7+", read, StringComparison.Ordinal);
+        Assert.Equal(2, _store.ListMessages(new MessageQuery { Type = MessageType.Bulletin }).Count);
+        _ = p2;
+    }
+
+    [Fact]
+    public async Task Inbox_PersonalPlaceholder_IsScopedToTheAddressee_NotLeakedToOtherUsers()
+    {
+        // A PERSONAL 7plus file in flight to M0AAA must show its placeholder ONLY in M0AAA's inbox —
+        // never in M0BBB's (which would leak the private incoming filename + progress).
+        ClaimCallsign("aaa", "M0AAA");
+        ClaimCallsign("bbb", "M0BBB");
+        Message part = _store.AddMessage(new MessageDraft
+        {
+            Type = MessageType.Personal,
+            From = "G8ABC",
+            Recipients = ["M0AAA"],
+            Subject = "SECRET.P01",
+            Body = Encoding.Latin1.GetBytes("go_7+ private part\r"),
+        });
+        _store.RecordSevenPlusPart(SevenPlusKey, "SECRET.ZIP  ", 145173, 5, 138, 1, part.Number);
+
+        using HttpClient aaa = await StartAsync(pdnUser: "aaa");
+        string aaaInbox = await aaa.GetStringAsync(new Uri("/", UriKind.Relative));
+        Assert.Contains("SECRET.ZIP", aaaInbox, StringComparison.Ordinal);
+        Assert.Contains("1/5 parts received", aaaInbox, StringComparison.Ordinal);
+
+        await _app!.DisposeAsync();
+        _app = null;
+
+        using HttpClient bbb = await StartAsync(pdnUser: "bbb");
+        string bbbInbox = await bbb.GetStringAsync(new Uri("/", UriKind.Relative));
+        Assert.DoesNotContain("SECRET.ZIP", bbbInbox, StringComparison.Ordinal);
+        Assert.DoesNotContain("parts received", bbbInbox, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Bulletins_AssembledFile_ListsNormally_WithItsAttachment_AndNoPlaceholder()
+    {
+        ClaimCallsign("tom", "M0LTE");
+        SeedPart(1, total: 1, "FIELDS.P01");
+
+        // Assemble: a synthesized local_only bulletin carrying the decoded file as an attachment.
+        Message assembled = _store.AddMessage(new MessageDraft
+        {
+            Type = MessageType.Bulletin,
+            From = "M0XYZ",
+            Recipients = ["ALL"],
+            Subject = "fields.jpg",
+            Body = Encoding.Latin1.GetBytes("7plus file fields.jpg — 1 parts, assembled 2019-03-19.\r"),
+            Attachments = [new MessageAttachment("fields.jpg", new byte[] { 0xFF, 0xD8, 0xFF, 0xE0 })],
+            LocalOnly = true,
+        });
+        Assert.True(_store.MarkSevenPlusAssembled(SevenPlusKey, assembled.Number));
+
+        using HttpClient client = await StartAsync();
+        string bulletins = await client.GetStringAsync(new Uri("/bulletins", UriKind.Relative));
+
+        // The assembled-file message lists like any bulletin; no placeholder (the set is assembled).
+        Assert.Contains("fields.jpg", bulletins, StringComparison.Ordinal);
+        // No placeholder is rendered (the set is assembled) — assert on the visible markup, since the
+        // CSS class name itself lives in the always-present stylesheet.
+        Assert.DoesNotContain("<ul class=\"sevenplus-pending\">", bulletins, StringComparison.Ordinal);
+        Assert.DoesNotContain("parts received", bulletins, StringComparison.Ordinal);
+        Assert.Contains($"/messages/{assembled.Number}", bulletins, StringComparison.Ordinal);
+
+        // Opening it shows the attachment download (rides the existing attachments work).
+        string page = await client.GetStringAsync(new Uri($"/messages/{assembled.Number}", UriKind.Relative));
+        Assert.Contains("Attachments", page, StringComparison.Ordinal);
+        Assert.Contains($"/messages/{assembled.Number}/attachments/fields.jpg", page, StringComparison.Ordinal);
+
+        HttpResponseMessage download = await client.GetAsync(
+            new Uri($"/messages/{assembled.Number}/attachments/fields.jpg", UriKind.Relative));
+        download.EnsureSuccessStatusCode();
+        Assert.Equal(new byte[] { 0xFF, 0xD8, 0xFF, 0xE0 }, await download.Content.ReadAsByteArrayAsync());
+    }
 }
