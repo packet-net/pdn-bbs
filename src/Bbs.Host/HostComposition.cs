@@ -87,7 +87,7 @@ public static class HostComposition
         builder.Services.AddSingleton(sp =>
             new RoutingService(store, engine, sp.GetRequiredService<ILogger<RoutingService>>()));
         builder.Services.AddSingleton(sp => new InboundMessageReceiver(
-            store, sp.GetRequiredService<RoutingService>(), baseCallsign, time,
+            store, sp.GetRequiredService<RoutingService>(), engine, baseCallsign, time,
             sp.GetRequiredService<ILogger<InboundMessageReceiver>>()));
         builder.Services.AddSingleton(sp => new FbbSessionRunner(
             store, sp.GetRequiredService<InboundMessageReceiver>(), identity, version, time,

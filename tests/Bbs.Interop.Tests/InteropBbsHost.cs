@@ -33,9 +33,10 @@ internal sealed class InteropBbsHost : IDisposable
         _dir = Directory.CreateTempSubdirectory("bbs-interop-test-");
         Store = BbsStore.Open(Path.Combine(_dir.FullName, "bbs.db"), OwnCall, TimeProvider.System);
         Identity = new BbsIdentity { Callsign = OwnCall, HRoute = HRoute, SoftwareVersion = "PDN" + Version };
-        Routing = new RoutingService(Store, new RoutingEngine(OwnCall, HRoute), NullLogger<RoutingService>.Instance);
+        var engine = new RoutingEngine(OwnCall, HRoute);
+        Routing = new RoutingService(Store, engine, NullLogger<RoutingService>.Instance);
         Receiver = new InboundMessageReceiver(
-            Store, Routing, OwnCall, TimeProvider.System, NullLogger<InboundMessageReceiver>.Instance);
+            Store, Routing, engine, OwnCall, TimeProvider.System, NullLogger<InboundMessageReceiver>.Instance);
         Runner = new Ax25FbbSessionRunner(Store, Receiver, Identity, Version, TimeProvider.System);
     }
 

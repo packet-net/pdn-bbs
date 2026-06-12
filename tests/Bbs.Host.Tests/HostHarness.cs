@@ -35,7 +35,7 @@ internal sealed class HostHarness : IAsyncDisposable
         Identity = new BbsIdentity { Callsign = OwnCall, HRoute = HRoute, SoftwareVersion = "PDN" + Version };
         Engine = new RoutingEngine(OwnCall, HRoute);
         Routing = new RoutingService(Store, Engine, NullLogger<RoutingService>.Instance);
-        Receiver = new InboundMessageReceiver(Store, Routing, OwnCall, Time, NullLogger<InboundMessageReceiver>.Instance);
+        Receiver = new InboundMessageReceiver(Store, Routing, Engine, OwnCall, Time, NullLogger<InboundMessageReceiver>.Instance);
         Runner = new FbbSessionRunner(Store, Receiver, Identity, Version, Time, NullLogger<FbbSessionRunner>.Instance);
         Link = new RhpNodeLink(
             new RhpLinkOptions

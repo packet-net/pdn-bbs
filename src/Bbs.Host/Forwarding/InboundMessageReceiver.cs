@@ -16,6 +16,7 @@ public sealed class InboundMessageReceiver
 {
     private readonly BbsStore _store;
     private readonly RoutingService _routing;
+    private readonly RoutingEngine _engine;
     private readonly string _ownBaseCall;
     private readonly TimeProvider _time;
     private readonly ILogger _logger;
@@ -27,17 +28,20 @@ public sealed class InboundMessageReceiver
     public InboundMessageReceiver(
         BbsStore store,
         RoutingService routing,
+        RoutingEngine engine,
         string ownCallsign,
         TimeProvider time,
         ILogger<InboundMessageReceiver> logger)
     {
         ArgumentNullException.ThrowIfNull(store);
         ArgumentNullException.ThrowIfNull(routing);
+        ArgumentNullException.ThrowIfNull(engine);
         ArgumentException.ThrowIfNullOrWhiteSpace(ownCallsign);
         ArgumentNullException.ThrowIfNull(time);
         ArgumentNullException.ThrowIfNull(logger);
         _store = store;
         _routing = routing;
+        _engine = engine;
         _ownBaseCall = Callsigns.StripSsid(Callsigns.Normalize(ownCallsign));
         _time = time;
         _logger = logger;
@@ -128,8 +132,53 @@ public sealed class InboundMessageReceiver
         }
 
         LogStored(_logger, stored.Number, stored.Bid, fromPartnerCall, null);
+        AutoCreateHomedUser(fa);
         _routing.RouteMessage(stored);
         return stored;
+    }
+
+    /// <summary>
+    /// Auto-creates the recipient's user record on the first inbound personal homed here
+    /// (design.md "The home-BBS requirement" rule #2). Trigger — only this case:
+    /// <list type="bullet">
+    /// <item>the delivery is a <b>Personal</b> (never a bulletin or NTS/traffic), and</item>
+    /// <item>its <b>AT resolves to us</b> — <see cref="RoutingEngine.AtResolvesToLocal(string?)"/>,
+    /// the same own-call/own-HA signal rule #1's local-delivery pre-empt uses; this is the homed
+    /// mailbox case, distinct from a no-AT personal that is only local because its TO is already
+    /// a known user, and</item>
+    /// <item>the TO is <b>not</b> already a known local user (<see cref="BbsStore.UserExists"/>).</item>
+    /// </list>
+    /// then a skeletal user is created (<see cref="BbsStore.EnsureUser"/>, idempotent) so the
+    /// mail is listable on the owner's first connect. Runs only on this inbound path — webmail
+    /// compose / console sends never reach it, so they never auto-create. An explicit remote AT
+    /// fails the AT-is-us test (and forwards onward per rule #1), so it never auto-creates either.
+    /// </summary>
+    private void AutoCreateHomedUser(FaProposal fa)
+    {
+        MessageType type;
+        try
+        {
+            type = MessageTypeExtensions.MessageTypeFromCode(fa.MessageType);
+        }
+        catch (ArgumentOutOfRangeException)
+        {
+            return;
+        }
+
+        if (type != MessageType.Personal || !_engine.AtResolvesToLocal(fa.AtBbs))
+        {
+            return;
+        }
+
+        if (_store.UserExists(fa.To))
+        {
+            return; // already a user — nothing to create (rule #2 fires only for unknown TOs)
+        }
+
+        if (_store.EnsureUser(fa.To))
+        {
+            LogAutoCreatedUser(_logger, Callsigns.NormalizeAddressee(fa.To), fa.Bid, null);
+        }
     }
 
     /// <summary>The §3.14 R:-chain checks: own-call loop, future-dated/expired/corrupt oldest hop.</summary>
@@ -180,4 +229,8 @@ public sealed class InboundMessageReceiver
     private static readonly Action<ILogger, long, string, string, Exception?> LogStored =
         LoggerMessage.Define<long, string, string>(LogLevel.Information, new EventId(6, "Stored"),
             "Stored message {Number} (BID {Bid}) from {Partner}");
+
+    private static readonly Action<ILogger, string, string, Exception?> LogAutoCreatedUser =
+        LoggerMessage.Define<string, string>(LogLevel.Information, new EventId(7, "AutoCreatedUser"),
+            "Auto-created skeletal user {Call} on first inbound personal homed here (BID {Bid})");
 }
