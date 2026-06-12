@@ -117,6 +117,12 @@ public sealed class FbbSessionRunner
 
                 // Answerer = continue-mode: the demux greeted (SID + prompt) on accept.
                 SidAlreadySent = role == FbbRole.Answerer,
+
+                // B2F is opt-in per partner (default off → B1 unchanged). When set we advertise
+                // '2' in our SID; the session then activates B2 only if the peer's SID also
+                // advertises it (B2Active = our offer ∩ the peer SID — spec §3.2/§3.9). An
+                // unknown caller (no partner record) is never B2-allowed, so its FC is refused.
+                OfferB2 = partner?.AllowB2F ?? false,
             },
             outbound.Select(o => o.Wire));
 

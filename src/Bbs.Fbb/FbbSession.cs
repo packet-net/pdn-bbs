@@ -111,6 +111,7 @@ public sealed class FbbSession
     private List<FbbOutboundMessage>? _proposedBatch;
     private LzhufContainerKind _container = LzhufContainerKind.B1;
     private bool _skipNextLf;
+    private bool _b2Active;
 
     /// <summary>Creates a session with the messages we intend to forward (may be empty).</summary>
     /// <exception cref="ArgumentException"><see cref="FbbSessionConfig.SidAlreadySent"/> is set on a caller.</exception>
@@ -136,6 +137,15 @@ public sealed class FbbSession
 
     /// <summary>The container negotiated from the SID exchange (B1 unless the peer is V0-only) — spec §3.0.</summary>
     public LzhufContainerKind NegotiatedContainer => _container;
+
+    /// <summary>
+    /// Whether B2F (FC) is active for this session — set once the peer's SID is parsed:
+    /// <see cref="FbbSessionConfig.OfferB2"/> AND the peer advertised B2 (<see cref="Sid.SupportsB2"/>).
+    /// When active the proposer emits uniform <c>FC EM</c> proposals and transfers each queued
+    /// message — already a B2 object — through the existing B1 framing (spec §3.3/§3.9); the
+    /// container is B1 either way ("B2 uses B1 mode"). When inactive the FSM is the B1 path.
+    /// </summary>
+    public bool B2Active => _b2Active;
 
     /// <summary>
     /// Drives the machine: applies one input and returns the actions to
@@ -402,6 +412,12 @@ public sealed class FbbSession
         }
 
         _container = sid.SupportsB1 || sid.SupportsB2 ? LzhufContainerKind.B1 : LzhufContainerKind.B;
+
+        // B2 is active iff we offered it AND the peer advertised it — the SID intersection
+        // (spec §3.2/§3.9). It makes both directions consistent: we only emit FC, and only
+        // legitimately receive FC, when both ends speak B2. The container is B1 regardless
+        // ("B2 uses B1 mode (crc on front of file)" [BPQ-SRC]).
+        _b2Active = _config.OfferB2 && sid.SupportsB2;
         if (_config.Role == FbbRole.Answerer)
         {
             Phase = FbbSessionPhase.PeerTurn; // the caller proposes first (spec §3.1 step 3)
@@ -547,9 +563,55 @@ public sealed class FbbSession
         // Non-protocol text while awaiting FS is ignored.
     }
 
+    /// <summary>
+    /// The proposal line for one queued message: an <c>FC EM</c> proposal when B2 is active
+    /// (spec §3.9 — MID + uncompressed object size + compressed size, uniform across the
+    /// block; the B2 object is <see cref="FbbOutboundMessage.Body"/> built by the host), else
+    /// the classic 7-field <c>FA</c> proposal (spec §3.3). Both ride the same B1 framing on
+    /// transfer (<see cref="SendMessage"/>); the FC compressed size is computed from the same
+    /// container, so it matches the bytes that will follow FS.
+    /// </summary>
+    private string ProposeLine(FbbOutboundMessage message)
+    {
+        if (UsesB2(message, out var obj))
+        {
+            var compressedSize = LzhufContainer.Encode(_container, obj.Span).Length;
+            return new FcProposal(FcType.Em, message.Bid, obj.Length, compressedSize).ToWireLine();
+        }
+
+        return new FaProposal(
+            'A',
+            message.MessageType,
+            message.From,
+            message.AtBbs,
+            message.To,
+            message.Bid,
+            message.Body.Length).ToWireLine();
+    }
+
+    /// <summary>
+    /// Whether this message is shipped as a B2 object: B2 was negotiated for the session AND
+    /// the host built one. The B1-allowed-but-peer-is-B1-only fallback returns
+    /// <see langword="false"/> (no <see cref="FbbOutboundMessage.B2Object"/>), so it proposes FA.
+    /// </summary>
+    private bool UsesB2(FbbOutboundMessage message, out ReadOnlyMemory<byte> obj)
+    {
+        if (_b2Active && message.B2Object is { } b2)
+        {
+            obj = b2;
+            return true;
+        }
+
+        obj = default;
+        return false;
+    }
+
     private void SendMessage(FbbOutboundMessage message, int offset, List<FbbAction> actions)
     {
-        var compressed = LzhufContainer.Encode(_container, message.Body.Span);
+        // The transferred plaintext is the B2 object when B2 is active (spec §3.9), else the
+        // B1 plaintext (spec §3.7) — both ride the same B1 container + SOH/STX/EOT framing.
+        var plaintext = UsesB2(message, out var obj) ? obj.Span : message.Body.Span;
+        var compressed = LzhufContainer.Encode(_container, plaintext);
         byte[] payload;
         var headerOffset = 0;
         if (offset > 0 && _container == LzhufContainerKind.B1 && offset + 6 <= compressed.Length)
@@ -650,14 +712,7 @@ public sealed class FbbSession
                 _outbound.Dequeue();
                 batch.Add(candidate);
                 accumulated += candidate.Body.Length;
-                lines.Add(new FaProposal(
-                    'A',
-                    candidate.MessageType,
-                    candidate.From,
-                    candidate.AtBbs,
-                    candidate.To,
-                    candidate.Bid,
-                    candidate.Body.Length).ToWireLine());
+                lines.Add(ProposeLine(candidate));
             }
 
             foreach (var line in lines)

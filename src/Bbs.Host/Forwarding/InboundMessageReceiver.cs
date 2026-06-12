@@ -49,8 +49,11 @@ public sealed class InboundMessageReceiver
 
     /// <summary>
     /// Decides one proposal block (spec §3.4, receive order per §4.3): oversize → '-',
-    /// duplicate BID → '-', B2F FC (never advertised, so never legitimately offered) → '-',
-    /// else '+'. The session itself downgrades the §3.3 polite-reject class.
+    /// duplicate BID → '-', else '+'. An <c>FC</c> (B2F) proposal is accepted on the SAME
+    /// terms as an FA — but ONLY from a partner we enabled B2 on (<see cref="Partner.AllowB2F"/>);
+    /// from anyone else we never advertised B2, so FC was never legitimately offered and is
+    /// refused with '-' (the original guard, intact). The session itself downgrades the §3.3
+    /// polite-reject class.
     /// </summary>
     public IReadOnlyList<FsAnswer> Decide(IReadOnlyList<Proposal> proposals, Partner? partner)
     {
@@ -59,13 +62,48 @@ public sealed class InboundMessageReceiver
         // Unknown peers (SID-shaped caller without a partner record) get the global
         // default cap (compat spec §4.1 MaxRXSize default 99999).
         int maxRx = partner?.MaxRxSize ?? 99999;
+        bool allowB2 = partner?.AllowB2F ?? false;
         var answers = new FsAnswer[proposals.Count];
         for (int i = 0; i < proposals.Count; i++)
         {
-            answers[i] = proposals[i] is FaProposal fa ? DecideFa(fa, maxRx) : FsAnswer.AlreadyHave;
+            answers[i] = proposals[i] switch
+            {
+                FaProposal fa => DecideFa(fa, maxRx),
+                FcProposal fc => DecideFc(fc, maxRx, allowB2),
+                _ => FsAnswer.AlreadyHave,
+            };
         }
 
         return answers;
+    }
+
+    /// <summary>
+    /// Decides one B2F <c>FC</c> proposal (spec §3.9). Refused with '-' unless the partner is
+    /// B2-enabled (we only ever advertised B2 to those). Then the same proposal-time policy as
+    /// FA: oversize (the FC carries the uncompressed object size) → '-', a known MID/BID → '-'
+    /// (the network-wide dedup identity), else '+'. The TO/type live in the B2 header (not the
+    /// FC), so the dup check keys on the MID alone here — sufficient for B2's MID-is-unique model.
+    /// </summary>
+    private FsAnswer DecideFc(FcProposal fc, int maxRx, bool allowB2)
+    {
+        if (!allowB2)
+        {
+            return FsAnswer.AlreadyHave; // never advertised B2 → never legitimately offered
+        }
+
+        if (fc.UncompressedSize > maxRx)
+        {
+            LogRefusedSize(_logger, fc.Mid, fc.UncompressedSize, maxRx, null);
+            return FsAnswer.AlreadyHave;
+        }
+
+        if (_store.LookupBid(fc.Mid) is not null)
+        {
+            LogRefusedBid(_logger, fc.Mid, null);
+            return FsAnswer.AlreadyHave; // known MID → '-' (spec §4.3/§2.3)
+        }
+
+        return FsAnswer.Accept;
     }
 
     private FsAnswer DecideFa(FaProposal fa, int maxRx)
@@ -106,22 +144,102 @@ public sealed class InboundMessageReceiver
         ArgumentNullException.ThrowIfNull(delivered);
         ArgumentException.ThrowIfNullOrWhiteSpace(fromPartnerCall);
 
-        if (delivered.Proposal is not FaProposal fa)
+        return delivered.Proposal switch
         {
-            LogUnsupportedDelivery(_logger, delivered.Proposal.GetType().Name, null);
+            FaProposal fa => DeliverFa(fa, delivered, fromPartnerCall),
+            FcProposal fc => DeliverFc(fc, delivered, fromPartnerCall),
+            _ => Unsupported(delivered),
+        };
+    }
+
+    private Message? Unsupported(FbbMessageDelivered delivered)
+    {
+        LogUnsupportedDelivery(_logger, delivered.Proposal.GetType().Name, null);
+        return null;
+    }
+
+    private Message DeliverFa(FaProposal fa, FbbMessageDelivered delivered, string fromPartnerCall)
+    {
+        MessageType type = MessageTypeExtensions.MessageTypeFromCode(fa.MessageType);
+        Message stored = StoreAndRoute(
+            type, fa.From, fa.To, fa.AtBbs, fa.Bid, delivered.Title, delivered.Body, fromPartnerCall);
+        AutoCreateHomedUser(type, fa.To, fa.AtBbs, fa.Bid);
+        return stored;
+    }
+
+    /// <summary>
+    /// Stores one inbound B2F (FC) object (spec §3.9): the delivered body is the whole B2
+    /// object, so decode it, map From/To/Subject/Body/MID(=BID) onto the stored message, and
+    /// run it through the SAME store + auto-create + route path as a B1 (FA) inbound — so the
+    /// home-BBS rules (design.md rules #1/#2) and the loop/age R-chain guard apply identically.
+    /// The routing TO/AT come from the B2 <c>To:</c> header (a bare call, or <c>call@bbs</c> —
+    /// the <see cref="HierarchicalAddress"/>/AT split mirrors the console's send addressing).
+    ///
+    /// SCOPE (named deferral — slice 2): single-recipient, no-attachment. Multiple To:/Cc: and
+    /// File: attachments decode (B2Message handles them) but only the first To is stored/routed
+    /// here — the same first-recipient deferral the FA path takes. Multi-recipient fan-out +
+    /// attachment storage is a follow-up (see the skipped multi-recipient test).
+    /// </summary>
+    private Message? DeliverFc(FcProposal fc, FbbMessageDelivered delivered, string fromPartnerCall)
+    {
+        B2Message b2;
+        try
+        {
+            b2 = B2Message.Decode(delivered.Body.Span);
+        }
+        catch (FbbProtocolException ex)
+        {
+            // A B2 object that survived the container CRC but is structurally malformed: log and
+            // drop (the session already acknowledged receipt — there is no FS to fail here).
+            LogB2DecodeFailed(_logger, fc.Mid, ex.Message, null);
             return null;
         }
 
-        string? holdReason = CheckRChain(delivered.Body);
+        (string to, string? at) = SplitToAt(b2.To.Count > 0 ? b2.To[0] : "");
+        MessageType type = b2.Type switch
+        {
+            B2MessageType.Bulletin => MessageType.Bulletin,
+            _ => MessageType.Personal, // BPQ stores all B2 arrivals as P; we keep B → Bulletin, rest → Personal
+        };
+
+        Message stored = StoreAndRoute(
+            type,
+            from: b2.From ?? to,
+            to: to,
+            atBbs: at ?? "",
+            bid: b2.Mid,
+            subject: b2.Subject ?? delivered.Title,
+            body: b2.Body,
+            fromPartnerCall);
+        AutoCreateHomedUser(type, to, at ?? "", b2.Mid);
+        return stored;
+    }
+
+    /// <summary>
+    /// The common inbound store + R-chain hold + route path shared by the FA and FC deliveries.
+    /// The body is stored verbatim (the sender's R: chain intact); the BID is recorded with its
+    /// arrival direction (the routing loop-guard input); §3.14 loop/age failures store Held.
+    /// </summary>
+    private Message StoreAndRoute(
+        MessageType type,
+        string from,
+        string to,
+        string atBbs,
+        string bid,
+        string subject,
+        ReadOnlyMemory<byte> body,
+        string fromPartnerCall)
+    {
+        string? holdReason = CheckRChain(body);
         var stored = _store.AddMessage(new MessageDraft
         {
-            Type = MessageTypeExtensions.MessageTypeFromCode(fa.MessageType),
-            From = fa.From,
-            Recipients = [fa.To],
-            At = fa.AtBbs,
-            Bid = fa.Bid,
-            Subject = delivered.Title,
-            Body = delivered.Body,
+            Type = type,
+            From = from,
+            Recipients = [to],
+            At = atBbs,
+            Bid = bid,
+            Subject = subject,
+            Body = body,
             ReceivedFrom = fromPartnerCall,
             Hold = holdReason is not null,
         });
@@ -132,9 +250,27 @@ public sealed class InboundMessageReceiver
         }
 
         LogStored(_logger, stored.Number, stored.Bid, fromPartnerCall, null);
-        AutoCreateHomedUser(fa);
         _routing.RouteMessage(stored);
         return stored;
+    }
+
+    /// <summary>
+    /// Splits a B2 <c>To:</c> address into (TO, AT): <c>call@bbs.ha</c> → ("call", "bbs.ha");
+    /// a bare call → (call, null). Mirrors the console's <c>send call@bbs</c> parse so a homed
+    /// personal (<c>call@&lt;us&gt;</c>) is recognised local by the same AT-is-us signal.
+    /// </summary>
+    private static (string To, string? At) SplitToAt(string address)
+    {
+        string trimmed = address.Trim();
+        int at = trimmed.IndexOf('@', StringComparison.Ordinal);
+        if (at < 0)
+        {
+            return (trimmed, null);
+        }
+
+        string to = trimmed[..at];
+        string atBbs = trimmed[(at + 1)..];
+        return atBbs.Length > 0 ? (to, atBbs) : (to, null);
     }
 
     /// <summary>
@@ -153,31 +289,21 @@ public sealed class InboundMessageReceiver
     /// compose / console sends never reach it, so they never auto-create. An explicit remote AT
     /// fails the AT-is-us test (and forwards onward per rule #1), so it never auto-creates either.
     /// </summary>
-    private void AutoCreateHomedUser(FaProposal fa)
+    private void AutoCreateHomedUser(MessageType type, string to, string atBbs, string bid)
     {
-        MessageType type;
-        try
-        {
-            type = MessageTypeExtensions.MessageTypeFromCode(fa.MessageType);
-        }
-        catch (ArgumentOutOfRangeException)
+        if (type != MessageType.Personal || !_engine.AtResolvesToLocal(atBbs))
         {
             return;
         }
 
-        if (type != MessageType.Personal || !_engine.AtResolvesToLocal(fa.AtBbs))
-        {
-            return;
-        }
-
-        if (_store.UserExists(fa.To))
+        if (_store.UserExists(to))
         {
             return; // already a user — nothing to create (rule #2 fires only for unknown TOs)
         }
 
-        if (_store.EnsureUser(fa.To))
+        if (_store.EnsureUser(to))
         {
-            LogAutoCreatedUser(_logger, Callsigns.NormalizeAddressee(fa.To), fa.Bid, null);
+            LogAutoCreatedUser(_logger, Callsigns.NormalizeAddressee(to), bid, null);
         }
     }
 
@@ -221,6 +347,10 @@ public sealed class InboundMessageReceiver
     private static readonly Action<ILogger, string, Exception?> LogUnsupportedDelivery =
         LoggerMessage.Define<string>(LogLevel.Warning, new EventId(4, "UnsupportedDelivery"),
             "Discarded delivered message with unsupported proposal shape {Shape}");
+
+    private static readonly Action<ILogger, string, string, Exception?> LogB2DecodeFailed =
+        LoggerMessage.Define<string, string>(LogLevel.Warning, new EventId(8, "B2DecodeFailed"),
+            "Discarded delivered B2F object {Mid}: malformed B2 message ({Detail})");
 
     private static readonly Action<ILogger, long, string, Exception?> LogHeld =
         LoggerMessage.Define<long, string>(LogLevel.Warning, new EventId(5, "Held"),

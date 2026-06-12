@@ -33,4 +33,14 @@ public sealed record FbbOutboundMessage
     /// message size in bytes, including the R: line" (spec §3.3).
     /// </summary>
     public required ReadOnlyMemory<byte> Body { get; init; }
+
+    /// <summary>
+    /// The pre-built B2F object for this message (spec §3.9) — the host fills it (via
+    /// <c>B2Message.Encode</c>) for partners it has enabled B2 on. The session ships it as an
+    /// <c>FC EM</c> proposal + B1-framed transfer ONLY when B2F was negotiated for the session
+    /// (<see cref="FbbSession.B2Active"/> = our offer ∩ the peer's SID); otherwise — including
+    /// the B2-allowed-but-peer-is-B1-only fallback — it proposes <see cref="Body"/> as FA. Null
+    /// when the host built no B2 object (a B1-only partner), so the FSM always falls back to FA.
+    /// </summary>
+    public ReadOnlyMemory<byte>? B2Object { get; init; }
 }
