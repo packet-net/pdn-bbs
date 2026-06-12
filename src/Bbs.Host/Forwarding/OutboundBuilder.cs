@@ -64,9 +64,12 @@ public static class OutboundBuilder
                 continue;
             }
 
-            // Multi-recipient messages queue once per partner; the proposal names the
-            // first recipient (v1 — LinBPQ fans out per-recipient copies, named deferral).
-            string to = message.Recipients.Count > 0 ? message.Recipients[0].ToCall : message.From;
+            // Multi-recipient messages queue once per partner; the FA/FC proposal names the
+            // PRIMARY recipient (first To). A B2 object additionally carries the full To/Cc list +
+            // attachments below; the B1/FA wire is single-recipient by protocol (FBB's next hop
+            // re-distributes) — the F-1 per-home fan-out deferral, not a silent drop.
+            string to = message.Recipients.FirstOrDefault(r => !r.Cc)?.ToCall
+                ?? (message.Recipients.Count > 0 ? message.Recipients[0].ToCall : message.From);
 
             items.Add(new OutboundItem(message.Number, new FbbOutboundMessage
             {
@@ -130,18 +133,19 @@ public static class OutboundBuilder
 
     /// <summary>
     /// Builds the B2F object (spec §3.9) for a stored message bound to a B2-enabled partner:
-    /// MID = the message BID, From/To from the stored message, Type = Private/Bulletin per the
-    /// message type, Subject, Date, and Mbo = our BBS call. The Body is exactly the plaintext
-    /// B1 would carry (<paramref name="payload"/> = R: chain + first-hop blank + body), so the
-    /// stored R-chain travels intact and the receive-side loop/age guard is protocol-agnostic.
+    /// MID = the message BID, From from the stored message, ALL To-recipients as <c>To:</c> lines
+    /// and ALL Cc-recipients as <c>Cc:</c> lines, the message's attachments as <c>File:</c> parts,
+    /// Type = Private/Bulletin per the message type, Subject, Date, and Mbo = our BBS call. The
+    /// Body is exactly the plaintext B1 would carry (<paramref name="payload"/> = R: chain +
+    /// first-hop blank + body), so the stored R-chain travels intact and the receive-side loop/age
+    /// guard is protocol-agnostic.
     ///
-    /// SCOPE (named deferral — slice 2): the single-recipient personal/bulletin path only — the
-    /// one GB7RDG↔pdn exercises. Multi-recipient fan-out (multiple To:/Cc:) and File: attachment
-    /// transfer are NOT built here (only the first recipient is named, matching the FA path's own
-    /// first-recipient deferral); B2F's multi-address/attachment capability is a follow-up
-    /// (forwarding.md F-1 per-recipient fan-out). See the skipped multi-recipient test.
+    /// A single-To, no-Cc, no-attachment message produces the IDENTICAL object the prior
+    /// single-recipient builder did (one <c>To:</c>, no <c>Cc:</c>/<c>File:</c>) — the GB7RDG↔pdn
+    /// wire is unchanged. <paramref name="primaryTo"/> is the fallback when the message somehow has
+    /// no To-recipient row (an FA-derived edge case), mirroring the FA proposal's own fallback.
     /// </summary>
-    internal static byte[] BuildB2Object(Message message, string to, byte[] payload, BbsIdentity identity)
+    internal static byte[] BuildB2Object(Message message, string primaryTo, byte[] payload, BbsIdentity identity)
     {
         var type = message.Type switch
         {
@@ -149,16 +153,36 @@ public static class OutboundBuilder
             _ => B2MessageType.Private, // Personal and (v1) NTS/traffic store as Private (BPQ stores all B2 as P)
         };
 
+        var to = message.Recipients
+            .Where(r => !r.Cc)
+            .Select(r => FaProposal.NormalizeCallsign(r.ToCall))
+            .ToList();
+        if (to.Count == 0)
+        {
+            to.Add(FaProposal.NormalizeCallsign(primaryTo)); // no To row → fall back to the proposal's To
+        }
+
+        var cc = message.Recipients
+            .Where(r => r.Cc)
+            .Select(r => FaProposal.NormalizeCallsign(r.ToCall))
+            .ToList();
+
+        var files = message.Attachments
+            .Select(a => new B2Attachment(a.Name, a.Content))
+            .ToList();
+
         return new B2Message
         {
             Mid = message.Bid,
             Type = type,
             From = FaProposal.NormalizeCallsign(message.From),
-            To = [FaProposal.NormalizeCallsign(to)],
+            To = to,
+            Cc = cc,
             Subject = message.Subject,
             Date = message.CreatedAt.UtcDateTime.ToString("yyyy/MM/dd HH:mm", CultureInfo.InvariantCulture),
             Mbo = FaProposal.NormalizeCallsign(identity.Callsign),
             Body = payload,
+            Files = files,
         }.Encode();
     }
 

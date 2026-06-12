@@ -240,6 +240,38 @@ public class B2MessageTests
     // --- Round-trip through the existing B1 LZHUF container (spec §3.7) -------
 
     [Fact]
+    public void B2Object_TwoToCcAndTwoFiles_RoundTripsThroughTheContainer()
+    {
+        // The B2-completeness wire shape: 2 To + 1 Cc + 2 File: parts survive Encode → container →
+        // Decode byte-exact (the codec was already complete; this pins the multi-everything wire).
+        byte[] f1 = [0x01, 0x02, 0x03, 0x00, 0xFF, 0x80];
+        byte[] f2 = Encoding.ASCII.GetBytes("second file payload\r\n");
+        var original = new B2Message
+        {
+            Mid = "99_GB7PDN",
+            Type = B2MessageType.Private,
+            From = "M0LTE",
+            To = ["W1AW", "W4ABC"],
+            Cc = ["N8PGR"],
+            Subject = "Multi everything",
+            Mbo = "GB7PDN",
+            Body = Encoding.ASCII.GetBytes("Body for many.\r\n"),
+            Files = [new B2Attachment("ONE.BIN", f1), new B2Attachment("two.txt", f2)],
+        };
+
+        var roundTripped = B2Message.Decode(
+            LzhufContainer.Decode(LzhufContainerKind.B1, LzhufContainer.Encode(LzhufContainerKind.B1, original.Encode())));
+
+        Assert.Equal(["W1AW", "W4ABC"], roundTripped.To);
+        Assert.Equal(["N8PGR"], roundTripped.Cc);
+        Assert.Equal(2, roundTripped.Files.Count);
+        Assert.Equal("ONE.BIN", roundTripped.Files[0].Name);
+        Assert.Equal(f1, roundTripped.Files[0].Content.ToArray());
+        Assert.Equal("two.txt", roundTripped.Files[1].Name);
+        Assert.Equal(f2, roundTripped.Files[1].Content.ToArray());
+    }
+
+    [Fact]
     public void B2Object_RidesTheExistingB1LzhufContainerUnchanged()
     {
         // "For FC, the plaintext is the entire B2 message" (spec §3.7): the

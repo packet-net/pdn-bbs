@@ -5,7 +5,20 @@ namespace Bbs.Core;
 /// <summary>One recipient of a stored message, with its per-recipient read state.</summary>
 /// <param name="ToCall">Addressee callsign (≤6 chars, SSID stripped — compat spec §1.5).</param>
 /// <param name="ReadAt">When this recipient read the message, or null if unread by them.</param>
-public sealed record MessageRecipient(string ToCall, DateTimeOffset? ReadAt);
+/// <param name="Cc">
+/// True for a carbon-copy recipient (a B2 <c>Cc:</c> line — spec §3.9), false for a primary
+/// addressee (a <c>To:</c> line). Defaults false so every existing call site (B1/console/webmail
+/// compose, all single-To) keeps compiling and storing primary recipients unchanged.
+/// </param>
+public sealed record MessageRecipient(string ToCall, DateTimeOffset? ReadAt, bool Cc = false);
+
+/// <summary>
+/// One stored attachment — a B2F <c>File:</c> part (spec §3.9) carried with a relayed message.
+/// Stored verbatim (byte-exact) so a received-with-attachment message relays onward intact.
+/// </summary>
+/// <param name="Name">The file name as it appears on the <c>File:</c> line.</param>
+/// <param name="Content">The exact attachment bytes.</param>
+public sealed record MessageAttachment(string Name, ReadOnlyMemory<byte> Content);
 
 /// <summary>
 /// A stored BBS message. Immutable snapshot of a row in the store; mutate via
@@ -66,10 +79,19 @@ public sealed record Message
     public DateTimeOffset? KilledAt { get; init; }
 
     /// <summary>
-    /// All recipients. A multi-recipient message (S-line recipients separated by ';',
-    /// compat spec §1.5) is stored once with one row per recipient so it lists per-user.
+    /// All recipients (To and Cc). A multi-recipient message (S-line recipients separated by ';',
+    /// compat spec §1.5, or a B2 message's repeated <c>To:</c>/<c>Cc:</c> lines, spec §3.9) is
+    /// stored once with one row per recipient so it lists per-user; <see cref="MessageRecipient.Cc"/>
+    /// distinguishes a carbon copy from a primary addressee.
     /// </summary>
     public IReadOnlyList<MessageRecipient> Recipients { get; init; } = [];
+
+    /// <summary>
+    /// Attachments carried with the message (B2F <c>File:</c> parts — spec §3.9), in wire order.
+    /// Empty for the common case (B1, console/webmail compose, a B2 message with no files), so the
+    /// no-attachment path is unchanged.
+    /// </summary>
+    public IReadOnlyList<MessageAttachment> Attachments { get; init; } = [];
 
     /// <summary>Decodes <see cref="Body"/> as Latin-1 (byte-transparent, never lossy).</summary>
     public string GetBodyText() => Encoding.Latin1.GetString(Body.Span);

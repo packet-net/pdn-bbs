@@ -17,7 +17,7 @@ namespace Bbs.Core;
 public sealed class BbsStore : IDisposable
 {
     /// <summary>The schema version this build writes and expects.</summary>
-    public const int CurrentSchemaVersion = 1;
+    public const int CurrentSchemaVersion = 2;
 
     private readonly SqliteConnection _connection;
     private readonly TimeProvider _time;
@@ -107,6 +107,18 @@ public sealed class BbsStore : IDisposable
             throw new ArgumentException("At least one recipient is required (compat spec §1.5: TO is mandatory).", nameof(draft));
         }
 
+        // Cc recipients (spec §3.9), deduped against the To set — a callsign that is both To and Cc
+        // is kept as a To (one row per callsign; the recipients PK is (message_number,to_call)).
+        var ccRecipients = new List<string>();
+        foreach (string cc in draft.CcRecipients)
+        {
+            string normalized = Callsigns.NormalizeAddressee(cc);
+            if (normalized.Length > 0 && !recipients.Contains(normalized) && !ccRecipients.Contains(normalized))
+            {
+                ccRecipients.Add(normalized);
+            }
+        }
+
         string? at = NormalizeAt(draft.At);
         string? bid = NormalizeBid(draft.Bid);
         string subject = draft.Subject.Length <= Message.MaxSubjectLength ? draft.Subject : draft.Subject[..Message.MaxSubjectLength];
@@ -151,11 +163,22 @@ public sealed class BbsStore : IDisposable
 
             foreach (string recipient in recipients)
             {
-                using SqliteCommand insertRecipient = Command(tx,
-                    "INSERT OR IGNORE INTO recipients(message_number,to_call) VALUES($n,$to);");
-                insertRecipient.Parameters.AddWithValue("$n", number);
-                insertRecipient.Parameters.AddWithValue("$to", recipient);
-                insertRecipient.ExecuteNonQuery();
+                InsertRecipient(tx, number, recipient, cc: false);
+            }
+
+            foreach (string cc in ccRecipients)
+            {
+                InsertRecipient(tx, number, cc, cc: true);
+            }
+
+            foreach (MessageAttachment attachment in draft.Attachments)
+            {
+                using SqliteCommand insertAttachment = Command(tx,
+                    "INSERT INTO attachments(message_number,name,content) VALUES($n,$name,$content);");
+                insertAttachment.Parameters.AddWithValue("$n", number);
+                insertAttachment.Parameters.AddWithValue("$name", attachment.Name);
+                insertAttachment.Parameters.AddWithValue("$content", attachment.Content.ToArray());
+                insertAttachment.ExecuteNonQuery();
             }
 
             // BID dedup row. First-seen time and direction are preserved on conflict (the
@@ -183,6 +206,35 @@ public sealed class BbsStore : IDisposable
         lock (_gate)
         {
             return GetMessageCore(number);
+        }
+    }
+
+    /// <summary>
+    /// Fetches one attachment's bytes by message number and exact stored name (the webmail download
+    /// path), or null when no attachment with that exact name exists on that message. Matching is on
+    /// the exact stored name only — no path interpretation — so a traversal-shaped name can never
+    /// resolve to anything but a row whose <c>name</c> is byte-for-byte that string.
+    /// </summary>
+    public ReadOnlyMemory<byte>? GetAttachment(long number, string name)
+    {
+        ArgumentNullException.ThrowIfNull(name);
+
+        lock (_gate)
+        {
+            using SqliteCommand cmd = Command(null,
+                "SELECT content FROM attachments WHERE message_number=$n AND name=$name LIMIT 1;");
+            cmd.Parameters.AddWithValue("$n", number);
+            cmd.Parameters.AddWithValue("$name", name);
+            using SqliteDataReader reader = cmd.ExecuteReader();
+
+            // NB: an explicit null — NOT a `byte[]?`-via-ternary — because converting a null byte[]
+            // to ReadOnlyMemory<byte>? yields an empty-but-present value, not a null nullable.
+            if (!reader.Read())
+            {
+                return null;
+            }
+
+            return reader.GetFieldValue<byte[]>(0);
         }
     }
 
@@ -974,6 +1026,31 @@ public sealed class BbsStore : IDisposable
             version = 1;
         }
 
+        // v2 — B2 completeness (multi-recipient To/Cc + File: attachments). PURELY ADDITIVE so it
+        // is safe to apply to an existing populated database (the live lab bbs.db): the recipients
+        // table gains a `cc` column defaulting 0 (every existing row stays a To-recipient), and a
+        // new attachments table is created. No existing column/row is touched or rewritten.
+        if (version < 2)
+        {
+            using SqliteTransaction tx = connection.BeginTransaction();
+            using (var ddl = connection.CreateCommand())
+            {
+                ddl.Transaction = tx;
+                ddl.CommandText = SchemaV2;
+                ddl.ExecuteNonQuery();
+            }
+
+            using (var stamp = connection.CreateCommand())
+            {
+                stamp.Transaction = tx;
+                stamp.CommandText = "UPDATE meta SET value='2' WHERE key='schema_version';";
+                stamp.ExecuteNonQuery();
+            }
+
+            tx.Commit();
+            version = 2;
+        }
+
         return version;
     }
 
@@ -1043,6 +1120,30 @@ public sealed class BbsStore : IDisposable
         ) WITHOUT ROWID;
         CREATE INDEX idx_forwards_partner ON forwards(partner_call) WHERE forwarded_utc IS NULL;
         """;
+
+    // v2 — additive only (see Migrate): a cc flag on recipients (To vs Cc, spec §3.9) and an
+    // attachments table for B2F File: parts. Applied on top of a populated v1 db without rewriting
+    // any existing data: the ALTER defaults cc=0 so every pre-existing recipient stays a To.
+    private const string SchemaV2 = """
+        ALTER TABLE recipients ADD COLUMN cc INTEGER NOT NULL DEFAULT 0;
+
+        CREATE TABLE attachments(
+            message_number INTEGER NOT NULL REFERENCES messages(number) ON DELETE CASCADE,
+            name           TEXT NOT NULL,
+            content        BLOB NOT NULL
+        );
+        CREATE INDEX idx_attachments_message ON attachments(message_number);
+        """;
+
+    private void InsertRecipient(SqliteTransaction tx, long number, string toCall, bool cc)
+    {
+        using SqliteCommand cmd = Command(tx,
+            "INSERT OR IGNORE INTO recipients(message_number,to_call,cc) VALUES($n,$to,$cc);");
+        cmd.Parameters.AddWithValue("$n", number);
+        cmd.Parameters.AddWithValue("$to", toCall);
+        cmd.Parameters.AddWithValue("$cc", cc ? 1 : 0);
+        cmd.ExecuteNonQuery();
+    }
 
     private SqliteCommand Command(SqliteTransaction? tx, string sql)
     {
@@ -1170,8 +1271,10 @@ public sealed class BbsStore : IDisposable
         joined.Length == 0 ? [] : joined.Split(' ', StringSplitOptions.RemoveEmptyEntries);
 
     /// <summary>
-    /// Loads recipient rows for a batch of messages and returns new records with
-    /// <see cref="Message.Recipients"/> populated (ordered by callsign).
+    /// Loads recipient and attachment rows for a batch of messages and returns new records with
+    /// <see cref="Message.Recipients"/> (ordered To-first then Cc, by callsign) and
+    /// <see cref="Message.Attachments"/> (insert/wire order) populated. Both use a single query
+    /// keyed by the message-number set — no N+1 — like the recipient load always has.
     /// </summary>
     private List<Message> AttachRecipients(List<Message> messages)
     {
@@ -1180,42 +1283,76 @@ public sealed class BbsStore : IDisposable
             return messages;
         }
 
-        var byNumber = new Dictionary<long, List<MessageRecipient>>();
-        var sql = new System.Text.StringBuilder(
-            "SELECT message_number,to_call,read_utc FROM recipients WHERE message_number IN (");
-        using SqliteCommand cmd = _connection.CreateCommand();
+        var recipientsByNumber = new Dictionary<long, List<MessageRecipient>>();
+        var attachmentsByNumber = new Dictionary<long, List<MessageAttachment>>();
+        var inClause = new System.Text.StringBuilder();
+        var numberParameters = new List<(string Name, long Number)>(messages.Count);
 
         for (int i = 0; i < messages.Count; i++)
         {
             if (i > 0)
             {
-                sql.Append(',');
+                inClause.Append(',');
             }
 
             string name = "$m" + i.ToString(CultureInfo.InvariantCulture);
-            sql.Append(name);
-            cmd.Parameters.AddWithValue(name, messages[i].Number);
-            byNumber[messages[i].Number] = [];
+            inClause.Append(name);
+            numberParameters.Add((name, messages[i].Number));
+            recipientsByNumber[messages[i].Number] = [];
+            attachmentsByNumber[messages[i].Number] = [];
         }
 
-        sql.Append(") ORDER BY message_number,to_call;");
-        cmd.CommandText = sql.ToString();
+        string set = inClause.ToString();
 
-        using (SqliteDataReader reader = cmd.ExecuteReader())
+        // To-recipients sort before Cc (cc ASC), then by callsign — a stable, To-first order.
+        using (SqliteCommand cmd = Command(null,
+            "SELECT message_number,to_call,read_utc,cc FROM recipients WHERE message_number IN (" +
+            set + ") ORDER BY message_number,cc,to_call;"))
         {
+            foreach ((string name, long n) in numberParameters)
+            {
+                cmd.Parameters.AddWithValue(name, n);
+            }
+
+            using SqliteDataReader reader = cmd.ExecuteReader();
             while (reader.Read())
             {
                 long number = reader.GetInt64(0);
-                byNumber[number].Add(new MessageRecipient(
+                recipientsByNumber[number].Add(new MessageRecipient(
                     reader.GetString(1),
-                    reader.IsDBNull(2) ? null : DateTimeOffset.FromUnixTimeSeconds(reader.GetInt64(2))));
+                    reader.IsDBNull(2) ? null : DateTimeOffset.FromUnixTimeSeconds(reader.GetInt64(2)),
+                    reader.GetInt64(3) != 0));
+            }
+        }
+
+        // Attachments in stored (= wire) order: rowid is monotonic with insert order.
+        using (SqliteCommand cmd = Command(null,
+            "SELECT message_number,name,content FROM attachments WHERE message_number IN (" +
+            set + ") ORDER BY message_number,rowid;"))
+        {
+            foreach ((string name, long n) in numberParameters)
+            {
+                cmd.Parameters.AddWithValue(name, n);
+            }
+
+            using SqliteDataReader reader = cmd.ExecuteReader();
+            while (reader.Read())
+            {
+                long number = reader.GetInt64(0);
+                attachmentsByNumber[number].Add(new MessageAttachment(
+                    reader.GetString(1),
+                    reader.GetFieldValue<byte[]>(2)));
             }
         }
 
         var result = new List<Message>(messages.Count);
         foreach (Message message in messages)
         {
-            result.Add(message with { Recipients = byNumber[message.Number] });
+            result.Add(message with
+            {
+                Recipients = recipientsByNumber[message.Number],
+                Attachments = attachmentsByNumber[message.Number],
+            });
         }
 
         return result;

@@ -162,23 +162,31 @@ public sealed class InboundMessageReceiver
     {
         MessageType type = MessageTypeExtensions.MessageTypeFromCode(fa.MessageType);
         Message stored = StoreAndRoute(
-            type, fa.From, fa.To, fa.AtBbs, fa.Bid, delivered.Title, delivered.Body, fromPartnerCall);
+            type, fa.From, [fa.To], fa.AtBbs, fa.Bid, delivered.Title, delivered.Body, fromPartnerCall,
+            ccRecipients: [], attachments: []);
         AutoCreateHomedUser(type, fa.To, fa.AtBbs, fa.Bid);
         return stored;
     }
 
     /// <summary>
     /// Stores one inbound B2F (FC) object (spec §3.9): the delivered body is the whole B2
-    /// object, so decode it, map From/To/Subject/Body/MID(=BID) onto the stored message, and
-    /// run it through the SAME store + auto-create + route path as a B1 (FA) inbound — so the
+    /// object, so decode it, map From/To/Cc/Subject/Body/Files/MID(=BID) onto the stored message,
+    /// and run it through the SAME store + auto-create + route path as a B1 (FA) inbound — so the
     /// home-BBS rules (design.md rules #1/#2) and the loop/age R-chain guard apply identically.
     /// The routing TO/AT come from the B2 <c>To:</c> header (a bare call, or <c>call@bbs</c> —
-    /// the <see cref="HierarchicalAddress"/>/AT split mirrors the console's send addressing).
+    /// the AT split mirrors the console's send addressing).
     ///
-    /// SCOPE (named deferral — slice 2): single-recipient, no-attachment. Multiple To:/Cc: and
-    /// File: attachments decode (B2Message handles them) but only the first To is stored/routed
-    /// here — the same first-recipient deferral the FA path takes. Multi-recipient fan-out +
-    /// attachment storage is a follow-up (see the skipped multi-recipient test).
+    /// Multi-recipient + attachments (this slice): ALL <c>To:</c> are stored as To-recipients and
+    /// ALL <c>Cc:</c> as Cc-recipients; ALL <c>File:</c> parts are stored as attachments. The
+    /// PRIMARY recipient (first <c>To:</c>) drives <c>At</c>/routing/auto-create exactly as the
+    /// single-recipient path did.
+    ///
+    /// NAMED DEFERRAL (F-1, per-home fan-out — forwarding.md): a recipient whose <c>@home</c>
+    /// differs from the primary's is still STORED as a recipient, but the message is forwarded
+    /// ONCE on the primary's route carrying the full To: list (FBB's next hop re-distributes). We
+    /// do NOT split into per-home copies. This matches the single-<c>At</c> store model and the
+    /// webmail compose; it is the existing F-1 per-recipient fan-out item, surfaced here, not a
+    /// silent drop.
     /// </summary>
     private Message? DeliverFc(FcProposal fc, FbbMessageDelivered delivered, string fromPartnerCall)
     {
@@ -195,7 +203,27 @@ public sealed class InboundMessageReceiver
             return null;
         }
 
-        (string to, string? at) = SplitToAt(b2.To.Count > 0 ? b2.To[0] : "");
+        // The primary recipient (first To:) drives At/routing/auto-create; the rest are stored
+        // alongside (F-1 per-home fan-out deferred — see the method summary).
+        (string primaryTo, string? primaryAt) = SplitToAt(b2.To.Count > 0 ? b2.To[0] : "");
+        var toRecipients = new List<string>(b2.To.Count == 0 ? 1 : b2.To.Count) { primaryTo };
+        for (int i = 1; i < b2.To.Count; i++)
+        {
+            toRecipients.Add(SplitToAt(b2.To[i]).To);
+        }
+
+        var ccRecipients = new List<string>(b2.Cc.Count);
+        foreach (string cc in b2.Cc)
+        {
+            ccRecipients.Add(SplitToAt(cc).To);
+        }
+
+        var attachments = new List<MessageAttachment>(b2.Files.Count);
+        foreach (B2Attachment file in b2.Files)
+        {
+            attachments.Add(new MessageAttachment(file.Name, file.Content));
+        }
+
         MessageType type = b2.Type switch
         {
             B2MessageType.Bulletin => MessageType.Bulletin,
@@ -204,42 +232,52 @@ public sealed class InboundMessageReceiver
 
         Message stored = StoreAndRoute(
             type,
-            from: b2.From ?? to,
-            to: to,
-            atBbs: at ?? "",
+            from: b2.From ?? primaryTo,
+            toRecipients: toRecipients,
+            atBbs: primaryAt ?? "",
             bid: b2.Mid,
             subject: b2.Subject ?? delivered.Title,
             body: b2.Body,
-            fromPartnerCall);
-        AutoCreateHomedUser(type, to, at ?? "", b2.Mid);
+            fromPartnerCall,
+            ccRecipients: ccRecipients,
+            attachments: attachments);
+        AutoCreateHomedUser(type, primaryTo, primaryAt ?? "", b2.Mid);
         return stored;
     }
 
     /// <summary>
     /// The common inbound store + R-chain hold + route path shared by the FA and FC deliveries.
     /// The body is stored verbatim (the sender's R: chain intact); the BID is recorded with its
-    /// arrival direction (the routing loop-guard input); §3.14 loop/age failures store Held.
+    /// arrival direction (the routing loop-guard input); §3.14 loop/age failures store Held. All
+    /// <paramref name="toRecipients"/> (primary first), <paramref name="ccRecipients"/> and
+    /// <paramref name="attachments"/> are stored; routing runs ONCE on the stored message — which
+    /// routes on the primary recipient/<paramref name="atBbs"/> exactly as the single-To path did
+    /// (per-home fan-out is the F-1 deferral documented on <see cref="DeliverFc"/>).
     /// </summary>
     private Message StoreAndRoute(
         MessageType type,
         string from,
-        string to,
+        IReadOnlyList<string> toRecipients,
         string atBbs,
         string bid,
         string subject,
         ReadOnlyMemory<byte> body,
-        string fromPartnerCall)
+        string fromPartnerCall,
+        IReadOnlyList<string> ccRecipients,
+        IReadOnlyList<MessageAttachment> attachments)
     {
         string? holdReason = CheckRChain(body);
         var stored = _store.AddMessage(new MessageDraft
         {
             Type = type,
             From = from,
-            Recipients = [to],
+            Recipients = toRecipients,
+            CcRecipients = ccRecipients,
             At = atBbs,
             Bid = bid,
             Subject = subject,
             Body = body,
+            Attachments = attachments,
             ReceivedFrom = fromPartnerCall,
             Hold = holdReason is not null,
         });

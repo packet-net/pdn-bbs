@@ -101,6 +101,15 @@ public sealed class RoutingService
         var targets = new List<string>();
         foreach (MessageRecipient recipient in message.Recipients)
         {
+            // Cc recipients are stored + carried in the B2 envelope but never drive a forward
+            // target — a Cc is informational; routing is on the To-recipients only (forwarding.md
+            // "B2F negotiation": forward once on the primary route with the full To: list, the
+            // F-1 per-home deferral). A real LinBPQ likewise drops Cc on receipt (oracle finding).
+            if (recipient.Cc)
+            {
+                continue;
+            }
+
             RoutingDecision decision = _engine.Route(
                 new RoutingRequest
                 {

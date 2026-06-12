@@ -431,18 +431,153 @@ public class B2ForwardingTests
         Assert.NotEqual(MessageStatus.Forwarded, host.Store.GetMessage(stored.Number)!.Status);
     }
 
-    // --- Named deferral: multi-recipient + attachment B2 (slice 2 scope is single-recipient/no-attachment) ---
+    // --- B2 completeness: multi-recipient (To/Cc) + File: attachments, both directions ---
 
-    [Fact(Skip = "Deferred (slice 2 scope): B2F multi-recipient fan-out (multiple To:/Cc:) and File: "
-        + "attachment transfer/storage. The codec (B2Message) handles them; the OutboundBuilder names "
-        + "only the first recipient and builds no attachments, and the receiver stores only the first To "
-        + "— the same first-recipient deferral the FA path takes (forwarding.md F-1 per-recipient fan-out). "
-        + "Follow-up: build per-recipient copies + carry Cc:/File: through OutboundBuilder + store them in DeliverFc.")]
-    public void MultiRecipientAndAttachmentB2_FanOutAndStore_IsDeferred()
+    [Fact]
+    public async Task InboundB2_MultiRecipientAndAttachments_StoresAllToCcAndFiles()
     {
-        // Intentionally empty — a NAMED placeholder so the deferral is visible in the test list,
-        // not a silent narrowing. The single-recipient/no-attachment path is covered above.
-        Assert.True(true);
+        // A B2 object with 2 To + 1 Cc + 2 File: parts: ALL recipients land (To/Cc flagged) and
+        // BOTH attachments are stored byte-exact. Routing runs once on the primary To (G4XYZ).
+        await using var host = new HostHarness();
+        host.Store.UpsertPartner(new Partner { Call = "GB7BPQ", AllowB2F = true });
+        host.Store.UpsertPartner(new Partner { Call = "GB7RDG", AtCalls = ["*"] });
+
+        byte[] file1 = [0x01, 0x02, 0x03, 0xFF, 0x00, 0x80];
+        byte[] file2 = Encoding.Latin1.GetBytes("second attachment\r\n");
+        byte[] obj = new B2Message
+        {
+            Mid = "300_GB7BPQ",
+            Type = B2MessageType.Private,
+            From = "M0XYZ",
+            To = ["G4XYZ@GB7BSK", "G8ABC@GB7BSK"],
+            Cc = ["M0CCC@GB7BSK"],
+            Subject = "multi + files",
+            Mbo = "GB7BPQ",
+            Body = Encoding.ASCII.GetBytes("Body for several.\r\n"),
+            Files =
+            [
+                new B2Attachment("PHOTO.JPG", file1),
+                new B2Attachment("readme.txt", file2),
+            ],
+        }.Encode();
+        int csize = LzhufContainer.Encode(LzhufContainerKind.B1, obj).Length;
+        var proposal = new FcProposal(FcType.Em, "300_GB7BPQ", obj.Length, csize);
+        Message stored = host.Receiver.Deliver(new FbbMessageDelivered(proposal, "multi + files", obj), "GB7BPQ")!;
+
+        // Both To-recipients stored (cc=false), the Cc stored (cc=true).
+        Assert.Equal(["G4XYZ", "G8ABC"], stored.Recipients.Where(r => !r.Cc).Select(r => r.ToCall).Order());
+        MessageRecipient cc = Assert.Single(stored.Recipients, r => r.Cc);
+        Assert.Equal("M0CCC", cc.ToCall);
+
+        // Both attachments stored byte-exact, in wire order.
+        Assert.Equal(2, stored.Attachments.Count);
+        Assert.Equal("PHOTO.JPG", stored.Attachments[0].Name);
+        Assert.Equal(file1, stored.Attachments[0].Content.ToArray());
+        Assert.Equal("readme.txt", stored.Attachments[1].Name);
+        Assert.Equal(file2, stored.Attachments[1].Content.ToArray());
+
+        // F-1 deferral: routed ONCE on the primary To's route (full To: list rides the one hop).
+        Assert.Equal(stored.Number, Assert.Single(host.Store.GetForwardQueue("GB7RDG")).Number);
+    }
+
+    [Fact]
+    public async Task InboundB2_CcRecipient_DoesNotCreateItsOwnForwardTarget()
+    {
+        // A Cc is informational: it is stored, but it must NEVER drive an independent forward
+        // target. Here the To homes on GB7RDG and the Cc homes on GB7CIP — only GB7RDG must be
+        // queued. (Cc-routing would leak the message to GB7CIP, which a real LinBPQ also avoids —
+        // it drops Cc on receipt.)
+        await using var host = new HostHarness();
+        host.Store.UpsertPartner(new Partner { Call = "GB7BPQ", AllowB2F = true });
+        host.Store.UpsertPartner(new Partner { Call = "GB7RDG", AtCalls = ["GB7RDG"] });
+        host.Store.UpsertPartner(new Partner { Call = "GB7CIP", AtCalls = ["GB7CIP"] });
+
+        byte[] obj = new B2Message
+        {
+            Mid = "301_GB7BPQ",
+            Type = B2MessageType.Private,
+            From = "M0XYZ",
+            To = ["G4XYZ@GB7RDG"],
+            Cc = ["M0CCC@GB7CIP"],
+            Subject = "cc elsewhere",
+            Mbo = "GB7BPQ",
+            Body = Encoding.ASCII.GetBytes("Body.\r\n"),
+        }.Encode();
+        int csize = LzhufContainer.Encode(LzhufContainerKind.B1, obj).Length;
+        var proposal = new FcProposal(FcType.Em, "301_GB7BPQ", obj.Length, csize);
+        Message stored = host.Receiver.Deliver(new FbbMessageDelivered(proposal, "cc elsewhere", obj), "GB7BPQ")!;
+
+        Assert.Equal(stored.Number, Assert.Single(host.Store.GetForwardQueue("GB7RDG")).Number); // To's home
+        Assert.Empty(host.Store.GetForwardQueue("GB7CIP")); // the Cc's home is NOT queued
+        Assert.Equal("M0CCC", Assert.Single(stored.Recipients, r => r.Cc).ToCall); // but the Cc IS stored
+    }
+
+    [Fact]
+    public async Task OutboundB2_MultiRecipientAndAttachments_EmitsAllToCcAndFiles()
+    {
+        // A stored message with 2 To + 1 Cc + 2 attachments builds a B2 object that carries every
+        // To: line, every Cc: line, and every File: part — the relay-onward path.
+        await using var ts = new HostHarness();
+        byte[] file1 = [0xDE, 0xAD, 0xBE, 0xEF];
+        byte[] file2 = Encoding.Latin1.GetBytes("notes\r\n");
+        Message stored = ts.Store.AddMessage(new MessageDraft
+        {
+            Type = MessageType.Personal,
+            From = "M0LTE",
+            Recipients = ["G8ABC", "G4XYZ"],
+            CcRecipients = ["M0CCC"],
+            Subject = "relay onward",
+            Body = Encoding.Latin1.GetBytes("relay me\r"),
+            Attachments =
+            [
+                new MessageAttachment("DATA.BIN", file1),
+                new MessageAttachment("notes.txt", file2),
+            ],
+        });
+        Message loaded = ts.Store.GetMessage(stored.Number)!;
+
+        var partner = new Partner { Call = "GB7BPQ", AllowB2F = true, AtCalls = ["*"] };
+        IReadOnlyList<OutboundItem> items = OutboundBuilder.Build(
+            [loaded], partner, ts.Identity, ts.Time, NullLogger.Instance);
+        ReadOnlyMemory<byte>? b2Object = Assert.Single(items).Wire.B2Object;
+        Assert.NotNull(b2Object);
+
+        B2Message decoded = B2Message.Decode(b2Object.Value.Span);
+        Assert.Equal(["G4XYZ", "G8ABC"], decoded.To);   // both To (store orders recipients by callsign)
+        Assert.Equal(["M0CCC"], decoded.Cc);            // the Cc
+        Assert.Equal(2, decoded.Files.Count);
+        Assert.Equal("DATA.BIN", decoded.Files[0].Name);
+        Assert.Equal(file1, decoded.Files[0].Content.ToArray());
+        Assert.Equal("notes.txt", decoded.Files[1].Name);
+        Assert.Equal(file2, decoded.Files[1].Content.ToArray());
+    }
+
+    [Fact]
+    public async Task OutboundB2_SingleRecipientNoAttachment_WireIsUnchanged()
+    {
+        // The regression guard: one To, no Cc, no attachment builds the IDENTICAL single-recipient
+        // object as before — one To: line, no Cc:/File:. (The GB7RDG↔pdn wire is untouched.)
+        await using var ts = new HostHarness();
+        Message stored = ts.Store.AddMessage(new MessageDraft
+        {
+            Type = MessageType.Personal,
+            From = "M0LTE",
+            Recipients = ["G8ABC"],
+            Subject = "plain",
+            Body = Encoding.Latin1.GetBytes("just one\r"),
+        });
+        Message loaded = ts.Store.GetMessage(stored.Number)!;
+
+        var partner = new Partner { Call = "GB7BPQ", AllowB2F = true, AtCalls = ["*"] };
+        IReadOnlyList<OutboundItem> items = OutboundBuilder.Build(
+            [loaded], partner, ts.Identity, ts.Time, NullLogger.Instance);
+        ReadOnlyMemory<byte>? b2Object = Assert.Single(items).Wire.B2Object;
+        Assert.NotNull(b2Object);
+        B2Message decoded = B2Message.Decode(b2Object.Value.Span);
+
+        Assert.Equal("G8ABC", Assert.Single(decoded.To));
+        Assert.Empty(decoded.Cc);
+        Assert.Empty(decoded.Files);
     }
 
     // --- Full inbound B2 cycle through the demux: FC accept → object → decode → store ---
@@ -494,5 +629,54 @@ public class B2ForwardingTests
         Assert.Equal("Wire B2 in", stored.Subject);
         Assert.Equal("GB7BPQ", stored.ReceivedFrom);
         Assert.Equal(bodyText, stored.GetBodyText());
+    }
+
+    [Fact]
+    public async Task FullInboundB2Cycle_MultiRecipientAndAttachment_StoredThroughTheContainer()
+    {
+        // End-to-end through the demux + LZHUF container + block framing: a 2-To + 1-Cc + 1-File
+        // B2 object decodes and stores all recipients (To/Cc) and the attachment byte-exact.
+        await using var host = new HostHarness();
+        host.Store.UpsertPartner(new Partner { Call = "GB7BPQ", AllowB2F = true });
+        await host.StartLinkAsync();
+        host.StartDemux();
+
+        FakeRhpPeer peer = await host.Server.AcceptChildAsync("GB7BPQ");
+        await peer.SendLineAsync(B2PeerSid);
+        Assert.Equal(OurB2Sid, await peer.ReadLineAsync());
+        Assert.Equal("de GB7PDN>", await peer.ReadLineAsync());
+
+        byte[] fileBytes = [0x00, 0x01, 0xFE, 0xFF, 0x42];
+        byte[] obj = new B2Message
+        {
+            Mid = "201_GB7BPQ",
+            Type = B2MessageType.Private,
+            From = "M0XYZ",
+            To = ["G4XYZ@GB7BSK", "G8ABC@GB7BSK"],
+            Cc = ["M0CCC@GB7BSK"],
+            Subject = "Wire B2 multi",
+            Mbo = "GB7BPQ",
+            Body = Encoding.ASCII.GetBytes("Multi body.\r\n"),
+            Files = [new B2Attachment("ATTACH.BIN", fileBytes)],
+        }.Encode();
+        int csize = LzhufContainer.Encode(LzhufContainerKind.B1, obj).Length;
+
+        string fc = string.Create(CultureInfo.InvariantCulture, $"FC EM 201_GB7BPQ {obj.Length} {csize} 0");
+        await peer.SendLineAsync(fc);
+        await peer.SendLineAsync(ProposalBlock.BuildTerminator(ProposalBlock.ComputeChecksum([fc])));
+
+        Assert.Equal("FS +", await peer.ReadLineAsync());
+        await peer.SendBytesAsync(BlockFraming.EncodeMessage(
+            "Wire B2 multi", 0, LzhufContainer.Encode(LzhufContainerKind.B1, obj)));
+
+        Assert.Equal("FF", await peer.ReadLineAsync());
+        await peer.SendLineAsync("FQ");
+        await peer.WaitForHostCloseAsync();
+
+        Message stored = Assert.Single(host.Store.ListMessages(new MessageQuery()));
+        Assert.Equal(["G4XYZ", "G8ABC"], stored.Recipients.Where(r => !r.Cc).Select(r => r.ToCall).Order());
+        Assert.Equal("M0CCC", Assert.Single(stored.Recipients, r => r.Cc).ToCall);
+        Assert.Equal("ATTACH.BIN", Assert.Single(stored.Attachments).Name);
+        Assert.Equal(fileBytes, Assert.Single(stored.Attachments).Content.ToArray());
     }
 }

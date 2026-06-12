@@ -13,8 +13,17 @@ public sealed record MessageDraft
     /// <summary>Sender callsign (the connected user, or the &lt; call override — compat spec §1.5).</summary>
     public required string From { get; init; }
 
-    /// <summary>One or more addressees (S-line recipients separated by ';' — compat spec §1.5).</summary>
+    /// <summary>
+    /// One or more primary addressees (S-line recipients separated by ';' — compat spec §1.5; the
+    /// B2 <c>To:</c> lines — spec §3.9). Stored as To-recipients (<c>cc=0</c>).
+    /// </summary>
     public required IReadOnlyList<string> Recipients { get; init; }
+
+    /// <summary>
+    /// Carbon-copy addressees (the B2 <c>Cc:</c> lines — spec §3.9). Stored as Cc-recipients
+    /// (<c>cc=1</c>). Empty for B1/console/webmail compose (which never set a Cc).
+    /// </summary>
+    public IReadOnlyList<string> CcRecipients { get; init; } = [];
 
     /// <summary>The AT (@BBS) field, or null/empty for none.</summary>
     public string? At { get; init; }
@@ -30,6 +39,12 @@ public sealed record MessageDraft
 
     /// <summary>Raw body bytes (Latin-1-safe; stored verbatim).</summary>
     public ReadOnlyMemory<byte> Body { get; init; }
+
+    /// <summary>
+    /// Attachments to store with the message (B2F <c>File:</c> parts — spec §3.9), in wire order.
+    /// Empty for B1/console/webmail compose. Stored byte-exact so a relayed message carries them on.
+    /// </summary>
+    public IReadOnlyList<MessageAttachment> Attachments { get; init; } = [];
 
     /// <summary>Partner BBS the message arrived from, or null if entered locally.</summary>
     public string? ReceivedFrom { get; init; }

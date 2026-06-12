@@ -83,6 +83,9 @@ public static class Webmail
         app.MapGet("/messages/{number:long}", (HttpContext ctx, long number) => WithCallsign(ctx, options,
             (prefix, call) => ReadMessage(options, prefix, call, number)));
 
+        app.MapGet("/messages/{number:long}/attachments/{name}", (HttpContext ctx, long number, string name) =>
+            WithCallsign(ctx, options, (_, call) => DownloadAttachment(options, call, number, name)));
+
         app.MapGet("/compose", (HttpContext ctx, string? to, string? type) => WithCallsign(ctx, options,
             (prefix, call) => ComposeForm(options, prefix, call, to, type)));
 
@@ -187,20 +190,64 @@ public static class Webmail
         string killForm = canKill && message.Status != MessageStatus.Killed
             ? $"""<form method="post" action="{U(prefix, Inv($"/messages/{message.Number}/kill"))}"><button type="submit">Kill message</button></form>"""
             : "";
-        string to = string.Join("; ", message.Recipients.Select(r => r.ToCall));
+        string to = string.Join("; ", message.Recipients.Where(r => !r.Cc).Select(r => r.ToCall));
+        string ccRow = RenderCcRow(message);
+        string attachments = RenderAttachments(message, prefix);
         return Html(Page(o, prefix, call, Inv($"Message {message.Number}"),
             $"""
             <h2>Message {message.Number} <span class="dim">[{H(message.Type.ToCode().ToString())}/{H(message.Status.ToCode().ToString())}]</span></h2>
             <table class="meta">
             <tr><th>From</th><td>{H(message.From)}</td></tr>
             <tr><th>To</th><td>{H(to)}{(message.At is null ? "" : " @ " + H(message.At))}</td></tr>
+            {ccRow}
             <tr><th>Subject</th><td>{H(message.Subject)}</td></tr>
             <tr><th>BID</th><td>{H(message.Bid)}</td></tr>
             <tr><th>Date</th><td>{H(message.CreatedAt.ToString("yyyy-MM-dd HH:mm 'UTC'", CultureInfo.InvariantCulture))}</td></tr>
             </table>
             <pre>{H(message.GetBodyText())}</pre>
+            {attachments}
             {killForm}
             """));
+    }
+
+    /// <summary>
+    /// Streams one attachment BLOB as a download. Authorization is the SAME as reading the message
+    /// (<see cref="MessageRules.CanRead"/> — a recipient or the sysop), so a non-recipient gets a
+    /// 404 for both the read page and its attachments. The name is matched against the EXACT stored
+    /// name (<see cref="BbsStore.GetAttachment"/>) — no path interpretation — so a traversal-shaped
+    /// name resolves to nothing; the served file name is re-quoted from the request name with quotes
+    /// and control chars stripped so it cannot break the Content-Disposition header.
+    /// </summary>
+    private static IResult DownloadAttachment(WebmailOptions o, string call, long number, string name)
+    {
+        Message? message = o.Store.GetMessage(number);
+        if (message is null || !MessageRules.CanRead(message, call, IsSysop(o, call)))
+        {
+            return Results.NotFound("No such message.");
+        }
+
+        ReadOnlyMemory<byte>? content = o.Store.GetAttachment(number, name);
+        if (content is null)
+        {
+            return Results.NotFound("No such attachment.");
+        }
+
+        return Results.File(content.Value.ToArray(), "application/octet-stream", fileDownloadName: SafeFileName(name));
+    }
+
+    /// <summary>Strips quotes / control chars so a stored name can't break the Content-Disposition header.</summary>
+    private static string SafeFileName(string name)
+    {
+        var sb = new StringBuilder(name.Length);
+        foreach (char c in name)
+        {
+            if (c != '"' && c != '\\' && !char.IsControl(c))
+            {
+                sb.Append(c);
+            }
+        }
+
+        return sb.Length == 0 ? "attachment" : sb.ToString();
     }
 
     private static IResult ComposeForm(WebmailOptions o, string prefix, string call, string? to, string? type)
@@ -331,6 +378,32 @@ public static class Webmail
     private static bool IsSysop(WebmailOptions o, string call) =>
         o.SysopCallsign.Length > 0 && Callsigns.BaseEquals(o.SysopCallsign, call);
 
+    /// <summary>The Cc meta row, or empty when the message has no Cc recipients (spec §3.9).</summary>
+    private static string RenderCcRow(Message message)
+    {
+        string cc = string.Join("; ", message.Recipients.Where(r => r.Cc).Select(r => r.ToCall));
+        return cc.Length == 0 ? "" : Inv($"<tr><th>Cc</th><td>{H(cc)}</td></tr>");
+    }
+
+    /// <summary>The attachments block with one download link per file, or empty when there are none.</summary>
+    private static string RenderAttachments(Message message, string prefix)
+    {
+        if (message.Attachments.Count == 0)
+        {
+            return "";
+        }
+
+        var sb = new StringBuilder("<h3>Attachments</h3><ul class=\"attachments\">");
+        foreach (MessageAttachment a in message.Attachments)
+        {
+            string href = U(prefix, Inv($"/messages/{message.Number}/attachments/{Uri.EscapeDataString(a.Name)}"));
+            sb.Append(Inv($"""<li><a href="{H(href)}">{H(a.Name)}</a> <span class="dim">({a.Content.Length} bytes)</span></li>"""));
+        }
+
+        sb.Append("</ul>");
+        return sb.ToString();
+    }
+
     private static string MessageRows(IReadOnlyList<Message> messages, int page, int pageSize, string call, string prefix, string basePath)
     {
         page = Math.Max(1, page);
@@ -349,7 +422,7 @@ public static class Webmail
             string subject = Inv($"""<a href="{U(prefix, Inv($"/messages/{m.Number}"))}">{H(m.Subject.Length == 0 ? "(no subject)" : m.Subject)}</a>""");
             sb.Append(Inv($"<tr{(unreadByMe ? " class=\"unread\"" : "")}><td>{m.Number}</td>"))
               .Append(Inv($"<td>{H(m.Status.ToCode().ToString())}</td><td>{H(m.From)}</td>"))
-              .Append(Inv($"<td>{H(string.Join(";", m.Recipients.Select(r => r.ToCall)))}{(m.At is null ? "" : "@" + H(m.At))}</td>"))
+              .Append(Inv($"<td>{H(string.Join(";", m.Recipients.Where(r => !r.Cc).Select(r => r.ToCall)))}{(m.At is null ? "" : "@" + H(m.At))}</td>"))
               .Append(Inv($"<td>{H(m.CreatedAt.ToString("yyMMdd", CultureInfo.InvariantCulture))}</td><td>{subject}</td></tr>"));
         }
 
@@ -391,6 +464,7 @@ public static class Webmail
         pre{background:#fff;border:1px solid #ddd8cf;padding:1rem;white-space:pre-wrap;word-break:break-word}
         table.meta th{width:6rem;color:#8a857c;font-weight:normal}
         .err{color:#a32014}.pager{margin-top:.75rem}
+        ul.attachments{padding-left:1.2rem}ul.attachments .dim{color:#8a857c}
         input,select,textarea{font:inherit}
         button{font:inherit;padding:.2rem .8rem}
         </style>

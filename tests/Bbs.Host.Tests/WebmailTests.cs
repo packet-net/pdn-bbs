@@ -206,6 +206,121 @@ public sealed class WebmailTests : IAsyncDisposable
         Assert.Equal(MessageStatus.Read, _store.GetMessage(stored.Number)!.Status);
     }
 
+    // ------------------------------------------------ B2 completeness: Cc + attachment download
+
+    [Fact]
+    public async Task ReadPage_RendersCcAndAttachmentDownloadLinks()
+    {
+        ClaimCallsign("tom", "M0LTE");
+        Message stored = _store.AddMessage(new MessageDraft
+        {
+            Type = MessageType.Personal,
+            From = "G8ABC",
+            Recipients = ["M0LTE"],
+            CcRecipients = ["G4XYZ"],
+            Subject = "with bits",
+            Body = Encoding.Latin1.GetBytes("Body.\r"),
+            Attachments = [new MessageAttachment("REPORT.PDF", new byte[] { 1, 2, 3 })],
+        });
+        using HttpClient client = await StartAsync();
+
+        string page = await client.GetStringAsync(new Uri($"/messages/{stored.Number}", UriKind.Relative));
+        Assert.Contains("Cc", page, StringComparison.Ordinal);
+        Assert.Contains("G4XYZ", page, StringComparison.Ordinal);
+        Assert.Contains("Attachments", page, StringComparison.Ordinal);
+        Assert.Contains($"/messages/{stored.Number}/attachments/REPORT.PDF", page, StringComparison.Ordinal);
+        Assert.Contains("REPORT.PDF", page, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task AttachmentDownload_ReturnsBytesWithDownloadHeaders()
+    {
+        ClaimCallsign("tom", "M0LTE");
+        byte[] bytes = [0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0xFF];
+        Message stored = _store.AddMessage(new MessageDraft
+        {
+            Type = MessageType.Personal,
+            From = "G8ABC",
+            Recipients = ["M0LTE"],
+            Subject = "file me",
+            Body = Encoding.Latin1.GetBytes("x\r"),
+            Attachments = [new MessageAttachment("DATA.BIN", bytes)],
+        });
+        using HttpClient client = await StartAsync();
+
+        HttpResponseMessage response = await client.GetAsync(
+            new Uri($"/messages/{stored.Number}/attachments/DATA.BIN", UriKind.Relative));
+        response.EnsureSuccessStatusCode();
+
+        Assert.Equal("application/octet-stream", response.Content.Headers.ContentType!.MediaType);
+        Assert.Equal("attachment", response.Content.Headers.ContentDisposition!.DispositionType);
+        Assert.Equal("DATA.BIN", response.Content.Headers.ContentDisposition.FileNameStar
+            ?? response.Content.Headers.ContentDisposition.FileName?.Trim('"'));
+        Assert.Equal(bytes, await response.Content.ReadAsByteArrayAsync());
+    }
+
+    [Fact]
+    public async Task AttachmentDownload_UnknownName_Returns404()
+    {
+        ClaimCallsign("tom", "M0LTE");
+        Message stored = _store.AddMessage(new MessageDraft
+        {
+            Type = MessageType.Personal,
+            From = "G8ABC",
+            Recipients = ["M0LTE"],
+            Subject = "file me",
+            Body = Encoding.Latin1.GetBytes("x\r"),
+            Attachments = [new MessageAttachment("REAL.BIN", new byte[] { 1 })],
+        });
+        using HttpClient client = await StartAsync();
+
+        HttpResponseMessage missing = await client.GetAsync(
+            new Uri($"/messages/{stored.Number}/attachments/NOPE.BIN", UriKind.Relative));
+        Assert.Equal(HttpStatusCode.NotFound, missing.StatusCode);
+    }
+
+    [Fact]
+    public async Task AttachmentDownload_NonRecipient_IsRefused()
+    {
+        // A personal addressed to someone else: the non-recipient can neither read it nor pull its
+        // attachment (same CanRead gate as the read page).
+        ClaimCallsign("tom", "M0LTE");
+        Message stored = _store.AddMessage(new MessageDraft
+        {
+            Type = MessageType.Personal,
+            From = "G8ABC",
+            Recipients = ["G4XYZ"],
+            Subject = "not yours",
+            Body = Encoding.Latin1.GetBytes("secret\r"),
+            Attachments = [new MessageAttachment("SECRET.BIN", new byte[] { 9, 9, 9 })],
+        });
+        using HttpClient client = await StartAsync();
+
+        HttpResponseMessage response = await client.GetAsync(
+            new Uri($"/messages/{stored.Number}/attachments/SECRET.BIN", UriKind.Relative));
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task AttachmentDownload_ForwardedPrefix_LinkCarriesThePrefix()
+    {
+        ClaimCallsign("tom", "M0LTE");
+        Message stored = _store.AddMessage(new MessageDraft
+        {
+            Type = MessageType.Personal,
+            From = "G8ABC",
+            Recipients = ["M0LTE"],
+            Subject = "prefixed file",
+            Body = Encoding.Latin1.GetBytes("x\r"),
+            Attachments = [new MessageAttachment("F.BIN", new byte[] { 1 })],
+        });
+        using HttpClient client = await StartAsync(forwardedPrefix: "/apps/bbs");
+
+        string page = await client.GetStringAsync(new Uri($"/messages/{stored.Number}", UriKind.Relative));
+        Assert.Contains($"/apps/bbs/messages/{stored.Number}/attachments/F.BIN", page, StringComparison.Ordinal);
+        Assert.DoesNotContain($"\"/messages/{stored.Number}/attachments", page, StringComparison.Ordinal);
+    }
+
     [Fact]
     public async Task SomeoneElsesPersonal_IsNotReadable()
     {
