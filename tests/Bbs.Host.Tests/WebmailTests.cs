@@ -1,7 +1,11 @@
 using System.Net;
+using System.Net.Http.Headers;
 using System.Text;
 using Bbs.Core;
+using Bbs.Fbb;
+using Bbs.Host.Forwarding;
 using Bbs.Host.Web;
+using Bbs.SevenPlus;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.Extensions.Logging;
@@ -39,19 +43,26 @@ public sealed class WebmailTests : IAsyncDisposable
     }
 
     private async Task<HttpClient> StartAsync(
-        string pdnUser = "tom", bool gatewayHeader = true, string? forwardedPrefix = null, bool autoRedirect = true)
+        string pdnUser = "tom", bool gatewayHeader = true, string? forwardedPrefix = null, bool autoRedirect = true,
+        int? maxUploadBytes = null)
     {
         var builder = WebApplication.CreateBuilder();
         builder.Logging.ClearProviders();
         builder.WebHost.UseUrls("http://127.0.0.1:0");
         _app = builder.Build();
-        Webmail.Map(_app, new WebmailOptions
+        var options = new WebmailOptions
         {
             Store = _store,
             Routing = _routing,
             BbsCallsign = "GB7PDN",
             SysopCallsign = "G0SYS", // distinct from the test users — sysop may read/kill anything
-        });
+        };
+        if (maxUploadBytes is { } cap)
+        {
+            options = options with { MaxUploadBytes = cap };
+        }
+
+        Webmail.Map(_app, options);
         await _app.StartAsync();
 
         var handler = new HttpClientHandler { AllowAutoRedirect = autoRedirect };
@@ -623,5 +634,193 @@ public sealed class WebmailTests : IAsyncDisposable
             new Uri($"/messages/{assembled.Number}/attachments/fields.jpg", UriKind.Relative));
         download.EnsureSuccessStatusCode();
         Assert.Equal(new byte[] { 0xFF, 0xD8, 0xFF, 0xE0 }, await download.Content.ReadAsByteArrayAsync());
+    }
+
+    // ------------------------------------------------ compose file upload: 7plus / attachment / guard
+    // The send-side file slice: a composer may attach a file and choose how it travels — 7plus-encode
+    // (universal, appended to the body text) or a binary B2 attachment. Multipart parsing reads both
+    // the file and the text fields; an oversize upload is rejected cleanly.
+
+    /// <summary>
+    /// Builds a multipart/form-data compose request: the text fields plus an optional file part named
+    /// <c>file</c> with the file-handling <c>fileMode</c> radio (none / 7plus / attachment).
+    /// </summary>
+    private static MultipartFormDataContent ComposeMultipart(
+        string type, string to, string subject, string body,
+        string? at = null, byte[]? file = null, string? fileName = null, string? fileMode = null)
+    {
+        var content = new MultipartFormDataContent
+        {
+            { new StringContent(type), "type" },
+            { new StringContent(to), "to" },
+            { new StringContent(at ?? ""), "at" },
+            { new StringContent(subject), "subject" },
+            { new StringContent(body), "body" },
+            { new StringContent(fileMode ?? "none"), "fileMode" },
+        };
+        if (file is not null)
+        {
+            var part = new ByteArrayContent(file);
+            part.Headers.ContentType = new MediaTypeHeaderValue("application/octet-stream");
+            content.Add(part, "file", fileName ?? "upload.bin");
+        }
+
+        return content;
+    }
+
+    [Fact]
+    public async Task ComposeWithFile_SevenPlus_AppendsValidPartsToBody_RoundTripsByteExact()
+    {
+        ClaimCallsign("tom", "M0LTE");
+        using HttpClient client = await StartAsync();
+
+        // A byte spread (incl. high bytes + a NUL) that ONLY survives 7plus, not raw text.
+        byte[] original = new byte[600];
+        for (int i = 0; i < original.Length; i++)
+        {
+            original[i] = (byte)((i * 37) & 0xFF);
+        }
+
+        HttpResponseMessage response = await client.PostAsync(
+            new Uri("/compose", UriKind.Relative),
+            ComposeMultipart("P", "G8ABC", "photo", "Here is the file.", file: original, fileName: "photo.jpg", fileMode: "7plus"));
+        response.EnsureSuccessStatusCode();
+
+        Message stored = Assert.Single(_store.ListMessages(new MessageQuery()));
+        // The user's typed text survives ahead of the appended 7plus block.
+        Assert.Contains("Here is the file.", stored.GetBodyText(), StringComparison.Ordinal);
+        // It's a normal text message — no binary attachment, stays as composed (no inbound assembler).
+        Assert.Empty(stored.Attachments);
+
+        // Full round-trip through the REAL compose path: scan the stored body, assemble, byte-exact.
+        IReadOnlyList<SevenPlusPart> parts = SevenPlusScanner.ExtractParts(stored.Body.Span);
+        Assert.NotEmpty(parts);
+        (bool complete, byte[]? content, _) = SevenPlusFile.TryAssemble(parts);
+        Assert.True(complete);
+        Assert.Equal(original, content);
+    }
+
+    [Fact]
+    public async Task ComposeWithFile_Attachment_StoresMessageAttachment_AndBuildB2ObjectEmitsIt()
+    {
+        ClaimCallsign("tom", "M0LTE");
+        using HttpClient client = await StartAsync();
+
+        byte[] file = [0x00, 0x01, 0x02, 0xFD, 0xFE, 0xFF];
+        HttpResponseMessage response = await client.PostAsync(
+            new Uri("/compose", UriKind.Relative),
+            ComposeMultipart("P", "G8ABC", "binary", "See attached.", file: file, fileName: "data.bin", fileMode: "attachment"));
+        response.EnsureSuccessStatusCode();
+
+        Message stored = Assert.Single(_store.ListMessages(new MessageQuery()));
+        Assert.Equal("See attached.\r", stored.GetBodyText()); // body verbatim, file is NOT appended
+        MessageAttachment a = Assert.Single(stored.Attachments);
+        Assert.Equal("data.bin", a.Name);
+        Assert.Equal(file, a.Content.ToArray()); // byte-exact
+
+        // Follow-on: a B2-enabled partner's outbound object carries it as a File: part (the relay path).
+        var identity = new BbsIdentity { Callsign = "GB7PDN", HRoute = "#23.GBR.EURO", SoftwareVersion = "PDN0.1.0" };
+        var partner = new Partner { Call = "GB7BPQ", AllowB2F = true, AtCalls = ["*"] };
+        IReadOnlyList<OutboundItem> items = OutboundBuilder.Build(
+            [_store.GetMessage(stored.Number)!], partner, identity, _time, NullLogger.Instance);
+        ReadOnlyMemory<byte>? b2Object = Assert.Single(items).Wire.B2Object;
+        Assert.NotNull(b2Object);
+        B2Message decoded = B2Message.Decode(b2Object.Value.Span);
+        B2Attachment emitted = Assert.Single(decoded.Files);
+        Assert.Equal("data.bin", emitted.Name);
+        Assert.Equal(file, emitted.Content.ToArray());
+    }
+
+    [Fact]
+    public async Task ComposeWithFile_StripsPathComponentsFromTheName()
+    {
+        ClaimCallsign("tom", "M0LTE");
+        using HttpClient client = await StartAsync();
+
+        HttpResponseMessage response = await client.PostAsync(
+            new Uri("/compose", UriKind.Relative),
+            ComposeMultipart("P", "G8ABC", "traversal", "x",
+                file: [1, 2, 3], fileName: "../../etc/passwd", fileMode: "attachment"));
+        response.EnsureSuccessStatusCode();
+
+        Message stored = Assert.Single(_store.ListMessages(new MessageQuery()));
+        MessageAttachment a = Assert.Single(stored.Attachments);
+        Assert.Equal("passwd", a.Name); // no path components
+    }
+
+    [Fact]
+    public async Task ComposeMultipart_NoFile_IsUnchanged_FormFieldsStillRead()
+    {
+        ClaimCallsign("tom", "M0LTE");
+        _store.UpsertPartner(new Partner { Call = "GB7BPQ", AtCalls = ["*"] });
+        using HttpClient client = await StartAsync();
+
+        // multipart with the text fields but NO file part: the dominant case, behaviour unchanged.
+        HttpResponseMessage response = await client.PostAsync(
+            new Uri("/compose", UriKind.Relative),
+            ComposeMultipart("P", "G8ABC@GB7BPQ", "no file", "Body line one\nLine two", fileMode: "none"));
+        response.EnsureSuccessStatusCode();
+
+        Message stored = Assert.Single(_store.ListMessages(new MessageQuery()));
+        Assert.Equal("M0LTE", stored.From);
+        Assert.Equal("G8ABC", Assert.Single(stored.Recipients).ToCall);
+        Assert.Equal("GB7BPQ", stored.At);
+        Assert.Equal("Body line one\rLine two\r", stored.GetBodyText()); // body verbatim, CR discipline
+        Assert.Empty(stored.Attachments);
+    }
+
+    [Fact]
+    public async Task ComposeFormUrlEncoded_StillWorks_NoFile()
+    {
+        // The legacy form-urlencoded POST (no multipart) must keep working unchanged.
+        ClaimCallsign("tom", "M0LTE");
+        using HttpClient client = await StartAsync();
+
+        HttpResponseMessage response = await client.PostAsync(
+            new Uri("/compose", UriKind.Relative),
+            new FormUrlEncodedContent(
+            [
+                new KeyValuePair<string, string>("type", "P"),
+                new KeyValuePair<string, string>("to", "G8ABC"),
+                new KeyValuePair<string, string>("subject", "urlencoded"),
+                new KeyValuePair<string, string>("body", "Hello"),
+            ]));
+        response.EnsureSuccessStatusCode();
+
+        Message stored = Assert.Single(_store.ListMessages(new MessageQuery()));
+        Assert.Equal("Hello\r", stored.GetBodyText());
+        Assert.Empty(stored.Attachments);
+    }
+
+    [Fact]
+    public async Task ComposeWithOversizeFile_IsRejectedCleanly_NoMessageStored()
+    {
+        ClaimCallsign("tom", "M0LTE");
+        using HttpClient client = await StartAsync(maxUploadBytes: 1024);
+
+        byte[] tooBig = new byte[2048];
+        HttpResponseMessage response = await client.PostAsync(
+            new Uri("/compose", UriKind.Relative),
+            ComposeMultipart("P", "G8ABC", "huge", "body", file: tooBig, fileName: "big.bin", fileMode: "attachment"));
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode); // rejected, not crashed
+        string page = await response.Content.ReadAsStringAsync();
+        Assert.Contains("too large", page, StringComparison.OrdinalIgnoreCase);
+        Assert.Empty(_store.ListMessages(new MessageQuery())); // nothing stored
+    }
+
+    [Fact]
+    public async Task ComposeForm_RendersFileInputAndModeChoice()
+    {
+        ClaimCallsign("tom", "M0LTE");
+        using HttpClient client = await StartAsync();
+
+        string form = await client.GetStringAsync(new Uri("/compose", UriKind.Relative));
+        Assert.Contains("multipart/form-data", form, StringComparison.Ordinal); // form posts multipart
+        Assert.Contains("type=\"file\"", form, StringComparison.Ordinal);        // a file input
+        Assert.Contains("name=\"file\"", form, StringComparison.Ordinal);
+        Assert.Contains("name=\"fileMode\"", form, StringComparison.Ordinal);    // the handling choice
+        Assert.Contains("7plus", form, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("B2", form, StringComparison.Ordinal);                   // the B2-only hint
     }
 }
