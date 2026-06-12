@@ -75,7 +75,10 @@ public sealed partial class BbsConsoleSession
             "Here's what you can type. You only need the first few letters of any word.",
             "",
         };
-        lines.AddRange(PlainCommands.Select(c => "  " + c.Help));
+
+        // Sysop-only diagnostics (forwarding/queue/route) are listed only for a sysop — a user
+        // never sees them, matching the dispatch gate.
+        lines.AddRange(PlainCommands.Where(c => _isSysop || !c.SysopOnly).Select(c => "  " + c.Help));
         lines.Add("");
         lines.Add("Addressing is just a callsign - send g4abc - I find where they are.");
         await WritePlainPagedAsync(lines).ConfigureAwait(false);

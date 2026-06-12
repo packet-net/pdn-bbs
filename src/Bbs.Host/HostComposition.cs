@@ -71,6 +71,9 @@ public static class HostComposition
             BbsCallsign = bindCallsign,
             SysopCallsigns = string.IsNullOrWhiteSpace(config.Sysop) ? [] : [config.Sysop],
             Version = version,
+            // For the plain sysop `route` explain — the same own-call + H-Route the live
+            // RoutingEngine above is built from, so the trace matches real routing.
+            HRoute = config.HRoute,
         };
 
         var linkOptions = new RhpLinkOptions
@@ -147,6 +150,9 @@ public static class HostComposition
         {
             Store = store,
             Routing = routing,
+            // The same per-user settings singleton the console session uses — a webmail
+            // interface-mode flip is the persisted choice the next console connect reads.
+            Settings = app.Services.GetRequiredService<IUserSettingsStore>(),
             BbsCallsign = baseCallsign,
             SysopCallsign = config.Sysop,
         });

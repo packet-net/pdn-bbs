@@ -14,9 +14,19 @@ public sealed record BbsConsoleConfig
 
     /// <summary>
     /// Callsigns with sysop rights (compat spec §1.4; here it gates LH/LK, reading/killing
-    /// held messages — §2.2). Matched on the base call, SSID-insensitively.
+    /// held messages — §2.2, and the plain sysop diagnostics forwarding/queue/route). Matched
+    /// on the base call, SSID-insensitively.
     /// </summary>
     public IReadOnlyList<string> SysopCallsigns { get; init; } = [];
+
+    /// <summary>
+    /// Our H-Route <b>without</b> the callsign (e.g. <c>#23.GBR.EURO</c>), or null. Used only by
+    /// the plain sysop <c>route</c> diagnostic to build a <see cref="Bbs.Core.RoutingEngine"/> that
+    /// explains where a hypothetical message would go — the same engine + config the Host's live
+    /// routing uses (<c>HostComposition</c> passes <c>config.HRoute</c>). Null = no hierarchy
+    /// configured (the engine then treats our bare callsign as the leaf).
+    /// </summary>
+    public string? HRoute { get; init; }
 
     /// <summary>
     /// Default page length for users who have not set one with OP (compat spec §1.7).

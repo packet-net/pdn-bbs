@@ -42,9 +42,23 @@ public sealed partial class BbsConsoleSession
         Plain,
         Quit,
         Node,
+
+        // Sysop-only read-only diagnostics (forwarding.md F-2 ops layer, built jargon-free from
+        // the start — these are PLAIN-surface words, never added to the kept-whole classic
+        // surface). A non-sysop caller is refused with a plain "sysop-only" line.
+        Forwarding,
+        Queue,
+        Route,
     }
 
-    private readonly record struct PlainCommandInfo(PlainCommand Command, string Word, string Help);
+    /// <param name="SysopOnly">
+    /// True for the read-only diagnostics gated to sysops. A sysop-only word is recognised for
+    /// everyone (so a non-sysop typing the exact word gets a plain refusal, not "I don't know"),
+    /// but it only participates in <b>prefix</b> matching for a sysop — so a non-sysop's partial
+    /// prefix never collides with one (e.g. <c>forwar</c> stays an unambiguous <c>forward</c> for
+    /// a user, and never leaks the existence of the sysop <c>forwarding</c> verb).
+    /// </param>
+    private readonly record struct PlainCommandInfo(PlainCommand Command, string Word, string Help, bool SysopOnly = false);
 
     /// <summary>
     /// The canonical plain vocabulary. The words a user can type (and abbreviate by any
@@ -75,6 +89,11 @@ public sealed partial class BbsConsoleSession
         new(PlainCommand.Plain, "plain", "plain - stay on this plain-language surface (you are here)."),
         new(PlainCommand.Quit, "quit", "quit - sign off and disconnect."),
         new(PlainCommand.Node, "node", "node - leave the mailbox and go back to the node."),
+
+        // Sysop-only diagnostics (only listed in help for a sysop; see HandlePlainHelpAsync).
+        new(PlainCommand.Forwarding, "forwarding", "forwarding - (sysop) show each partner, its dial cadence and how much mail is waiting.", SysopOnly: true),
+        new(PlainCommand.Queue, "queue", "queue - (sysop) show the mail waiting to forward, and to which partner.", SysopOnly: true),
+        new(PlainCommand.Route, "route", "route <call> - (sysop) explain where a message to that station would go, and why.", SysopOnly: true),
     ];
 
     // ---------------------------------------------------------------- dispatch
@@ -95,7 +114,7 @@ public sealed partial class BbsConsoleSession
         string remainder = AfterFirstToken(line);
         string[] args = remainder.Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
 
-        PlainResolution resolution = ResolvePlainCommand(verb);
+        PlainResolution resolution = ResolvePlainCommand(verb, _isSysop);
         if (resolution.Kind == PlainResolutionKind.Unknown)
         {
             await WritePlainLineAsync(Inv(
@@ -106,6 +125,15 @@ public sealed partial class BbsConsoleSession
         if (resolution.Kind == PlainResolutionKind.Ambiguous)
         {
             await WritePlainLineAsync(PlainAmbiguityHint(verb, resolution.Candidates)).ConfigureAwait(false);
+            return SessionAction.Continue;
+        }
+
+        // Sysop-only diagnostics: a non-sysop caller who names one (the exact word is recognised
+        // for everyone) gets a plain refusal — never the underlying status.
+        if (IsSysopOnly(resolution.Command) && !_isSysop)
+        {
+            await WritePlainLineAsync(
+                "Sorry, that's a sysop-only command.").ConfigureAwait(false);
             return SessionAction.Continue;
         }
 
@@ -195,10 +223,26 @@ public sealed partial class BbsConsoleSession
                 await WritePlainSignOffAsync().ConfigureAwait(false);
                 return SessionAction.Node;
 
+            case PlainCommand.Forwarding:
+                await HandlePlainForwardingAsync().ConfigureAwait(false);
+                return SessionAction.Continue;
+
+            case PlainCommand.Queue:
+                await HandlePlainQueueAsync().ConfigureAwait(false);
+                return SessionAction.Continue;
+
+            case PlainCommand.Route:
+                await HandlePlainRouteAsync(args).ConfigureAwait(false);
+                return SessionAction.Continue;
+
             default:
                 throw new InvalidOperationException("Unreachable plain command.");
         }
     }
+
+    /// <summary>True for the sysop-gated read-only diagnostics (forwarding / queue / route).</summary>
+    private static bool IsSysopOnly(PlainCommand command) =>
+        command is PlainCommand.Forwarding or PlainCommand.Queue or PlainCommand.Route;
 
     /// <summary>
     /// The muscle-memory shortcuts (the plain-language mandate's examples: <c>l</c>, <c>r 3</c>,
@@ -239,9 +283,15 @@ public sealed partial class BbsConsoleSession
     /// word wins outright; otherwise any word the verb is a prefix of is a candidate — exactly
     /// one ⇒ that command, several ⇒ ambiguous (the caller asks "did you mean …?"), none ⇒
     /// unknown. Case-insensitive. The exact-match-wins rule means a full word that is also a
-    /// prefix of a longer one (none today, but e.g. <c>read</c>) never reports ambiguous.
+    /// prefix of a longer one (e.g. <c>forward</c> vs <c>forwarding</c>) never reports ambiguous.
+    ///
+    /// The sysop-only diagnostics (<c>forwarding</c>/<c>queue</c>/<c>route</c>) match <b>exactly</b>
+    /// for everyone — so a non-sysop naming one is recognised and refused with a plain line rather
+    /// than getting "I don't know" — but they only participate in <b>prefix</b> matching for a
+    /// sysop. So a user's partial prefix never collides with (or leaks the existence of) a sysop
+    /// verb: <c>forwar</c> stays an unambiguous <c>forward</c> for a user.
     /// </summary>
-    private static PlainResolution ResolvePlainCommand(string verb)
+    private static PlainResolution ResolvePlainCommand(string verb, bool isSysop)
     {
         string v = verb.ToLowerInvariant();
 
@@ -264,6 +314,11 @@ public sealed partial class BbsConsoleSession
         var matches = new List<PlainCommandInfo>();
         foreach (PlainCommandInfo info in PlainCommands)
         {
+            if (info.SysopOnly && !isSysop)
+            {
+                continue; // sysop verbs never join a non-sysop's prefix pool
+            }
+
             if (info.Word.StartsWith(v, StringComparison.Ordinal))
             {
                 matches.Add(info);
