@@ -19,6 +19,13 @@ public sealed record UserSettings
 
     /// <summary>ZIP/postcode (Z command, compat spec §1.3), ≤8 chars (§5 parser caps).</summary>
     public string? Zip { get; init; }
+
+    /// <summary>
+    /// The command surface this user sees (the plain-language mandate, design.md), or null for
+    /// the config default (<see cref="InterfaceMode.Plain"/>). Flipped by the typed
+    /// <c>classic</c>/<c>plain</c> commands and persisted so the choice sticks across reconnect.
+    /// </summary>
+    public InterfaceMode? InterfaceMode { get; init; }
 }
 
 /// <summary>
