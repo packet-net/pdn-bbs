@@ -17,6 +17,7 @@ public sealed class InboundMessageReceiver
     private readonly BbsStore _store;
     private readonly RoutingService _routing;
     private readonly RoutingEngine _engine;
+    private readonly SevenPlusAssembler _sevenPlus;
     private readonly string _ownBaseCall;
     private readonly TimeProvider _time;
     private readonly ILogger _logger;
@@ -29,6 +30,7 @@ public sealed class InboundMessageReceiver
         BbsStore store,
         RoutingService routing,
         RoutingEngine engine,
+        SevenPlusAssembler sevenPlus,
         string ownCallsign,
         TimeProvider time,
         ILogger<InboundMessageReceiver> logger)
@@ -36,12 +38,14 @@ public sealed class InboundMessageReceiver
         ArgumentNullException.ThrowIfNull(store);
         ArgumentNullException.ThrowIfNull(routing);
         ArgumentNullException.ThrowIfNull(engine);
+        ArgumentNullException.ThrowIfNull(sevenPlus);
         ArgumentException.ThrowIfNullOrWhiteSpace(ownCallsign);
         ArgumentNullException.ThrowIfNull(time);
         ArgumentNullException.ThrowIfNull(logger);
         _store = store;
         _routing = routing;
         _engine = engine;
+        _sevenPlus = sevenPlus;
         _ownBaseCall = Callsigns.StripSsid(Callsigns.Normalize(ownCallsign));
         _time = time;
         _logger = logger;
@@ -289,6 +293,13 @@ public sealed class InboundMessageReceiver
 
         LogStored(_logger, stored.Number, stored.Bid, fromPartnerCall, null);
         _routing.RouteMessage(stored);
+
+        // Inbound 7plus integration (design.md): after the message is stored + routed (the raw
+        // part-bulletin itself still forwards onward unchanged), scan it for 7plus parts. A body
+        // without the magic is a cheap no-op (the common case); a complete set surfaces a synthesized
+        // local_only message carrying the decoded file as an attachment. The synthesized message is
+        // local_only → never forwarded, and is not re-scanned (it has an attachment, not 7plus text).
+        _sevenPlus.ProcessInbound(stored);
         return stored;
     }
 

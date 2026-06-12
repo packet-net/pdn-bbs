@@ -98,4 +98,38 @@ public sealed class LocalDeliveryRoutingTests : IAsyncDisposable
 
         Assert.Equal(stored.Number, Assert.Single(_store.GetForwardQueue("GB7BSK")).Number);
     }
+
+    [Fact]
+    public void LocalOnlyMessage_IsNeverEnqueuedForForwarding_EvenToAWildcardPartner()
+    {
+        // A local_only message (the synthesized 7plus assembled-file artifact) MUST never reach a
+        // forward queue — RoutingService skips it before any partner is considered. Here a wildcard
+        // partner would otherwise swallow a bulletin; the local_only flag blocks it.
+        _store.UpsertPartner(new Partner { Call = "GB7RDG", AtCalls = ["*"] });
+
+        Message localOnly = _store.AddMessage(new MessageDraft
+        {
+            Type = MessageType.Bulletin,
+            From = "M0XYZ",
+            Recipients = ["ALL"],
+            Subject = "fields.jpg",
+            Body = Encoding.Latin1.GetBytes("7plus file fields.jpg — 1 parts, assembled.\r"),
+            LocalOnly = true,
+        });
+        _routing.RouteMessage(localOnly);
+
+        Assert.Empty(_store.GetForwardQueue("GB7RDG"));
+
+        // Control: the identical message WITHOUT local_only does forward to the wildcard partner.
+        Message normal = _store.AddMessage(new MessageDraft
+        {
+            Type = MessageType.Bulletin,
+            From = "M0XYZ",
+            Recipients = ["ALL"],
+            Subject = "ordinary bulletin",
+            Body = Encoding.Latin1.GetBytes("hi\r"),
+        });
+        _routing.RouteMessage(normal);
+        Assert.Equal(normal.Number, Assert.Single(_store.GetForwardQueue("GB7RDG")).Number);
+    }
 }

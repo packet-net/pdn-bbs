@@ -17,7 +17,7 @@ namespace Bbs.Core;
 public sealed class BbsStore : IDisposable
 {
     /// <summary>The schema version this build writes and expects.</summary>
-    public const int CurrentSchemaVersion = 2;
+    public const int CurrentSchemaVersion = 3;
 
     private readonly SqliteConnection _connection;
     private readonly TimeProvider _time;
@@ -131,8 +131,8 @@ public sealed class BbsStore : IDisposable
             using SqliteTransaction tx = _connection.BeginTransaction();
 
             using (SqliteCommand insert = Command(tx,
-                "INSERT INTO messages(type,status,from_call,at_bbs,bid,subject,body,received_from,created_utc) " +
-                "VALUES($type,$status,$from,$at,$bid,$subject,$body,$rxfrom,$created);"))
+                "INSERT INTO messages(type,status,from_call,at_bbs,bid,subject,body,received_from,created_utc,local_only) " +
+                "VALUES($type,$status,$from,$at,$bid,$subject,$body,$rxfrom,$created,$local);"))
             {
                 insert.Parameters.AddWithValue("$type", draft.Type.ToCode().ToString());
                 insert.Parameters.AddWithValue("$status", status.ToString());
@@ -143,6 +143,7 @@ public sealed class BbsStore : IDisposable
                 insert.Parameters.AddWithValue("$body", draft.Body.ToArray());
                 insert.Parameters.AddWithValue("$rxfrom", (object?)receivedFrom ?? DBNull.Value);
                 insert.Parameters.AddWithValue("$created", now);
+                insert.Parameters.AddWithValue("$local", draft.LocalOnly ? 1 : 0);
                 insert.ExecuteNonQuery();
             }
 
@@ -184,10 +185,18 @@ public sealed class BbsStore : IDisposable
             // BID dedup row. First-seen time and direction are preserved on conflict (the
             // lifetime anchors at first sight); the message link follows the newest live copy
             // so the personal live-copy check (§2.3) finds it.
-            using (SqliteCommand insertBid = Command(tx,
-                "INSERT INTO bids(bid,first_seen_utc,first_seen_from,message_number) VALUES($bid,$seen,$from,$n) " +
-                "ON CONFLICT(bid) DO UPDATE SET message_number=excluded.message_number;"))
+            //
+            // A local_only message (a 7plus assembled-file presentation artifact, schema v3) is
+            // NEVER recorded in the dedup store: it must not collide on BID with the network, so
+            // its (auto-allocated, locally-unique) BID can never reject a genuine inbound message
+            // that happens to share it, and it never participates in the §2.3 live-copy check.
+            // This is the store half of the local_only forward-safety guarantee (the routing half
+            // is RoutingService skipping local_only messages).
+            if (!draft.LocalOnly)
             {
+                using SqliteCommand insertBid = Command(tx,
+                    "INSERT INTO bids(bid,first_seen_utc,first_seen_from,message_number) VALUES($bid,$seen,$from,$n) " +
+                    "ON CONFLICT(bid) DO UPDATE SET message_number=excluded.message_number;");
                 insertBid.Parameters.AddWithValue("$bid", bid);
                 insertBid.Parameters.AddWithValue("$seen", now);
                 insertBid.Parameters.AddWithValue("$from", (object?)receivedFrom ?? DBNull.Value);
@@ -258,7 +267,7 @@ public sealed class BbsStore : IDisposable
         ArgumentNullException.ThrowIfNull(query);
 
         var sql = new System.Text.StringBuilder(
-            "SELECT m.number,m.type,m.status,m.from_call,m.at_bbs,m.bid,m.subject,m.body,m.received_from,m.created_utc,m.killed_utc FROM messages m");
+            "SELECT m.number,m.type,m.status,m.from_call,m.at_bbs,m.bid,m.subject,m.body,m.received_from,m.created_utc,m.killed_utc,m.local_only FROM messages m");
         var parameters = new List<(string Name, object Value)>();
 
         if (query.ToCall is not null)
@@ -517,7 +526,7 @@ public sealed class BbsStore : IDisposable
         lock (_gate)
         {
             using SqliteCommand cmd = Command(null,
-                "SELECT m.number,m.type,m.status,m.from_call,m.at_bbs,m.bid,m.subject,m.body,m.received_from,m.created_utc,m.killed_utc " +
+                "SELECT m.number,m.type,m.status,m.from_call,m.at_bbs,m.bid,m.subject,m.body,m.received_from,m.created_utc,m.killed_utc,m.local_only " +
                 "FROM forwards f JOIN messages m ON m.number=f.message_number " +
                 "WHERE f.partner_call=$p AND f.forwarded_utc IS NULL AND m.status NOT IN ('K','H') " +
                 "ORDER BY CASE m.type WHEN 'T' THEN 0 WHEN 'P' THEN 1 ELSE 2 END, m.number;");
@@ -667,6 +676,237 @@ public sealed class BbsStore : IDisposable
 
             return BidDisposition.Accept;
         }
+    }
+
+    // ---------------------------------------------------------------- 7plus part tracking (schema v3)
+
+    /// <summary>
+    /// Records one received 7plus part: links its file identity (<paramref name="identityKey"/> plus
+    /// the geometry needed to rebuild the identity) and 1-based <paramref name="partNumber"/> to the
+    /// <paramref name="sourceMessageNumber"/> it arrived in. The <c>sevenplus_files</c> row is
+    /// upsert-created on first sight of the file (its geometry is fixed by the identity); the part
+    /// row is inserted at-most-once per (identity, part) — a re-sent part is ignored (the first
+    /// source message wins, matching the assembler's first-wins-per-part decode). Returns true when
+    /// this part was newly recorded, false when that part was already known for this file.
+    ///
+    /// This is the store half of the inbound 7plus integration (design.md "abstract 7plus away from
+    /// the user"): the host scans each inbound body, records every part here, then asks
+    /// <see cref="GetSevenPlusProgress"/> whether the set is complete enough to assemble.
+    /// </summary>
+    public bool RecordSevenPlusPart(
+        string identityKey, string headerName, int fileSize, int totalParts, int blockLines,
+        int partNumber, long sourceMessageNumber)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(identityKey);
+        ArgumentNullException.ThrowIfNull(headerName);
+
+        lock (_gate)
+        {
+            using SqliteTransaction tx = _connection.BeginTransaction();
+
+            using (SqliteCommand file = Command(tx,
+                "INSERT INTO sevenplus_files(identity_key,header_name,file_size,total_parts,block_lines,assembled_message_number) " +
+                "VALUES($k,$hn,$fs,$tp,$bl,NULL) ON CONFLICT(identity_key) DO NOTHING;"))
+            {
+                file.Parameters.AddWithValue("$k", identityKey);
+                file.Parameters.AddWithValue("$hn", headerName);
+                file.Parameters.AddWithValue("$fs", fileSize);
+                file.Parameters.AddWithValue("$tp", totalParts);
+                file.Parameters.AddWithValue("$bl", blockLines);
+                file.ExecuteNonQuery();
+            }
+
+            int added;
+            using (SqliteCommand part = Command(tx,
+                "INSERT OR IGNORE INTO sevenplus_parts(identity_key,part_number,source_message_number) VALUES($k,$p,$n);"))
+            {
+                part.Parameters.AddWithValue("$k", identityKey);
+                part.Parameters.AddWithValue("$p", partNumber);
+                part.Parameters.AddWithValue("$n", sourceMessageNumber);
+                added = part.ExecuteNonQuery();
+            }
+
+            tx.Commit();
+            return added > 0;
+        }
+    }
+
+    /// <summary>
+    /// The progress of one 7plus file by identity: received-part count vs total, the recovered
+    /// header name for display, and the synthesized message number once assembled (null while still
+    /// accumulating). Returns null when the identity is unknown (no parts recorded yet).
+    /// </summary>
+    public SevenPlusProgress? GetSevenPlusProgress(string identityKey)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(identityKey);
+
+        lock (_gate)
+        {
+            return GetSevenPlusProgressCore(identityKey);
+        }
+    }
+
+    /// <summary>
+    /// In-flight (not-yet-assembled) 7plus files, ordered by header name — the webmail placeholder
+    /// source ("FIELDS.JPG — 3/5 parts received"). An assembled file drops out (it now lists as its
+    /// synthesized message). A file whose source parts have all been purged (zero remaining parts) is
+    /// also dropped — it is an orphan, not a real in-flight set.
+    ///
+    /// When <paramref name="recipientCall"/> is supplied, only files at least one of whose source
+    /// part-messages is addressed to that call are returned — so a PERSONAL 7plus file's placeholder
+    /// shows only in its addressee's inbox, never in another user's (matching how the raw parts +
+    /// assembled message are recipient-scoped). Null returns all (the public bulletins case).
+    /// </summary>
+    public IReadOnlyList<SevenPlusProgress> ListIncompleteSevenPlusFiles(string? recipientCall = null)
+    {
+        string? scoped = recipientCall is null ? null : Callsigns.NormalizeAddressee(recipientCall);
+
+        lock (_gate)
+        {
+            // SourceType is the type of any one recorded part-bulletin for the file (they share a
+            // type) — picked by the lowest part number for determinism. The COUNT>0 guard drops
+            // orphaned files whose parts were all purged. The optional recipient EXISTS scopes a
+            // personal file's placeholder to its addressee only.
+            var sql = new System.Text.StringBuilder(
+                "SELECT f.identity_key,f.header_name,f.total_parts,f.assembled_message_number," +
+                "(SELECT COUNT(*) FROM sevenplus_parts p WHERE p.identity_key=f.identity_key) AS rxcount," +
+                "(SELECT m.type FROM sevenplus_parts p JOIN messages m ON m.number=p.source_message_number " +
+                " WHERE p.identity_key=f.identity_key ORDER BY p.part_number LIMIT 1) " +
+                "FROM sevenplus_files f WHERE f.assembled_message_number IS NULL AND rxcount>0");
+            if (scoped is not null)
+            {
+                sql.Append(
+                    " AND EXISTS(SELECT 1 FROM sevenplus_parts p JOIN recipients r ON r.message_number=p.source_message_number " +
+                    "WHERE p.identity_key=f.identity_key AND r.to_call=$to)");
+            }
+
+            sql.Append(" ORDER BY f.header_name,f.identity_key;");
+
+            using SqliteCommand cmd = Command(null, sql.ToString());
+            if (scoped is not null)
+            {
+                cmd.Parameters.AddWithValue("$to", scoped);
+            }
+
+            using SqliteDataReader reader = cmd.ExecuteReader();
+            var result = new List<SevenPlusProgress>();
+            while (reader.Read())
+            {
+                result.Add(new SevenPlusProgress(
+                    reader.GetString(0),
+                    reader.GetString(1),
+                    (int)reader.GetInt64(4),
+                    (int)reader.GetInt64(2),
+                    reader.IsDBNull(3) ? null : reader.GetInt64(3),
+                    reader.IsDBNull(5) ? null : MessageTypeExtensions.MessageTypeFromCode(reader.GetString(5)[0])));
+            }
+
+            return result;
+        }
+    }
+
+    /// <summary>
+    /// The bodies of every source part-bulletin recorded for one file, in part-number order — the
+    /// raw 7plus text the assembler re-scans + reassembles once the set is complete. Each body is the
+    /// stored message body verbatim (the surrounding mail text the parts arrived wrapped in is kept;
+    /// <c>SevenPlusScanner</c> is tolerant of it).
+    /// </summary>
+    public IReadOnlyList<ReadOnlyMemory<byte>> GetSevenPlusPartBodies(string identityKey)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(identityKey);
+
+        lock (_gate)
+        {
+            using SqliteCommand cmd = Command(null,
+                "SELECT m.body FROM sevenplus_parts p JOIN messages m ON m.number=p.source_message_number " +
+                "WHERE p.identity_key=$k ORDER BY p.part_number;");
+            cmd.Parameters.AddWithValue("$k", identityKey);
+            using SqliteDataReader reader = cmd.ExecuteReader();
+            var result = new List<ReadOnlyMemory<byte>>();
+            while (reader.Read())
+            {
+                result.Add(reader.GetFieldValue<byte[]>(0));
+            }
+
+            return result;
+        }
+    }
+
+    /// <summary>
+    /// Marks a 7plus file assembled, linking the synthesized <paramref name="assembledMessageNumber"/>.
+    /// Idempotent and guarded: the link is set only while it is still NULL, so two racing assembly
+    /// attempts can never produce two synthesized messages (the loser's UPDATE matches no row).
+    /// Returns true when THIS call set the link (the caller owns the synthesized message), false when
+    /// the file was already assembled.
+    /// </summary>
+    public bool MarkSevenPlusAssembled(string identityKey, long assembledMessageNumber)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(identityKey);
+
+        lock (_gate)
+        {
+            using SqliteCommand cmd = Command(null,
+                "UPDATE sevenplus_files SET assembled_message_number=$n " +
+                "WHERE identity_key=$k AND assembled_message_number IS NULL;");
+            cmd.Parameters.AddWithValue("$n", assembledMessageNumber);
+            cmd.Parameters.AddWithValue("$k", identityKey);
+            return cmd.ExecuteNonQuery() > 0;
+        }
+    }
+
+    /// <summary>
+    /// True when <paramref name="messageNumber"/> is a raw 7plus source part-bulletin (it appears in
+    /// <c>sevenplus_parts</c>). The webmail listings hide these — the user sees only the assembled file
+    /// (or the in-flight placeholder) — while the message itself stays in the store and still forwards.
+    /// </summary>
+    public bool IsSevenPlusPartMessage(long messageNumber)
+    {
+        lock (_gate)
+        {
+            using SqliteCommand cmd = Command(null,
+                "SELECT 1 FROM sevenplus_parts WHERE source_message_number=$n LIMIT 1;");
+            cmd.Parameters.AddWithValue("$n", messageNumber);
+            using SqliteDataReader reader = cmd.ExecuteReader();
+            return reader.Read();
+        }
+    }
+
+    /// <summary>The set of message numbers that are raw 7plus source parts (the webmail listing hide-set).</summary>
+    public IReadOnlySet<long> GetSevenPlusPartMessageNumbers()
+    {
+        lock (_gate)
+        {
+            using SqliteCommand cmd = Command(null, "SELECT DISTINCT source_message_number FROM sevenplus_parts;");
+            using SqliteDataReader reader = cmd.ExecuteReader();
+            var result = new HashSet<long>();
+            while (reader.Read())
+            {
+                result.Add(reader.GetInt64(0));
+            }
+
+            return result;
+        }
+    }
+
+    private SevenPlusProgress? GetSevenPlusProgressCore(string identityKey)
+    {
+        using SqliteCommand cmd = Command(null,
+            "SELECT f.header_name,f.total_parts,f.assembled_message_number," +
+            "(SELECT COUNT(*) FROM sevenplus_parts p WHERE p.identity_key=f.identity_key) " +
+            "FROM sevenplus_files f WHERE f.identity_key=$k;");
+        cmd.Parameters.AddWithValue("$k", identityKey);
+        using SqliteDataReader reader = cmd.ExecuteReader();
+        if (!reader.Read())
+        {
+            return null;
+        }
+
+        return new SevenPlusProgress(
+            identityKey,
+            reader.GetString(0),
+            (int)reader.GetInt64(3),
+            (int)reader.GetInt64(1),
+            reader.IsDBNull(2) ? null : reader.GetInt64(2));
     }
 
     // ---------------------------------------------------------------- users
@@ -1051,6 +1291,31 @@ public sealed class BbsStore : IDisposable
             version = 2;
         }
 
+        // v3 — inbound 7plus integration. PURELY ADDITIVE so it is safe to apply to the live lab
+        // bbs.db: messages gains a `local_only` column defaulting 0 (every existing row stays a
+        // forwardable, network-visible message), and two new tracking tables record the 7plus
+        // part-bulletins accumulating toward a file. No existing column/row is touched or rewritten.
+        if (version < 3)
+        {
+            using SqliteTransaction tx = connection.BeginTransaction();
+            using (var ddl = connection.CreateCommand())
+            {
+                ddl.Transaction = tx;
+                ddl.CommandText = SchemaV3;
+                ddl.ExecuteNonQuery();
+            }
+
+            using (var stamp = connection.CreateCommand())
+            {
+                stamp.Transaction = tx;
+                stamp.CommandText = "UPDATE meta SET value='3' WHERE key='schema_version';";
+                stamp.ExecuteNonQuery();
+            }
+
+            tx.Commit();
+            version = 3;
+        }
+
         return version;
     }
 
@@ -1135,6 +1400,43 @@ public sealed class BbsStore : IDisposable
         CREATE INDEX idx_attachments_message ON attachments(message_number);
         """;
 
+    // v3 — additive only (see Migrate): the inbound 7plus integration.
+    //   * messages.local_only — a local presentation artifact (the synthesized assembled-file
+    //     message) that MUST never forward and is excluded from the BID dedup store. Defaults 0 so
+    //     every pre-existing message stays a normal, forwardable, network-visible message.
+    //   * sevenplus_files — one row per logical 7plus file (keyed by its identity string), carrying
+    //     enough to rebuild SevenPlusPartIdentity and the link to the synthesized message once
+    //     assembled. This is the placeholder/progress source for the webmail "N/M parts" entry.
+    //   * sevenplus_parts — one row per received part of a file, linking the identity + part number
+    //     to the source part-bulletin message it arrived in (so the listing can hide those raw
+    //     messages and the assembler can fetch their bodies).
+    private const string SchemaV3 = """
+        ALTER TABLE messages ADD COLUMN local_only INTEGER NOT NULL DEFAULT 0;
+
+        CREATE TABLE sevenplus_files(
+            identity_key             TEXT NOT NULL PRIMARY KEY,
+            header_name              TEXT NOT NULL,
+            file_size                INTEGER NOT NULL,
+            total_parts              INTEGER NOT NULL,
+            block_lines              INTEGER NOT NULL,
+            -- The synthesized assembled-file message number. Deliberately NOT a foreign key: a file is
+            -- 'assembled' as a one-way fact. If a sysop kills the synthesized message and housekeeping
+            -- later purges it, the link must NOT revert to NULL (which would resurrect a stale
+            -- 'complete' placeholder and keep the raw parts hidden with no file). A dangling number is
+            -- harmless — nothing dereferences it except optional display — and keeps the file out of
+            -- the incomplete-placeholder list permanently, which is the intended 'dealt with' state.
+            assembled_message_number INTEGER
+        ) WITHOUT ROWID;
+
+        CREATE TABLE sevenplus_parts(
+            identity_key          TEXT NOT NULL,
+            part_number           INTEGER NOT NULL,
+            source_message_number INTEGER NOT NULL REFERENCES messages(number) ON DELETE CASCADE,
+            PRIMARY KEY(identity_key, part_number)
+        ) WITHOUT ROWID;
+        CREATE INDEX idx_sevenplus_parts_source ON sevenplus_parts(source_message_number);
+        """;
+
     private void InsertRecipient(SqliteTransaction tx, long number, string toCall, bool cc)
     {
         using SqliteCommand cmd = Command(tx,
@@ -1156,7 +1458,7 @@ public sealed class BbsStore : IDisposable
     private Message? GetMessageCore(long number)
     {
         using SqliteCommand cmd = Command(null,
-            "SELECT m.number,m.type,m.status,m.from_call,m.at_bbs,m.bid,m.subject,m.body,m.received_from,m.created_utc,m.killed_utc " +
+            "SELECT m.number,m.type,m.status,m.from_call,m.at_bbs,m.bid,m.subject,m.body,m.received_from,m.created_utc,m.killed_utc,m.local_only " +
             "FROM messages m WHERE m.number=$n;");
         cmd.Parameters.AddWithValue("$n", number);
 
@@ -1228,6 +1530,7 @@ public sealed class BbsStore : IDisposable
             ReceivedFrom = reader.IsDBNull(8) ? null : reader.GetString(8),
             CreatedAt = DateTimeOffset.FromUnixTimeSeconds(reader.GetInt64(9)),
             KilledAt = reader.IsDBNull(10) ? null : DateTimeOffset.FromUnixTimeSeconds(reader.GetInt64(10)),
+            LocalOnly = reader.GetInt64(11) != 0,
         };
     }
 

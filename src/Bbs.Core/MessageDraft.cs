@@ -54,4 +54,11 @@ public sealed record MessageDraft
     /// looping / bad date — compat spec §2.2).
     /// </summary>
     public bool Hold { get; init; }
+
+    /// <summary>
+    /// Mark the stored message <see cref="Message.LocalOnly"/> (schema v3): a local presentation
+    /// artifact that MUST never forward and is excluded from the BID dedup store. Set only for the
+    /// synthesized 7plus assembled-file message; defaults false for every normal store path.
+    /// </summary>
+    public bool LocalOnly { get; init; }
 }
