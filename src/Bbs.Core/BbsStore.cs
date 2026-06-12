@@ -17,7 +17,7 @@ namespace Bbs.Core;
 public sealed class BbsStore : IDisposable
 {
     /// <summary>The schema version this build writes and expects.</summary>
-    public const int CurrentSchemaVersion = 3;
+    public const int CurrentSchemaVersion = 4;
 
     private readonly SqliteConnection _connection;
     private readonly TimeProvider _time;
@@ -1080,6 +1080,126 @@ public sealed class BbsStore : IDisposable
         }
     }
 
+    // ---------------------------------------------------------------- mail auth
+
+    /// <summary>
+    /// The shortest acceptable BBS mail-password. A mail password is typed into an external mail
+    /// client (iPhone Mail) over the LAN, so a modest floor is appropriate — long enough to resist
+    /// casual guessing without being onerous for a single trusted operator.
+    /// </summary>
+    public const int MinMailPasswordLength = 8;
+
+    /// <summary>
+    /// Sets (or replaces) the BBS mail-password for <paramref name="callsign"/> — the credential an
+    /// external mail client authenticates with over IMAP, alongside the callsign. The plaintext is
+    /// Argon2id-hashed (<see cref="PasswordHasher"/>) and only the PHC hash is stored, keyed by the
+    /// base (SSID-stripped) callsign so M0LTE and M0LTE-7 share the one mailbox password.
+    /// </summary>
+    /// <exception cref="ArgumentException">
+    /// <paramref name="callsign"/> is not a usable callsign, or <paramref name="password"/> is shorter
+    /// than <see cref="MinMailPasswordLength"/> (whitespace-only counts as empty).
+    /// </exception>
+    public void SetMailPassword(string callsign, string password)
+    {
+        ArgumentNullException.ThrowIfNull(callsign);
+        ArgumentNullException.ThrowIfNull(password);
+
+        string baseCall = Callsigns.StripSsid(Callsigns.Normalize(callsign));
+        if (baseCall.Length == 0)
+        {
+            throw new ArgumentException("Not a usable callsign.", nameof(callsign));
+        }
+
+        if (password.Trim().Length < MinMailPasswordLength)
+        {
+            throw new ArgumentException(
+                $"Mail password must be at least {MinMailPasswordLength} characters.", nameof(password));
+        }
+
+        string hash = PasswordHasher.Hash(password);
+        long now = NowSeconds();
+
+        lock (_gate)
+        {
+            using SqliteCommand cmd = Command(null,
+                "INSERT INTO mail_auth(callsign,password_hash,updated_utc) VALUES($c,$h,$u) " +
+                "ON CONFLICT(callsign) DO UPDATE SET password_hash=excluded.password_hash, updated_utc=excluded.updated_utc;");
+            cmd.Parameters.AddWithValue("$c", baseCall);
+            cmd.Parameters.AddWithValue("$h", hash);
+            cmd.Parameters.AddWithValue("$u", now);
+            cmd.ExecuteNonQuery();
+        }
+    }
+
+    /// <summary>
+    /// Verifies a mail-client login: <c>true</c> only when <paramref name="callsign"/> has a mail
+    /// password set and <paramref name="password"/> matches it (fixed-time, never throwing). A
+    /// callsign with no <c>mail_auth</c> row always returns <c>false</c> — IMAP stays closed until
+    /// the operator sets a password in webmail.
+    /// </summary>
+    public bool VerifyMailPassword(string callsign, string password)
+    {
+        ArgumentNullException.ThrowIfNull(callsign);
+        ArgumentNullException.ThrowIfNull(password);
+
+        string baseCall = Callsigns.StripSsid(Callsigns.Normalize(callsign));
+        if (baseCall.Length == 0)
+        {
+            return false;
+        }
+
+        string? hash;
+        lock (_gate)
+        {
+            using SqliteCommand cmd = Command(null, "SELECT password_hash FROM mail_auth WHERE callsign=$c;");
+            cmd.Parameters.AddWithValue("$c", baseCall);
+            hash = cmd.ExecuteScalar() as string;
+        }
+
+        return hash is not null && PasswordHasher.Verify(password, hash);
+    }
+
+    /// <summary>True when <paramref name="callsign"/> has a BBS mail-password set (for webmail to show set-vs-change).</summary>
+    public bool HasMailPassword(string callsign)
+    {
+        ArgumentNullException.ThrowIfNull(callsign);
+
+        string baseCall = Callsigns.StripSsid(Callsigns.Normalize(callsign));
+        if (baseCall.Length == 0)
+        {
+            return false;
+        }
+
+        lock (_gate)
+        {
+            using SqliteCommand cmd = Command(null, "SELECT 1 FROM mail_auth WHERE callsign=$c;");
+            cmd.Parameters.AddWithValue("$c", baseCall);
+            return cmd.ExecuteScalar() is not null;
+        }
+    }
+
+    /// <summary>
+    /// Removes any BBS mail-password for <paramref name="callsign"/> (disabling its IMAP login).
+    /// Returns true when a row was deleted, false when none was set.
+    /// </summary>
+    public bool ClearMailPassword(string callsign)
+    {
+        ArgumentNullException.ThrowIfNull(callsign);
+
+        string baseCall = Callsigns.StripSsid(Callsigns.Normalize(callsign));
+        if (baseCall.Length == 0)
+        {
+            return false;
+        }
+
+        lock (_gate)
+        {
+            using SqliteCommand cmd = Command(null, "DELETE FROM mail_auth WHERE callsign=$c;");
+            cmd.Parameters.AddWithValue("$c", baseCall);
+            return cmd.ExecuteNonQuery() > 0;
+        }
+    }
+
     // ---------------------------------------------------------------- partners
 
     /// <summary>Fetches a partner by its exact configured call (case-insensitive).</summary>
@@ -1316,6 +1436,31 @@ public sealed class BbsStore : IDisposable
             version = 3;
         }
 
+        // v4 — the BBS mail-password (IMAP / external-mail-client credential). PURELY ADDITIVE so it
+        // is safe to apply to the live lab bbs.db: a new `mail_auth` table holds the Argon2id PHC
+        // hash keyed by base callsign. No existing column/row is touched; users with no row simply
+        // have no mail password set (IMAP login denied until they set one in webmail).
+        if (version < 4)
+        {
+            using SqliteTransaction tx = connection.BeginTransaction();
+            using (var ddl = connection.CreateCommand())
+            {
+                ddl.Transaction = tx;
+                ddl.CommandText = SchemaV4;
+                ddl.ExecuteNonQuery();
+            }
+
+            using (var stamp = connection.CreateCommand())
+            {
+                stamp.Transaction = tx;
+                stamp.CommandText = "UPDATE meta SET value='4' WHERE key='schema_version';";
+                stamp.ExecuteNonQuery();
+            }
+
+            tx.Commit();
+            version = 4;
+        }
+
         return version;
     }
 
@@ -1435,6 +1580,19 @@ public sealed class BbsStore : IDisposable
             PRIMARY KEY(identity_key, part_number)
         ) WITHOUT ROWID;
         CREATE INDEX idx_sevenplus_parts_source ON sevenplus_parts(source_message_number);
+        """;
+
+    // v4 — additive only (see Migrate): the BBS mail-password used by IMAP / external mail clients.
+    // Kept in its own table rather than a users column so the Argon2id hash never rides the User
+    // record (no accidental exposure through ReadUser/UpsertUser/webmail/JSON). Keyed by base
+    // callsign (SSID-stripped) to match personal-mailbox ownership: M0LTE and M0LTE-7 share one
+    // mailbox and so share one mail password.
+    private const string SchemaV4 = """
+        CREATE TABLE mail_auth(
+            callsign      TEXT NOT NULL COLLATE NOCASE PRIMARY KEY,
+            password_hash TEXT NOT NULL,
+            updated_utc   INTEGER NOT NULL
+        ) WITHOUT ROWID;
         """;
 
     private void InsertRecipient(SqliteTransaction tx, long number, string toCall, bool cc)
