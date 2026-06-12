@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Http.Headers;
 using System.Text;
+using Bbs.Console;
 using Bbs.Core;
 using Bbs.Fbb;
 using Bbs.Host.Forwarding;
@@ -20,6 +21,7 @@ public sealed class WebmailTests : IAsyncDisposable
     private readonly FakeTimeProvider _time;
     private readonly BbsStore _store;
     private readonly RoutingService _routing;
+    private readonly InMemoryUserSettingsStore _settings = new();
     private WebApplication? _app;
 
     public WebmailTests()
@@ -54,6 +56,7 @@ public sealed class WebmailTests : IAsyncDisposable
         {
             Store = _store,
             Routing = _routing,
+            Settings = _settings,
             BbsCallsign = "GB7PDN",
             SysopCallsign = "G0SYS", // distinct from the test users — sysop may read/kill anything
         };
@@ -822,5 +825,130 @@ public sealed class WebmailTests : IAsyncDisposable
         Assert.Contains("name=\"fileMode\"", form, StringComparison.Ordinal);    // the handling choice
         Assert.Contains("7plus", form, StringComparison.OrdinalIgnoreCase);
         Assert.Contains("B2", form, StringComparison.Ordinal);                   // the B2-only hint
+    }
+
+    // ------------------------------------------------ settings (interface-mode toggle)
+    // The webmail follow-on: GET /settings shows the current plain/classic mode; POST /settings
+    // flips + persists it through the SAME IUserSettingsStore the console session reads. Gated to
+    // the signed-in user; prefix-correct URLs.
+
+    [Fact]
+    public async Task Settings_DefaultsToPlain_AndOffersBothModes()
+    {
+        ClaimCallsign("tom", "M0LTE");
+        using HttpClient client = await StartAsync();
+
+        string page = await client.GetStringAsync(new Uri("/settings", UriKind.Relative));
+        Assert.Contains("Settings", page, StringComparison.Ordinal);
+        Assert.Contains("action=\"/settings\"", page, StringComparison.Ordinal);
+        // A never-set user is plain (the mandate's default) → the plain radio is checked.
+        Assert.Contains("value=\"plain\" checked", page, StringComparison.Ordinal);
+        Assert.Contains("value=\"classic\"", page, StringComparison.Ordinal);
+        Assert.DoesNotContain("value=\"classic\" checked", page, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Settings_RendersTheSavedClassicMode()
+    {
+        ClaimCallsign("tom", "M0LTE");
+        _settings.Save("M0LTE", new UserSettings { InterfaceMode = InterfaceMode.Classic });
+        using HttpClient client = await StartAsync();
+
+        string page = await client.GetStringAsync(new Uri("/settings", UriKind.Relative));
+        Assert.Contains("value=\"classic\" checked", page, StringComparison.Ordinal);
+        Assert.DoesNotContain("value=\"plain\" checked", page, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Settings_Post_FlipsToClassic_AndPersists()
+    {
+        ClaimCallsign("tom", "M0LTE");
+        using HttpClient client = await StartAsync();
+
+        HttpResponseMessage response = await client.PostAsync(
+            new Uri("/settings", UriKind.Relative),
+            new FormUrlEncodedContent([new KeyValuePair<string, string>("interface", "classic")]));
+        response.EnsureSuccessStatusCode();
+        string page = await response.Content.ReadAsStringAsync();
+        Assert.Contains("Saved.", page, StringComparison.Ordinal);
+        Assert.Contains("value=\"classic\" checked", page, StringComparison.Ordinal);
+
+        // Persisted through the store — a fresh load (what the next console connect reads) shows it.
+        Assert.Equal(InterfaceMode.Classic, _settings.Load("M0LTE").InterfaceMode);
+    }
+
+    [Fact]
+    public async Task Settings_Post_FlipsBackToPlain_AndPersists()
+    {
+        ClaimCallsign("tom", "M0LTE");
+        _settings.Save("M0LTE", new UserSettings { InterfaceMode = InterfaceMode.Classic });
+        using HttpClient client = await StartAsync();
+
+        HttpResponseMessage response = await client.PostAsync(
+            new Uri("/settings", UriKind.Relative),
+            new FormUrlEncodedContent([new KeyValuePair<string, string>("interface", "plain")]));
+        response.EnsureSuccessStatusCode();
+
+        Assert.Equal(InterfaceMode.Plain, _settings.Load("M0LTE").InterfaceMode);
+    }
+
+    [Fact]
+    public async Task Settings_Post_PreservesOtherUserSettings()
+    {
+        // Flipping the interface mode must not clobber the user's other saved console prefs.
+        ClaimCallsign("tom", "M0LTE");
+        _settings.Save("M0LTE", new UserSettings { Qth = "Reading", PageLength = 20 });
+        using HttpClient client = await StartAsync();
+
+        await client.PostAsync(
+            new Uri("/settings", UriKind.Relative),
+            new FormUrlEncodedContent([new KeyValuePair<string, string>("interface", "classic")]));
+
+        UserSettings saved = _settings.Load("M0LTE");
+        Assert.Equal(InterfaceMode.Classic, saved.InterfaceMode);
+        Assert.Equal("Reading", saved.Qth);
+        Assert.Equal(20, saved.PageLength);
+    }
+
+    [Fact]
+    public async Task Settings_UnmappedUser_GetsTheClaimForm_NotSettings()
+    {
+        // No callsign claimed → the WithCallsign gate sends the claim form, like every page.
+        using HttpClient client = await StartAsync(pdnUser: "stranger");
+        string page = await client.GetStringAsync(new Uri("/settings", UriKind.Relative));
+        Assert.Contains("claim", page, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("Mailbox command surface", page, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Settings_Post_IsScopedToTheSignedInUser()
+    {
+        // tom is M0LTE; the flip lands on M0LTE only, not some other callsign.
+        ClaimCallsign("tom", "M0LTE");
+        ClaimCallsign("alice", "G4ABC");
+        using HttpClient client = await StartAsync(pdnUser: "tom");
+
+        await client.PostAsync(
+            new Uri("/settings", UriKind.Relative),
+            new FormUrlEncodedContent([new KeyValuePair<string, string>("interface", "classic")]));
+
+        Assert.Equal(InterfaceMode.Classic, _settings.Load("M0LTE").InterfaceMode);
+        Assert.Null(_settings.Load("G4ABC").InterfaceMode); // untouched
+    }
+
+    [Fact]
+    public async Task Settings_NavLink_AndPrefixCorrectUrls()
+    {
+        ClaimCallsign("tom", "M0LTE");
+        using HttpClient client = await StartAsync(forwardedPrefix: "/apps/bbs", autoRedirect: false);
+
+        // The nav link to settings carries the mount prefix everywhere.
+        string inbox = await client.GetStringAsync(new Uri("/", UriKind.Relative));
+        Assert.Contains("<a href=\"/apps/bbs/settings\">Settings</a>", inbox, StringComparison.Ordinal);
+
+        // The settings form posts under the mount.
+        string page = await client.GetStringAsync(new Uri("/settings", UriKind.Relative));
+        Assert.Contains("action=\"/apps/bbs/settings\"", page, StringComparison.Ordinal);
+        Assert.DoesNotContain("action=\"/settings\"", page, StringComparison.Ordinal); // nothing escapes the mount
     }
 }

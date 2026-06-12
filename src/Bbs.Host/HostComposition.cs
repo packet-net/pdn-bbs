@@ -150,6 +150,9 @@ public static class HostComposition
         {
             Store = store,
             Routing = routing,
+            // The same per-user settings singleton the console session uses — a webmail
+            // interface-mode flip is the persisted choice the next console connect reads.
+            Settings = app.Services.GetRequiredService<IUserSettingsStore>(),
             BbsCallsign = baseCallsign,
             SysopCallsign = config.Sysop,
         });

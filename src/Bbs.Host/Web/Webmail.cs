@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Net;
 using System.Text;
+using Bbs.Console;
 using Bbs.Core;
 using Bbs.SevenPlus;
 using Microsoft.AspNetCore.Builder;
@@ -16,6 +17,14 @@ public sealed record WebmailOptions
 
     /// <summary>Routes composed messages into the forward queues.</summary>
     public required RoutingService Routing { get; init; }
+
+    /// <summary>
+    /// The per-user console preferences store (the same singleton the console session uses —
+    /// <c>HostComposition</c> wires the <see cref="Bbs.Host.Sessions.JsonUserSettingsStore"/>).
+    /// Backs the <c>/settings</c> interface-mode toggle so a webmail flip is the same persisted
+    /// choice the next console connect reads.
+    /// </summary>
+    public required IUserSettingsStore Settings { get; init; }
 
     /// <summary>The BBS callsign (display + acceptance lines).</summary>
     public required string BbsCallsign { get; init; }
@@ -128,6 +137,22 @@ public static class Webmail
             string user = PdnUser(ctx);
             IFormCollection form = await ctx.Request.ReadFormAsync().ConfigureAwait(false);
             return Claim(options, Prefix(ctx), user, form["callsign"].ToString());
+        });
+
+        app.MapGet("/settings", (HttpContext ctx) => WithCallsign(ctx, options,
+            (prefix, call) => SettingsPage(options, prefix, call, saved: false)));
+
+        app.MapPost("/settings", async (HttpContext ctx) =>
+        {
+            string prefix = Prefix(ctx);
+            string? call = FindCallsign(options.Store, PdnUser(ctx));
+            if (call is null)
+            {
+                return Results.Redirect(U(prefix, "/"));
+            }
+
+            IFormCollection form = await ctx.Request.ReadFormAsync().ConfigureAwait(false);
+            return SaveSettings(options, prefix, call, form["interface"].ToString());
         });
     }
 
@@ -540,6 +565,55 @@ public static class Webmail
             """, status);
     }
 
+    // ---------------------------------------------------------------- settings (interface-mode toggle)
+
+    /// <summary>
+    /// The settings page: shows the user's current interface mode (plain / classic — the same
+    /// <see cref="UserSettings.InterfaceMode"/> the console session reads) and a control to change
+    /// it. Plain is the default for a never-set user (the plain-language mandate, design.md). The
+    /// form posts back to the prefix-correct <c>/settings</c> mount. A <paramref name="saved"/>
+    /// banner confirms a just-applied change.
+    /// </summary>
+    private static IResult SettingsPage(WebmailOptions o, string prefix, string call, bool saved)
+    {
+        // Null InterfaceMode means "never chosen" → the plain default per the mandate.
+        InterfaceMode mode = o.Settings.Load(call).InterfaceMode ?? InterfaceMode.Plain;
+        bool plain = mode == InterfaceMode.Plain;
+        string banner = saved
+            ? """<p class="saved">Saved. Your choice applies to your next mailbox connection.</p>"""
+            : "";
+
+        return Html(Page(o, prefix, call, "Settings",
+            $"""
+            <h2>Settings</h2>
+            {banner}
+            <form method="post" action="{U(prefix, "/settings")}">
+            <fieldset><legend>Mailbox command surface</legend>
+            <p>How the RF/console mailbox talks to you when you connect over packet.</p>
+            <p><label><input type="radio" name="interface" value="plain"{(plain ? " checked" : "")}> Plain language <span class="dim">— sentences and whole words (the default)</span></label></p>
+            <p><label><input type="radio" name="interface" value="classic"{(plain ? "" : " checked")}> Classic <span class="dim">— the terse W0RLI letters, for old automated clients</span></label></p>
+            </fieldset>
+            <p><button type="submit">Save</button></p>
+            </form>
+            """));
+    }
+
+    /// <summary>
+    /// Applies the posted interface choice: loads the user's <see cref="UserSettings"/>, sets
+    /// <see cref="UserSettings.InterfaceMode"/> and saves it (so the next console connect reads the
+    /// new surface), then re-renders the page with a confirmation. An unrecognised value falls back
+    /// to plain (the mandate's default) rather than erroring.
+    /// </summary>
+    private static IResult SaveSettings(WebmailOptions o, string prefix, string call, string interfaceValue)
+    {
+        InterfaceMode mode = string.Equals(interfaceValue.Trim(), "classic", StringComparison.OrdinalIgnoreCase)
+            ? InterfaceMode.Classic
+            : InterfaceMode.Plain;
+
+        o.Settings.Save(call, o.Settings.Load(call) with { InterfaceMode = mode });
+        return SettingsPage(o, prefix, call, saved: true);
+    }
+
     // ---------------------------------------------------------------- rendering
 
     private static bool IsSysop(WebmailOptions o, string call) =>
@@ -613,7 +687,7 @@ public static class Webmail
         <html><head><meta charset="utf-8"><title>{{H(o.BbsCallsign)}} — {{H(title)}}</title>{{Style}}</head>
         <body><main>
         <h1>{{H(o.BbsCallsign)}} <span class="dim">webmail</span></h1>
-        <nav><a href="{{U(prefix, "/")}}">Inbox</a> · <a href="{{U(prefix, "/bulletins")}}">Bulletins</a> · <a href="{{U(prefix, "/compose")}}">Compose</a>
+        <nav><a href="{{U(prefix, "/")}}">Inbox</a> · <a href="{{U(prefix, "/bulletins")}}">Bulletins</a> · <a href="{{U(prefix, "/compose")}}">Compose</a> · <a href="{{U(prefix, "/settings")}}">Settings</a>
         <span class="dim">— de {{H(call)}}</span></nav>
         {{body}}
         </main></body></html>
@@ -630,7 +704,8 @@ public static class Webmail
         tr.unread td{font-weight:bold}
         pre{background:#fff;border:1px solid #ddd8cf;padding:1rem;white-space:pre-wrap;word-break:break-word}
         table.meta th{width:6rem;color:#8a857c;font-weight:normal}
-        .err{color:#a32014}.pager{margin-top:.75rem}
+        .err{color:#a32014}.saved{color:#1a6b2f}.pager{margin-top:.75rem}
+        fieldset{border:1px solid #ddd8cf;margin:0 0 1rem;padding:.5rem 1rem}legend{color:#8a857c}
         ul.attachments{padding-left:1.2rem}ul.attachments .dim{color:#8a857c}
         ul.sevenplus-pending{list-style:none;padding:0;margin:0 0 1rem}
         ul.sevenplus-pending li{padding:.3rem .6rem;border:1px dashed #c9c3b8;background:#fbfaf6;border-radius:3px;margin-bottom:.3rem;font-size:.92rem}
