@@ -243,6 +243,7 @@ public sealed class SevenPlusStoreTests : IDisposable
     {
         using var connection = new SqliteConnection($"Data Source={path};Mode=ReadWrite;Pooling=False");
         connection.Open();
+        Exec(connection, "DROP TABLE IF EXISTS message_read;"); // v5 — later addition the seed carries
         Exec(connection, "DROP TABLE IF EXISTS mail_auth;"); // v4 — also a later addition the seed carries
         Exec(connection, "DROP TABLE IF EXISTS sevenplus_parts;");
         Exec(connection, "DROP TABLE IF EXISTS sevenplus_files;");

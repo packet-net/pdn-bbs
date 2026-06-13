@@ -91,18 +91,24 @@ public sealed class ImapBackendTests
     }
 
     [Fact]
-    public void Bulletins_AreAlwaysReportedSeen_NamedLimitation()
+    public void Bulletins_TrackPerUserReadState()
     {
-        // Per-user bulletin read-state cannot be stored in the current schema (the recipient is the
-        // category, not the user), so bulletins are reported always-\Seen. See ImapBackend remarks.
+        // A bulletin is unseen for each user until they read it, and a read by one user does not
+        // affect another (per-user read-state in the message_read table).
         using var test = new TestStore();
         test.Store.AddMessage(Drafts.Bulletin(to: "NEWS", subject: "fresh"));
-
         var backend = new ImapBackend(test.Store);
-        ImapMailbox news = backend.OpenMailbox("M0LTE", backend.ResolveFolder("M0LTE", "Bulletins/NEWS")!)!;
 
-        Assert.True(news.Messages[0].Seen);
-        Assert.Equal(0, news.UnseenCount);
+        ImapMailbox mine = backend.OpenMailbox("M0LTE", backend.ResolveFolder("M0LTE", "Bulletins/NEWS")!)!;
+        Assert.False(mine.Messages[0].Seen);
+        Assert.Equal(1, mine.UnseenCount);
+
+        // M0LTE reads it (what a non-PEEK fetch / STORE +FLAGS \Seen drives).
+        Assert.True(mine.MarkSeen(mine.Messages[0]));
+
+        // A fresh snapshot for M0LTE shows it seen; G4ABC still has it unseen.
+        Assert.True(backend.OpenMailbox("M0LTE", backend.ResolveFolder("M0LTE", "Bulletins/NEWS")!)!.Messages[0].Seen);
+        Assert.False(backend.OpenMailbox("G4ABC", backend.ResolveFolder("G4ABC", "Bulletins/NEWS")!)!.Messages[0].Seen);
     }
 
     [Fact]

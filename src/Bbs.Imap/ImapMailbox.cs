@@ -95,9 +95,9 @@ public sealed class ImapMailbox
     /// <summary>
     /// Marks <paramref name="handle"/> seen in the store and updates the snapshot flag in place
     /// (a non-PEEK body fetch, or a <c>STORE +FLAGS (\Seen)</c>). Personals stamp the recipient
-    /// read-row via <see cref="BbsStore.MarkRead"/>; for a bulletin this is a no-op in the store
-    /// (the recipient is the category, not the user) and the handle is already reported seen, so the
-    /// call is harmless. Returns true when the flag changed from unseen to seen in this snapshot.
+    /// read-row via <see cref="BbsStore.MarkRead"/>; bulletins record per-user read-state in the
+    /// <c>message_read</c> table via <see cref="BbsStore.SetReadByUser"/> (the reader is not a named
+    /// recipient). Returns true when the flag changed from unseen to seen in this snapshot.
     /// </summary>
     public bool MarkSeen(ImapMessageHandle handle)
     {
@@ -106,6 +106,10 @@ public sealed class ImapMailbox
         if (Folder.Kind == ImapFolderKind.Inbox)
         {
             _store.MarkRead(handle.Uid, Callsign);
+        }
+        else
+        {
+            _store.SetReadByUser(Callsign, handle.Uid);
         }
 
         if (handle.Seen)

@@ -79,6 +79,17 @@ public sealed class ImapSession
                 await _connection.WriteAsync($"* CAPABILITY {Capabilities}\r\n", cancellationToken).ConfigureAwait(false);
                 await Tagged(tag, "OK", "CAPABILITY completed", cancellationToken).ConfigureAwait(false);
                 break;
+            case "ID":
+                // RFC 2971: clients (iPhone Mail) send ID on connect; answer with our name, then OK.
+                await _connection.WriteAsync("* ID (\"name\" \"pdn-bbs\")\r\n", cancellationToken).ConfigureAwait(false);
+                await Tagged(tag, "OK", "ID completed", cancellationToken).ConfigureAwait(false);
+                break;
+            case "NAMESPACE":
+                await HandleNamespaceAsync(tag, cancellationToken).ConfigureAwait(false);
+                break;
+            case "SEARCH":
+                await HandleSearchAsync(tag, args, byUid: false, cancellationToken).ConfigureAwait(false);
+                break;
             case "NOOP":
                 await Tagged(tag, "OK", "NOOP completed", cancellationToken).ConfigureAwait(false);
                 break;
@@ -397,6 +408,44 @@ public sealed class ImapSession
         await Tagged(tag, "OK", "CLOSE completed", cancellationToken).ConfigureAwait(false);
     }
 
+    /// <summary>The single flat namespace (personal mailboxes under a "/" hierarchy; no shared/other users).</summary>
+    private async Task HandleNamespaceAsync(string tag, CancellationToken cancellationToken)
+    {
+        if (_callsign is null)
+        {
+            await Tagged(tag, "NO", "Authenticate first", cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        await _connection.WriteAsync(
+            $"* NAMESPACE ((\"\" \"{ImapBackend.HierarchyDelimiter}\")) NIL NIL\r\n", cancellationToken).ConfigureAwait(false);
+        await Tagged(tag, "OK", "NAMESPACE completed", cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// <c>SEARCH</c> / <c>UID SEARCH</c> (RFC 3501 §6.4.4) over the selected snapshot — what a client
+    /// (iPhone Mail) uses to enumerate a mailbox. Emits <c>* SEARCH n1 n2 …</c> (message sequence
+    /// numbers, or UIDs when <paramref name="byUid"/>) then a tagged OK; a malformed program is BAD.
+    /// </summary>
+    private async Task HandleSearchAsync(string tag, IReadOnlyList<ImapToken> args, bool byUid, CancellationToken cancellationToken)
+    {
+        if (_mailbox is null)
+        {
+            await Tagged(tag, "NO", "No mailbox selected", cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        if (!ImapSearch.TryEvaluate(args, _mailbox, byUid, out IReadOnlyList<long> matches))
+        {
+            await Tagged(tag, "BAD", "Invalid SEARCH criteria", cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        string list = matches.Count == 0 ? string.Empty : " " + string.Join(' ', matches);
+        await _connection.WriteAsync($"* SEARCH{list}\r\n", cancellationToken).ConfigureAwait(false);
+        await Tagged(tag, "OK", "SEARCH completed", cancellationToken).ConfigureAwait(false);
+    }
+
     // ------------------------------------------------------------------ fetch / store / uid
 
     private async Task HandleUidAsync(string tag, IReadOnlyList<ImapToken> args, CancellationToken cancellationToken)
@@ -416,6 +465,9 @@ public sealed class ImapSession
                 break;
             case "STORE":
                 await HandleStoreAsync(tag, rest, byUid: true, cancellationToken).ConfigureAwait(false);
+                break;
+            case "SEARCH":
+                await HandleSearchAsync(tag, rest, byUid: true, cancellationToken).ConfigureAwait(false);
                 break;
             default:
                 await Tagged(tag, "BAD", $"Unsupported UID subcommand {sub}", cancellationToken).ConfigureAwait(false);

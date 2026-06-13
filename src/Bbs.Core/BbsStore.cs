@@ -17,7 +17,7 @@ namespace Bbs.Core;
 public sealed class BbsStore : IDisposable
 {
     /// <summary>The schema version this build writes and expects.</summary>
-    public const int CurrentSchemaVersion = 4;
+    public const int CurrentSchemaVersion = 5;
 
     private readonly SqliteConnection _connection;
     private readonly TimeProvider _time;
@@ -1200,6 +1200,56 @@ public sealed class BbsStore : IDisposable
         }
     }
 
+    // ---------------------------------------------------------------- per-user read state
+
+    /// <summary>
+    /// Records that <paramref name="callsign"/> has read message <paramref name="number"/> (idempotent).
+    /// This is the read-state for messages the user is not a named recipient of — chiefly bulletins,
+    /// where the recipient is the category, not the reader. Personals keep their read-state on the
+    /// recipient row (<see cref="MarkRead"/>); this table backs per-user unread for everything else.
+    /// Keyed by base (SSID-stripped) callsign so a user's SSIDs share one read-state.
+    /// </summary>
+    public void SetReadByUser(string callsign, long number)
+    {
+        ArgumentNullException.ThrowIfNull(callsign);
+        string baseCall = Callsigns.StripSsid(Callsigns.Normalize(callsign));
+        if (baseCall.Length == 0)
+        {
+            return;
+        }
+
+        lock (_gate)
+        {
+            using SqliteCommand cmd = Command(null,
+                "INSERT INTO message_read(callsign,message_number,read_utc) VALUES($c,$n,$u) " +
+                "ON CONFLICT(callsign,message_number) DO NOTHING;");
+            cmd.Parameters.AddWithValue("$c", baseCall);
+            cmd.Parameters.AddWithValue("$n", number);
+            cmd.Parameters.AddWithValue("$u", NowSeconds());
+            cmd.ExecuteNonQuery();
+        }
+    }
+
+    /// <summary>True when <paramref name="callsign"/> has read message <paramref name="number"/> (per <see cref="SetReadByUser"/>).</summary>
+    public bool IsReadByUser(string callsign, long number)
+    {
+        ArgumentNullException.ThrowIfNull(callsign);
+        string baseCall = Callsigns.StripSsid(Callsigns.Normalize(callsign));
+        if (baseCall.Length == 0)
+        {
+            return false;
+        }
+
+        lock (_gate)
+        {
+            using SqliteCommand cmd = Command(null,
+                "SELECT 1 FROM message_read WHERE callsign=$c AND message_number=$n;");
+            cmd.Parameters.AddWithValue("$c", baseCall);
+            cmd.Parameters.AddWithValue("$n", number);
+            return cmd.ExecuteScalar() is not null;
+        }
+    }
+
     // ---------------------------------------------------------------- partners
 
     /// <summary>Fetches a partner by its exact configured call (case-insensitive).</summary>
@@ -1461,6 +1511,32 @@ public sealed class BbsStore : IDisposable
             version = 4;
         }
 
+        // v5 — per-user read state. PURELY ADDITIVE: a new `message_read` table records that a given
+        // callsign has read a given message. Personals already carry read-state on the recipient row
+        // (recipients.read_utc); this table generalises read-state to messages a user is NOT a named
+        // recipient of — chiefly BULLETINS, where the recipient is the category, not the reader — so an
+        // IMAP client can show per-user unread bulletins. No existing column/row is touched.
+        if (version < 5)
+        {
+            using SqliteTransaction tx = connection.BeginTransaction();
+            using (var ddl = connection.CreateCommand())
+            {
+                ddl.Transaction = tx;
+                ddl.CommandText = SchemaV5;
+                ddl.ExecuteNonQuery();
+            }
+
+            using (var stamp = connection.CreateCommand())
+            {
+                stamp.Transaction = tx;
+                stamp.CommandText = "UPDATE meta SET value='5' WHERE key='schema_version';";
+                stamp.ExecuteNonQuery();
+            }
+
+            tx.Commit();
+            version = 5;
+        }
+
         return version;
     }
 
@@ -1593,6 +1669,19 @@ public sealed class BbsStore : IDisposable
             password_hash TEXT NOT NULL,
             updated_utc   INTEGER NOT NULL
         ) WITHOUT ROWID;
+        """;
+
+    // v5 — additive only (see Migrate): per-user read state for messages the user is not a named
+    // recipient of (bulletins). Keyed by base callsign + message number; the message FK cascades on
+    // delete so housekeeping purges the read rows with the message.
+    private const string SchemaV5 = """
+        CREATE TABLE message_read(
+            callsign       TEXT NOT NULL COLLATE NOCASE,
+            message_number INTEGER NOT NULL REFERENCES messages(number) ON DELETE CASCADE,
+            read_utc       INTEGER NOT NULL,
+            PRIMARY KEY(callsign, message_number)
+        ) WITHOUT ROWID;
+        CREATE INDEX idx_message_read_msg ON message_read(message_number);
         """;
 
     private void InsertRecipient(SqliteTransaction tx, long number, string toCall, bool cc)

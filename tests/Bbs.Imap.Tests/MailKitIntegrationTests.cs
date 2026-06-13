@@ -224,7 +224,7 @@ public sealed class MailKitIntegrationTests
     }
 
     [Fact]
-    public async Task Bulletins_ReportAsSeen()
+    public async Task Bulletins_TrackPerUserReadState()
     {
         using var test = new TestStore();
         test.Store.SetMailPassword("M0LTE", "passphrase seven");
@@ -233,11 +233,22 @@ public sealed class MailKitIntegrationTests
 
         using ImapClient client = await harness.ConnectAsync();
         await client.AuthenticateAsync("M0LTE", "passphrase seven");
-        IMailFolder news = await client.GetFolderAsync("Bulletins/NEWS");
-        await news.OpenAsync(FolderAccess.ReadOnly);
 
-        IList<IMessageSummary> summaries = await news.FetchAsync(0, -1, MessageSummaryItems.Flags);
-        Assert.True(summaries.Single().Flags!.Value.HasFlag(MessageFlags.Seen));
+        // A fresh bulletin is unseen for this user.
+        IMailFolder news = await client.GetFolderAsync("Bulletins/NEWS");
+        await news.OpenAsync(FolderAccess.ReadWrite);
+        IList<IMessageSummary> before = await news.FetchAsync(0, -1, MessageSummaryItems.Flags | MessageSummaryItems.UniqueId);
+        Assert.False(before.Single().Flags!.Value.HasFlag(MessageFlags.Seen));
+
+        // Marking it seen persists in the store (per-user).
+        await news.AddFlagsAsync([before.Single().UniqueId], MessageFlags.Seen, silent: true);
+        Assert.True(test.Store.IsReadByUser("M0LTE", (long)before.Single().UniqueId.Id));
+
+        // A fresh open shows it seen now.
+        await news.CloseAsync();
+        await news.OpenAsync(FolderAccess.ReadOnly);
+        IList<IMessageSummary> after = await news.FetchAsync(0, -1, MessageSummaryItems.Flags);
+        Assert.True(after.Single().Flags!.Value.HasFlag(MessageFlags.Seen));
 
         await client.DisconnectAsync(quit: true);
     }
@@ -295,7 +306,7 @@ public sealed class MailKitIntegrationTests
 
         await all.StatusAsync(StatusItems.Count | StatusItems.Unread | StatusItems.UidNext | StatusItems.UidValidity);
         Assert.Equal(2, all.Count);
-        Assert.Equal(0, all.Unread); // bulletins always-Seen
+        Assert.Equal(2, all.Unread); // both bulletins unread for this user (per-user read-state)
         Assert.Equal(1u, all.UidValidity);
 
         await client.DisconnectAsync(quit: true);
