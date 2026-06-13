@@ -52,10 +52,11 @@ public sealed class ImapRenderedMessage
     {
         ArgumentNullException.ThrowIfNull(message);
 
-        // Surface any complete 7plus file carried inline in the body as a real decoded attachment, so
-        // a client sees the image/file rather than a wall of 7plus code-lines.
+        // Surface any complete 7plus file carried inline in the body as a real decoded attachment (so a
+        // client sees the image/file, not a wall of code-lines), and render the text as format=flowed so
+        // the sender's fixed-width wrap reflows to the screen (ASCII art / tables stay hard).
         MimeMessage mime = BbsMessageToMime.ToMimeMessage(
-            message, ImapBackend.MailDomain, SevenPlusDecode.DecodedAttachments(message));
+            message, ImapBackend.MailDomain, SevenPlusDecode.DecodedAttachments(message), reflowText: true);
 
         // MimeKit writes CRLF line endings by default (FormatOptions.Default.NewLineFormat == Dos).
         using var stream = new MemoryStream();

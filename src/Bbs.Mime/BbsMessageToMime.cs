@@ -33,8 +33,13 @@ public static class BbsMessageToMime
     /// Synthesised attachments to add beyond the message's stored ones — e.g. a 7plus file decoded
     /// from the body by the caller, surfaced as an accessible attachment. Null/empty adds nothing.
     /// </param>
+    /// <param name="reflowText">
+    /// When true, render the text body as RFC 3676 <c>format=flowed</c> (<see cref="TextReflow"/>) so a
+    /// client reflows the sender's fixed-width wrap to the screen — ASCII art / tables / headers are
+    /// left as hard breaks. When false, the body is plain fixed text exactly as stored.
+    /// </param>
     public static MimeMessage ToMimeMessage(
-        Message message, string mailDomain, IReadOnlyList<MessageAttachment>? extraAttachments = null)
+        Message message, string mailDomain, IReadOnlyList<MessageAttachment>? extraAttachments = null, bool reflowText = false)
     {
         ArgumentNullException.ThrowIfNull(message);
         ArgumentException.ThrowIfNullOrEmpty(mailDomain);
@@ -73,7 +78,7 @@ public static class BbsMessageToMime
         verbatim.AddRange(message.Recipients.Select(r => RecipientAddress(r, message.At)));
         mime.Headers.Add(PacketAddressHeader, string.Join(", ", verbatim));
 
-        mime.Body = BuildBody(message, extraAttachments);
+        mime.Body = BuildBody(message, extraAttachments, reflowText);
         return mime;
     }
 
@@ -119,14 +124,31 @@ public static class BbsMessageToMime
         return $"{sb}@{mailDomain}";
     }
 
-    private static MimeEntity BuildBody(Message message, IReadOnlyList<MessageAttachment>? extraAttachments)
+    /// <summary>
+    /// The text body part. Plain fixed text by default; an RFC 3676 <c>format=flowed</c> part when
+    /// <paramref name="reflowText"/>, so a client reflows prose to the screen (see <see cref="TextReflow"/>).
+    /// </summary>
+    private static TextPart BuildTextPart(Message message, bool reflowText)
     {
         // The body is stored as raw bytes (Latin-1-transparent — see Message.GetBodyText); render it
         // the same way webmail does so the user sees identical text.
-        var textPart = new TextPart(TextFormat.Plain)
+        string body = message.GetBodyText();
+        if (!reflowText)
         {
-            Text = message.GetBodyText(),
-        };
+            return new TextPart(TextFormat.Plain) { Text = body };
+        }
+
+        var flowed = new TextPart(TextFormat.Plain) { Text = TextReflow.ToFormatFlowed(body) };
+        flowed.ContentType.Parameters["format"] = "flowed";
+        // Trailing spaces mark soft lines and are load-bearing; quoted-printable encodes a trailing
+        // space as =20 so it survives the wire (a 7bit/8bit writer may drop it).
+        flowed.ContentTransferEncoding = ContentEncoding.QuotedPrintable;
+        return flowed;
+    }
+
+    private static MimeEntity BuildBody(Message message, IReadOnlyList<MessageAttachment>? extraAttachments, bool reflowText)
+    {
+        TextPart textPart = BuildTextPart(message, reflowText);
 
         IReadOnlyList<MessageAttachment> extras = extraAttachments ?? [];
         if (message.Attachments.Count == 0 && extras.Count == 0)
