@@ -26,6 +26,15 @@
     <ProjectReference Include="..\..\src\Bbs.Smtp\Bbs.Smtp.csproj" />
     <ProjectReference Include="..\..\src\Bbs.Core\Bbs.Core.csproj" />
     <ProjectReference Include="..\..\src\Bbs.Mime\Bbs.Mime.csproj" />
+    <ProjectReference Include="..\..\src\Bbs.SevenPlus\Bbs.SevenPlus.csproj" />
+  </ItemGroup>
+
+  <!-- A real image, shared with the SevenPlus suite (see that project's Resources/PROVENANCE.txt), used
+       as the attachment in the 7plus-on-send round-trip test. Embedded under a Smtp-local logical name. -->
+  <ItemGroup>
+    <EmbeddedResource Include="..\Bbs.SevenPlus.Tests\Resources\fields.jpg">
+      <LogicalName>Bbs.Smtp.Tests.Resources.fields.jpg</LogicalName>
+    </EmbeddedResource>
   </ItemGroup>
 
 </Project>

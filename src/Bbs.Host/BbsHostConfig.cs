@@ -125,10 +125,13 @@ public sealed record ImapTlsConfig
 /// <see cref="Bind"/>:<see cref="Port"/> lets an external mail client (iPhone Mail, Thunderbird, MailKit)
 /// SEND packet mail; the login is the user's callsign + their BBS mail-password
 /// (<see cref="BbsStore.VerifyMailPassword"/>, set in webmail). This is a submission server, not a relay:
-/// AUTH is required before any mail command, and a sent message is stored as a Personal and routed
-/// exactly like a webmail compose (the stored From is always the authenticated callsign). Off by default
-/// ⇒ a node that does not configure it behaves exactly as before. The bind may be a LAN address (unlike
-/// webmail, whose loopback bind is the app-gateway trust boundary) — pair a LAN bind with <see cref="SmtpTlsConfig"/>.
+/// AUTH is required before any mail command, and a sent message is stored and routed exactly like a
+/// webmail compose (the stored From is always the authenticated callsign). A recipient addressed to a
+/// callsign is a personal; a recipient addressed to a token that is NOT a valid callsign (ALL, NEWS, …) is
+/// a bulletin to that category. Attachments are 7plus-encoded into the body, the universal packet path.
+/// Off by default ⇒ a node that does not configure it behaves exactly as before. The bind may be a LAN
+/// address (unlike webmail, whose loopback bind is the app-gateway trust boundary) — pair a LAN bind with
+/// <see cref="SmtpTlsConfig"/>.
 /// </summary>
 public sealed record SmtpConfig
 {
@@ -426,11 +429,15 @@ public static class BbsHostConfigFile
         #       behaves exactly as before. The login is the user's CALLSIGN plus their BBS
         #       mail-password (the same credential as imap; set in webmail). This is a
         #       SUBMISSION server, not a relay: AUTH is required before any mail command
-        #       (no open relay), and a sent message is stored as a Personal and routed just
-        #       like a webmail compose — the stored From is always the authenticated
-        #       callsign, never the (untrusted) MAIL FROM. v1 is TEXT-ONLY: only the text
-        #       body is taken (attachments / 7plus-on-send are a later slice). Like imap,
-        #       the bind MAY be a LAN address so a phone on the home network can reach it —
+        #       (no open relay), and a sent message is stored and routed just like a webmail
+        #       compose — the stored From is always the authenticated callsign, never the
+        #       (untrusted) MAIL FROM. A recipient addressed to a callsign is stored as a
+        #       PERSONAL; a recipient addressed to a token that is NOT a valid callsign
+        #       (e.g. ALL, NEWS, SALE, DX) is treated as a BULLETIN to that category. Any
+        #       attachments are 7plus-encoded into the message body (the universal packet
+        #       path, exactly like a webmail compose) so a phone that attaches a photo
+        #       produces a message a recipient can decode back to a file. Like imap, the
+        #       bind MAY be a LAN address so a phone on the home network can reach it —
         #       pair a LAN bind with tls.enabled.
         #   The server offers TWO submission endpoints from one listener config, both using the
         #   same certificate (tls below):
