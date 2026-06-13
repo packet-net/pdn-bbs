@@ -16,9 +16,9 @@ namespace Bbs.Imap;
 ///   tracks (<see cref="BbsStore.MarkRead"/>).</item>
 /// <item><b>Bulletins/&lt;CATEGORY&gt;</b> — the bulletins (<see cref="MessageType.Bulletin"/>) whose
 ///   recipient category is <c>CATEGORY</c> (e.g. <c>ALL</c>, <c>NEWS</c>, <c>SALE</c>). A bulletin's
-///   "recipient" is the category, not the user, so per-user bulletin read-state cannot be stored in
-///   the current schema — bulletins are reported <b>always <c>\Seen</c></b> (a named limitation; a
-///   per-user bulletin-seen table is a future slice).</item>
+///   "recipient" is the category, not the user, so its per-user <c>\Seen</c> is tracked in the
+///   <c>message_read</c> table (<see cref="BbsStore.IsReadByUser"/>/<see cref="BbsStore.SetReadByUser"/>)
+///   keyed by the reader's callsign — each user has their own unread bulletins.</item>
 /// </list>
 /// Raw 7plus part-bulletins are hidden everywhere (matching webmail), as the user only ever sees the
 /// assembled file.
@@ -200,17 +200,16 @@ public sealed class ImapBackend
     }
 
     /// <summary>
-    /// The <c>\Seen</c> flag for one message in one folder. Personals carry the user's own
-    /// recipient-row read-state. Bulletins are reported always-<c>\Seen</c>: per-user bulletin read
-    /// state cannot be stored in the current schema (the recipient is the category, not the user), and
-    /// reporting bulletins perpetually unread would be worse than reporting them read — a named
-    /// limitation (see the type remarks; a per-user bulletin-seen table is a future slice).
+    /// The <c>\Seen</c> flag for one message in one folder, per the session callsign. Personals carry
+    /// the user's own recipient-row read-state (<see cref="MessageRecipient.ReadAt"/>); bulletins carry
+    /// per-user read-state in the <c>message_read</c> table (<see cref="BbsStore.IsReadByUser"/>) — the
+    /// reader is not a named recipient of a bulletin, so its read-state can't live on a recipient row.
     /// </summary>
-    private static bool IsSeen(ImapFolder folder, Message message, string callsign)
+    private bool IsSeen(ImapFolder folder, Message message, string callsign)
     {
         if (folder.Kind != ImapFolderKind.Inbox)
         {
-            return true; // bulletins: always-Seen (named limitation — no per-user bulletin read-state)
+            return _store.IsReadByUser(callsign, message.Number); // bulletins: real per-user read-state
         }
 
         foreach (MessageRecipient recipient in message.Recipients)

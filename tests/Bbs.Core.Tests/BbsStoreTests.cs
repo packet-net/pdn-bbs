@@ -296,6 +296,7 @@ public sealed class BbsStoreTests : IDisposable
         // them): a genuine v1 messages table has no local_only column, and the 7plus tracking tables
         // and the mail_auth table don't exist yet. Without this the v3 ALTER / v4 CREATE on reopen
         // fails ("duplicate column name" / "table mail_auth already exists").
+        Exec(connection, "DROP TABLE IF EXISTS message_read;");
         Exec(connection, "DROP TABLE IF EXISTS mail_auth;");
         Exec(connection, "DROP TABLE IF EXISTS sevenplus_parts;");
         Exec(connection, "DROP TABLE IF EXISTS sevenplus_files;");

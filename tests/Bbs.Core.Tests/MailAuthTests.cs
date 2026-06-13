@@ -148,7 +148,9 @@ public sealed class MailAuthTests : IDisposable
         DowngradeToV3(path);
 
         using BbsStore upgraded = BbsStore.Open(path, "GB7PDN", _ts.Time);
-        Assert.Equal(4, upgraded.SchemaVersion);
+        // Reopening migrates to the current version (v3 → v4 → …); this test asserts the v4 mail_auth
+        // addition in particular survives.
+        Assert.Equal(BbsStore.CurrentSchemaVersion, upgraded.SchemaVersion);
 
         // The pre-existing message survived the upgrade.
         Assert.Equal("legacy v3", upgraded.GetMessage(legacyNumber)!.Subject);
@@ -158,14 +160,14 @@ public sealed class MailAuthTests : IDisposable
         Assert.True(upgraded.VerifyMailPassword("M0LTE", "post-v4-password"));
     }
 
-    /// <summary>Strips the v4 schema addition and resets the version stamp, leaving a genuine v3 db on disk.</summary>
+    /// <summary>Strips the v4+ schema additions and resets the version stamp, leaving a genuine v3 db on disk.</summary>
     private static void DowngradeToV3(string path)
     {
         using var connection = new SqliteConnection($"Data Source={path};Mode=ReadWrite;Pooling=False");
         connection.Open();
         using (var drop = connection.CreateCommand())
         {
-            drop.CommandText = "DROP TABLE IF EXISTS mail_auth;";
+            drop.CommandText = "DROP TABLE IF EXISTS message_read; DROP TABLE IF EXISTS mail_auth;";
             drop.ExecuteNonQuery();
         }
 
