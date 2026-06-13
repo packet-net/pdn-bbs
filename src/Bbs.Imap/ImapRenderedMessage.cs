@@ -52,7 +52,10 @@ public sealed class ImapRenderedMessage
     {
         ArgumentNullException.ThrowIfNull(message);
 
-        MimeMessage mime = BbsMessageToMime.ToMimeMessage(message, ImapBackend.MailDomain);
+        // Surface any complete 7plus file carried inline in the body as a real decoded attachment, so
+        // a client sees the image/file rather than a wall of 7plus code-lines.
+        MimeMessage mime = BbsMessageToMime.ToMimeMessage(
+            message, ImapBackend.MailDomain, SevenPlusDecode.DecodedAttachments(message));
 
         // MimeKit writes CRLF line endings by default (FormatOptions.Default.NewLineFormat == Dos).
         using var stream = new MemoryStream();

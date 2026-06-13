@@ -29,7 +29,12 @@ public static class BbsMessageToMime
     /// </summary>
     /// <param name="message">The stored BBS message (with its recipients and attachments).</param>
     /// <param name="mailDomain">The synthetic mail domain (e.g. <c>pdn</c>) — not hardcoded.</param>
-    public static MimeMessage ToMimeMessage(Message message, string mailDomain)
+    /// <param name="extraAttachments">
+    /// Synthesised attachments to add beyond the message's stored ones — e.g. a 7plus file decoded
+    /// from the body by the caller, surfaced as an accessible attachment. Null/empty adds nothing.
+    /// </param>
+    public static MimeMessage ToMimeMessage(
+        Message message, string mailDomain, IReadOnlyList<MessageAttachment>? extraAttachments = null)
     {
         ArgumentNullException.ThrowIfNull(message);
         ArgumentException.ThrowIfNullOrEmpty(mailDomain);
@@ -68,7 +73,7 @@ public static class BbsMessageToMime
         verbatim.AddRange(message.Recipients.Select(r => RecipientAddress(r, message.At)));
         mime.Headers.Add(PacketAddressHeader, string.Join(", ", verbatim));
 
-        mime.Body = BuildBody(message);
+        mime.Body = BuildBody(message, extraAttachments);
         return mime;
     }
 
@@ -114,7 +119,7 @@ public static class BbsMessageToMime
         return $"{sb}@{mailDomain}";
     }
 
-    private static MimeEntity BuildBody(Message message)
+    private static MimeEntity BuildBody(Message message, IReadOnlyList<MessageAttachment>? extraAttachments)
     {
         // The body is stored as raw bytes (Latin-1-transparent — see Message.GetBodyText); render it
         // the same way webmail does so the user sees identical text.
@@ -123,13 +128,19 @@ public static class BbsMessageToMime
             Text = message.GetBodyText(),
         };
 
-        if (message.Attachments.Count == 0)
+        IReadOnlyList<MessageAttachment> extras = extraAttachments ?? [];
+        if (message.Attachments.Count == 0 && extras.Count == 0)
         {
             return textPart; // a plain text/plain message
         }
 
         var multipart = new Multipart("mixed") { textPart };
         foreach (MessageAttachment attachment in message.Attachments)
+        {
+            multipart.Add(BuildAttachment(attachment));
+        }
+
+        foreach (MessageAttachment attachment in extras)
         {
             multipart.Add(BuildAttachment(attachment));
         }
