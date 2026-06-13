@@ -43,6 +43,54 @@ public static class SevenPlusDecode
         return decoded;
     }
 
+    /// <summary>
+    /// Removes every complete inline 7plus block — a <c>go_7+.</c> header line through its matching
+    /// <c>stop_7+.</c> footer line, inclusive (with the extended-name and code lines between) — from
+    /// <paramref name="body"/>, leaving the surrounding prose. The caller pairs this with
+    /// <see cref="DecodedAttachments"/>: once the 7plus file is surfaced as a real attachment, the raw
+    /// code-line wall is just noise, so it is stripped from the rendered text body. A header with no
+    /// matching footer (truncated/corrupt) drops to end-of-body — that trailing 7plus code is
+    /// unreadable anyway. A body with no 7plus header returns unchanged.
+    /// </summary>
+    public static string StripInlineSevenPlus(string body)
+    {
+        ArgumentNullException.ThrowIfNull(body);
+
+        // The 7plus block delimiters (the leading space of the magic header/footer absorbed by TrimStart):
+        // header " go_7+. ", footer " stop_7+." (Bbs.SevenPlus.SevenPlusLines, internal there).
+        const string headerToken = "go_7+.";
+        const string footerToken = "stop_7+.";
+        if (!body.Contains(headerToken, StringComparison.Ordinal))
+        {
+            return body;
+        }
+
+        string[] lines = body.ReplaceLineEndings("\n").Split('\n');
+        var kept = new List<string>(lines.Length);
+        bool inBlock = false;
+        foreach (string line in lines)
+        {
+            string lead = line.TrimStart();
+            if (!inBlock)
+            {
+                if (lead.StartsWith(headerToken, StringComparison.Ordinal))
+                {
+                    inBlock = true; // drop the header line and everything until the footer
+                    continue;
+                }
+
+                kept.Add(line);
+            }
+            else if (lead.StartsWith(footerToken, StringComparison.Ordinal))
+            {
+                inBlock = false; // drop the footer line too, then resume keeping prose
+            }
+        }
+
+        // Trim the trailing blank lines the removed block leaves behind so the body ends cleanly.
+        return string.Join('\n', kept).TrimEnd('\n', '\r', ' ', '\t');
+    }
+
     /// <summary>A safe attachment filename: the leaf name of the 7plus header/extended name, or a fallback.</summary>
     private static string SafeName(string fileName)
     {

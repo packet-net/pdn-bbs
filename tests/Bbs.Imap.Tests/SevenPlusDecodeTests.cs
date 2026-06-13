@@ -61,6 +61,48 @@ public sealed class SevenPlusDecodeTests
     }
 
     [Fact]
+    public void DecodedInlineFile_StripsTheRawSevenPlusBlockFromTheTextBody()
+    {
+        // When the inline 7plus file is surfaced as a decoded attachment, the rendered text body must
+        // keep the surrounding prose but DROP the raw go_7+/code/stop_7+ wall (Tom: "it looks a mess").
+        byte[] original = [.. Enumerable.Range(0, 400).Select(i => (byte)(i * 7))];
+        string encoded = SevenPlusEncoder.Encode(original, "SNAP.JPG")[0];
+        string body = "Here is a photo for you.\r\n\r\n" + encoded + "\r\n\r\n73 de M0LTE\r\n";
+
+        using var test = new TestStore();
+        Message m = test.Store.AddMessage(Drafts.Personal(to: "M0LTE", subject: "photo", body: body));
+
+        ImapRenderedMessage rendered = ImapRenderedMessage.Render(test.Store.GetMessage(m.Number)!);
+
+        // The decoded file is present as an attachment.
+        Assert.Equal("SNAP.JPG", Assert.IsAssignableFrom<MimePart>(Assert.Single(rendered.Mime.Attachments)).FileName);
+
+        // The text body keeps the prose and drops the 7plus block entirely.
+        string text = rendered.Mime.TextBody ?? string.Empty;
+        Assert.Contains("Here is a photo for you.", text, StringComparison.Ordinal);
+        Assert.Contains("73 de M0LTE", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("go_7+", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("stop_7+", text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void StripInlineSevenPlus_RemovesBlock_KeepsProse_NoOpWithoutMarkers()
+    {
+        byte[] original = [.. Enumerable.Range(0, 300).Select(i => (byte)i)];
+        string encoded = SevenPlusEncoder.Encode(original, "F.BIN")[0];
+
+        string stripped = SevenPlusDecode.StripInlineSevenPlus("before\r\n" + encoded + "\r\nafter\r\n");
+        Assert.Contains("before", stripped, StringComparison.Ordinal);
+        Assert.Contains("after", stripped, StringComparison.Ordinal);
+        Assert.DoesNotContain("go_7+", stripped, StringComparison.Ordinal);
+        Assert.DoesNotContain("stop_7+", stripped, StringComparison.Ordinal);
+
+        // A body with no 7plus markers is returned unchanged.
+        const string plain = "just some text\r\nover two lines";
+        Assert.Equal(plain, SevenPlusDecode.StripInlineSevenPlus(plain));
+    }
+
+    [Fact]
     public void IncompletePartOfMultiPartFile_DoesNotDecodeStandalone()
     {
         // Force two parts, then store only the FIRST — it can't be assembled alone, so no attachment.

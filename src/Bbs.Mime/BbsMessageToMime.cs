@@ -38,8 +38,15 @@ public static class BbsMessageToMime
     /// client reflows the sender's fixed-width wrap to the screen — ASCII art / tables / headers are
     /// left as hard breaks. When false, the body is plain fixed text exactly as stored.
     /// </param>
+    /// <param name="bodyText">
+    /// Overrides the rendered text body when non-null (else the stored body is used). The caller uses
+    /// this to clean the body before rendering — chiefly to strip an inline 7plus blob that has been
+    /// surfaced as a decoded attachment (see <paramref name="extraAttachments"/>), so the reader sees
+    /// the prose + the attachment instead of a wall of 7plus code.
+    /// </param>
     public static MimeMessage ToMimeMessage(
-        Message message, string mailDomain, IReadOnlyList<MessageAttachment>? extraAttachments = null, bool reflowText = false)
+        Message message, string mailDomain, IReadOnlyList<MessageAttachment>? extraAttachments = null,
+        bool reflowText = false, string? bodyText = null)
     {
         ArgumentNullException.ThrowIfNull(message);
         ArgumentException.ThrowIfNullOrEmpty(mailDomain);
@@ -78,7 +85,7 @@ public static class BbsMessageToMime
         verbatim.AddRange(message.Recipients.Select(r => RecipientAddress(r, message.At)));
         mime.Headers.Add(PacketAddressHeader, string.Join(", ", verbatim));
 
-        mime.Body = BuildBody(message, extraAttachments, reflowText);
+        mime.Body = BuildBody(message, extraAttachments, reflowText, bodyText);
         return mime;
     }
 
@@ -128,11 +135,12 @@ public static class BbsMessageToMime
     /// The text body part. Plain fixed text by default; an RFC 3676 <c>format=flowed</c> part when
     /// <paramref name="reflowText"/>, so a client reflows prose to the screen (see <see cref="TextReflow"/>).
     /// </summary>
-    private static TextPart BuildTextPart(Message message, bool reflowText)
+    private static TextPart BuildTextPart(Message message, bool reflowText, string? bodyText)
     {
         // The body is stored as raw bytes (Latin-1-transparent — see Message.GetBodyText); render it
-        // the same way webmail does so the user sees identical text.
-        string body = message.GetBodyText();
+        // the same way webmail does so the user sees identical text. A caller-supplied bodyText wins
+        // (e.g. the inline-7plus-stripped body).
+        string body = bodyText ?? message.GetBodyText();
         if (!reflowText)
         {
             return new TextPart(TextFormat.Plain) { Text = body };
@@ -146,9 +154,10 @@ public static class BbsMessageToMime
         return flowed;
     }
 
-    private static MimeEntity BuildBody(Message message, IReadOnlyList<MessageAttachment>? extraAttachments, bool reflowText)
+    private static MimeEntity BuildBody(
+        Message message, IReadOnlyList<MessageAttachment>? extraAttachments, bool reflowText, string? bodyText)
     {
-        TextPart textPart = BuildTextPart(message, reflowText);
+        TextPart textPart = BuildTextPart(message, reflowText, bodyText);
 
         IReadOnlyList<MessageAttachment> extras = extraAttachments ?? [];
         if (message.Attachments.Count == 0 && extras.Count == 0)

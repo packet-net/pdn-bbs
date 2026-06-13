@@ -54,9 +54,15 @@ public sealed class ImapRenderedMessage
 
         // Surface any complete 7plus file carried inline in the body as a real decoded attachment (so a
         // client sees the image/file, not a wall of code-lines), and render the text as format=flowed so
-        // the sender's fixed-width wrap reflows to the screen (ASCII art / tables stay hard).
+        // the sender's fixed-width wrap reflows to the screen (ASCII art / tables stay hard). When we do
+        // surface a decoded attachment, strip the raw 7plus block from the text body so the reader sees
+        // the prose + the attachment, not the prose AND the wall of code.
+        IReadOnlyList<MessageAttachment> decoded = SevenPlusDecode.DecodedAttachments(message);
+        string? bodyOverride = decoded.Count > 0
+            ? SevenPlusDecode.StripInlineSevenPlus(message.GetBodyText())
+            : null;
         MimeMessage mime = BbsMessageToMime.ToMimeMessage(
-            message, ImapBackend.MailDomain, SevenPlusDecode.DecodedAttachments(message), reflowText: true);
+            message, ImapBackend.MailDomain, decoded, reflowText: true, bodyText: bodyOverride);
 
         // MimeKit writes CRLF line endings by default (FormatOptions.Default.NewLineFormat == Dos).
         using var stream = new MemoryStream();
