@@ -15,6 +15,12 @@ public sealed class ImapBackendTests
         Assert.Equal("M0LTE", backend.Authenticate("M0LTE-7", "correct horse"));
         Assert.Null(backend.Authenticate("M0LTE", "wrong"));
         Assert.Null(backend.Authenticate("G0XYZ", "correct horse")); // no password set
+
+        // Mail clients (iPhone Mail) often send the username as a full email address; the domain is
+        // stripped and the login authenticates as the bare callsign.
+        Assert.Equal("M0LTE", backend.Authenticate("M0LTE@pdn", "correct horse"));
+        Assert.Equal("M0LTE", backend.Authenticate("m0lte@pdn.m0lte.uk", "correct horse"));
+        Assert.Null(backend.Authenticate("M0LTE@pdn", "wrong")); // domain-strip doesn't bypass the password
     }
 
     [Fact]

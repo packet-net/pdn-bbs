@@ -62,17 +62,26 @@ public sealed class ImapBackend
     /// password-less callsign). Returns the normalised base callsign the session operates as on success,
     /// or null on failure.
     /// </summary>
+    /// <remarks>
+    /// Mail clients (notably iPhone Mail) commonly send the username as a full email address —
+    /// <c>callsign@domain</c> — defaulting it from the account's email. The BBS user is the callsign, so
+    /// an <c>@</c> in the username is treated as a trailing domain and stripped (callsigns never contain
+    /// <c>@</c>). This makes the email form authenticate as the bare callsign.
+    /// </remarks>
     public string? Authenticate(string callsign, string password)
     {
         ArgumentNullException.ThrowIfNull(callsign);
         ArgumentNullException.ThrowIfNull(password);
 
-        if (!_store.VerifyMailPassword(callsign, password))
+        int at = callsign.IndexOf('@', StringComparison.Ordinal);
+        string user = at >= 0 ? callsign[..at] : callsign;
+
+        if (!_store.VerifyMailPassword(user, password))
         {
             return null;
         }
 
-        return Callsigns.StripSsid(Callsigns.Normalize(callsign));
+        return Callsigns.StripSsid(Callsigns.Normalize(user));
     }
 
     /// <summary>
