@@ -132,7 +132,7 @@ public sealed partial class ImapServer
                 }
 
                 using var connection = new ImapConnection(stream);
-                var session = new ImapSession(connection, _backend, _options.IdlePollInterval);
+                var session = new ImapSession(connection, _backend, _options.IdlePollInterval, _logger);
                 await session.RunAsync(cancellationToken).ConfigureAwait(false);
             }
             finally

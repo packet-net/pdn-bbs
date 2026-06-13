@@ -1,5 +1,7 @@
 using System.Globalization;
 using System.Text;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace Bbs.Imap;
 
@@ -11,7 +13,7 @@ namespace Bbs.Imap;
 /// SELECT/EXAMINE, FETCH/UID FETCH, STORE/UID STORE (<c>\Seen</c>), SEARCH/UID SEARCH,
 /// NOOP/CHECK/CLOSE/LOGOUT/EXPUNGE, and IDLE (RFC 2177 — live new-mail push for iPhone Mail).
 /// </summary>
-public sealed class ImapSession
+public sealed partial class ImapSession
 {
     /// <summary>
     /// The capability list advertised in the greeting and by <c>CAPABILITY</c>. <c>IDLE</c> (RFC 2177)
@@ -26,6 +28,7 @@ public sealed class ImapSession
     private readonly ImapConnection _connection;
     private readonly ImapBackend _backend;
     private readonly TimeSpan _idlePollInterval;
+    private readonly ILogger _logger;
 
     private string? _callsign;
     private ImapMailbox? _mailbox;
@@ -36,13 +39,15 @@ public sealed class ImapSession
     /// <param name="connection">The line-and-literal transport.</param>
     /// <param name="backend">The store-facing backend.</param>
     /// <param name="idlePollInterval">How often an IDLE-ing session re-checks for new mail; default 5s.</param>
-    public ImapSession(ImapConnection connection, ImapBackend backend, TimeSpan? idlePollInterval = null)
+    /// <param name="logger">Logs auth outcomes (never the password); null = no-op.</param>
+    public ImapSession(ImapConnection connection, ImapBackend backend, TimeSpan? idlePollInterval = null, ILogger? logger = null)
     {
         ArgumentNullException.ThrowIfNull(connection);
         ArgumentNullException.ThrowIfNull(backend);
         _connection = connection;
         _backend = backend;
         _idlePollInterval = idlePollInterval is { } i && i > TimeSpan.Zero ? i : TimeSpan.FromSeconds(5);
+        _logger = logger ?? NullLogger.Instance;
     }
 
     /// <summary>
@@ -188,11 +193,13 @@ public sealed class ImapSession
         string? callsign = _backend.Authenticate(args[0].Value, args[1].Value);
         if (callsign is null)
         {
+            LogAuthFailed(_logger, "LOGIN", args[0].Value, args[1].Value.Length);
             await Tagged(tag, "NO", "[AUTHENTICATIONFAILED] Invalid credentials", cancellationToken).ConfigureAwait(false);
             return;
         }
 
         _callsign = callsign;
+        LogAuthOk(_logger, "LOGIN", callsign);
         await Tagged(tag, "OK", $"[CAPABILITY {Capabilities}] LOGIN completed", cancellationToken).ConfigureAwait(false);
     }
 
@@ -236,6 +243,7 @@ public sealed class ImapSession
 
         if (!TryDecodePlain(base64, out string user, out string password))
         {
+            LogAuthMalformed(_logger, "AUTHENTICATE PLAIN");
             await Tagged(tag, "BAD", "Malformed AUTH=PLAIN response", cancellationToken).ConfigureAwait(false);
             return;
         }
@@ -243,11 +251,13 @@ public sealed class ImapSession
         string? callsign = _backend.Authenticate(user, password);
         if (callsign is null)
         {
+            LogAuthFailed(_logger, "AUTHENTICATE PLAIN", user, password.Length);
             await Tagged(tag, "NO", "[AUTHENTICATIONFAILED] Invalid credentials", cancellationToken).ConfigureAwait(false);
             return;
         }
 
         _callsign = callsign;
+        LogAuthOk(_logger, "AUTHENTICATE PLAIN", callsign);
         await Tagged(tag, "OK", $"[CAPABILITY {Capabilities}] AUTHENTICATE completed", cancellationToken).ConfigureAwait(false);
     }
 
@@ -806,6 +816,17 @@ public sealed class ImapSession
 
     private Task Tagged(string tag, string status, string text, CancellationToken cancellationToken)
         => _connection.WriteAsync($"{tag} {status} {text}\r\n", cancellationToken);
+
+    // Auth logging — operational/audit. The password is NEVER logged; only its length, which is enough
+    // to tell e.g. a fat-fingered passphrase or an iOS-AutoFilled "strong password" from the real one.
+    [LoggerMessage(Level = LogLevel.Information, Message = "IMAP auth ok: {Callsign} via {Mechanism}")]
+    private static partial void LogAuthOk(ILogger logger, string mechanism, string callsign);
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "IMAP auth FAILED via {Mechanism}: username '{User}' (password length {PasswordLength}) — no matching callsign+mail-password")]
+    private static partial void LogAuthFailed(ILogger logger, string mechanism, string user, int passwordLength);
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "IMAP auth: malformed {Mechanism} response")]
+    private static partial void LogAuthMalformed(ILogger logger, string mechanism);
 
     /// <summary>
     /// IMAP mailbox-name quoting: a name with no special chars may go bare, but a quoted-string is
