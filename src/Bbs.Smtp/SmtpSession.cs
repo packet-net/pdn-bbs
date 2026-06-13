@@ -4,6 +4,7 @@ using System.Security.Cryptography.X509Certificates;
 using System.Text;
 using Bbs.Core;
 using Bbs.Mime;
+using Bbs.SevenPlus;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using MimeKit;
@@ -41,11 +42,19 @@ public enum SmtpSessionMode
 /// webmail compose.
 /// </summary>
 /// <remarks>
-/// v1 scope is deliberately narrow — text-only personals:
+/// Two conventions match the webmail compose path:
 /// <list type="bullet">
-/// <item>TODO(v1+): attachments and 7plus-on-send — only the text body is taken today.</item>
-/// <item>TODO(v1+): bulletins via SMTP — every submitted message is stored as a
-///   <see cref="MessageType.Personal"/>.</item>
+/// <item>Attachments are 7plus-encoded into the body — the universal packet path (exactly webmail's
+///   default <c>fileMode=7plus</c>): each attachment is appended to the text body as a 7plus block, so a
+///   phone that attaches a photo yields a stored message whose body is the prose + the 7plus block(s),
+///   which our IMAP renderer (and any inbound assembler at a recipient) decodes back to a file.</item>
+/// <item>A recipient addressed to a token that is NOT a valid callsign (<see cref="Callsigns.IsCallsignShaped"/>)
+///   is treated as a BULLETIN to that category (ALL, NEWS, SALE, …) and stored as a
+///   <see cref="MessageType.Bulletin"/>; a callsign-shaped recipient is a <see cref="MessageType.Personal"/>.
+///   One submission addressed to both kinds produces one personal draft plus one bulletin draft.</item>
+/// </list>
+/// Still deferred:
+/// <list type="bullet">
 /// <item>TODO(v1+): DSN / extended-status niceties.</item>
 /// </list>
 /// </remarks>
@@ -582,10 +591,17 @@ public sealed partial class SmtpSession
             MimeMessage parsed = MimeMessage.Load(stream, cancellationToken);
             subject = parsed.Subject ?? string.Empty;
 
-            // v1: text-only. Take the text body; if there is none, flatten to empty.
-            // TODO(v1+): take attachments + handle 7plus-on-send instead of dropping non-text parts.
+            // The text body; if there is none, flatten to empty. (An inline text/plain part is the body,
+            // never an attachment — only true attachments below are 7plus-encoded.)
             string text = parsed.TextBody ?? string.Empty;
-            body = Encoding.Latin1.GetBytes(text);
+
+            // Attachments are 7plus-encoded into the body — the universal packet path (exactly webmail
+            // compose's default fileMode=7plus). The 7plus parts are appended VERBATIM: their wire-faithful
+            // CRLF separators are NOT run through any CR line discipline, because a 7plus code line can
+            // legitimately contain byte 0x85 which string.ReplaceLineEndings would treat as the Unicode
+            // line break U+0085 NEL and rewrite — corrupting the line and breaking reassembly. The body is
+            // shared by every recipient group, then Latin1-encoded for MessageDraft.Body.
+            body = Encoding.Latin1.GetBytes(BuildBody(text, parsed));
         }
         catch (Exception ex) when (ex is FormatException or System.IO.IOException)
         {
@@ -596,14 +612,15 @@ public sealed partial class SmtpSession
         }
 
         int stored = 0;
-        // One MessageDraft per distinct At (recipients may carry different routes; MessageDraft.At is
-        // message-level). The common case — one recipient — is one draft.
+        // One MessageDraft per distinct (Type, At): recipients may carry different routes (MessageDraft.At
+        // is message-level) AND different kinds — a callsign-shaped recipient is a Personal, a non-callsign
+        // token (ALL, NEWS, …) is a Bulletin to that category. A submission addressed to both kinds yields
+        // one Personal draft plus one Bulletin draft; the common case — one recipient — is one draft.
         foreach (SmtpRecipientGroup group in SmtpRecipientGrouping.Group(_recipients))
         {
-            // TODO(v1+): bulletins via SMTP — every submission is stored as a Personal.
             var draft = new MessageDraft
             {
-                Type = MessageType.Personal,
+                Type = group.Type,
                 From = _callsign!,
                 Recipients = group.Calls,
                 At = group.At,
@@ -629,6 +646,65 @@ public sealed partial class SmtpSession
     }
 
     // ------------------------------------------------------------------ helpers
+
+    /// <summary>
+    /// Builds the stored body string from the parsed message: the text body, then each true attachment
+    /// 7plus-encoded and appended after a blank-line separator (mirrors webmail compose's default
+    /// <c>fileMode=7plus</c>). <see cref="MimeMessage.Attachments"/> yields the entities MimeKit flagged as
+    /// attachments (Content-Disposition <c>attachment</c>); we only encode <see cref="MimePart"/>s (parts
+    /// with content), and skip any zero-length part. The 7plus parts are appended VERBATIM (their own CRLF
+    /// separators) and are NOT subjected to any CR line discipline — a 7plus code line can carry byte 0x85
+    /// which <see cref="string.ReplaceLineEndings()"/> would mangle as U+0085 NEL. The overall message-size
+    /// cap is already enforced by the DATA reader; 7plus expands the source ~12% but stays within it.
+    /// </summary>
+    private static string BuildBody(string text, MimeMessage parsed)
+    {
+        var sb = new StringBuilder(text);
+        foreach (MimeEntity entity in parsed.Attachments)
+        {
+            if (entity is not MimePart { Content: { } content })
+            {
+                continue; // a message/rfc822 or multipart attachment (or a content-less part) has no byte blob
+            }
+
+            var part = (MimePart)entity;
+            using var ms = new MemoryStream();
+            content.DecodeTo(ms);
+            byte[] bytes = ms.ToArray();
+            if (bytes.Length == 0)
+            {
+                continue; // 7plus refuses a zero-length file; nothing to encode
+            }
+
+            // A bare leaf filename (defend against a path-shaped Content-Disposition name); the codec
+            // handles the DOS-8.3 + extended long-name lines, so we just give it the real name.
+            string fileName = SafeFileName(part.FileName);
+
+            // A blank line separates the prose (or the prior block) from this 7plus block.
+            if (sb.Length > 0)
+            {
+                sb.Append("\r\n");
+            }
+
+            // VERBATIM: append the encoded parts exactly as the codec emitted them (CRLF-separated, the
+            // 7plus default the inbound scanner expects). Do NOT run these through ReplaceLineEndings.
+            foreach (string encoded in SevenPlusEncoder.Encode(bytes, fileName))
+            {
+                sb.Append(encoded);
+            }
+        }
+
+        return sb.ToString();
+    }
+
+    /// <summary>Strips any directory component from an attachment filename and falls back to a bare default.</summary>
+    private static string SafeFileName(string? name)
+    {
+        string candidate = name ?? string.Empty;
+        int slash = Math.Max(candidate.LastIndexOf('/'), candidate.LastIndexOf('\\'));
+        string bare = (slash >= 0 ? candidate[(slash + 1)..] : candidate).Trim();
+        return bare.Length == 0 ? "attachment.bin" : bare;
+    }
 
     /// <summary>Clears the in-progress MAIL/RCPT transaction (RSET, EHLO, post-DATA). Auth is preserved.</summary>
     private void ResetTransaction()
