@@ -33,6 +33,9 @@ public sealed record BbsHostConfig
     /// <summary>The optional IMAP server (default off) — lets iPhone Mail / any IMAP client read packet mail.</summary>
     public ImapConfig Imap { get; init; } = new();
 
+    /// <summary>The optional SMTP submission server (default off) — lets iPhone Mail / any mail client send packet mail.</summary>
+    public SmtpConfig Smtp { get; init; } = new();
+
     /// <summary>The node's RHPv2 endpoint.</summary>
     public RhpConfig Rhp { get; init; } = new();
 
@@ -95,6 +98,66 @@ public sealed record ImapTlsConfig
 {
     /// <summary>
     /// Whether accepted sockets are wrapped in implicit TLS. <b>Default true</b> — if you expose IMAP
+    /// you want it encrypted (the credential and mail cross the network); with no
+    /// <see cref="CertificatePath"/> a self-signed cert is generated (<see cref="GenerateSelfSigned"/>).
+    /// Set false only for a deliberately-plaintext deployment (e.g. loopback-only, behind a TLS proxy).
+    /// </summary>
+    public bool Enabled { get; init; } = true;
+
+    /// <summary>Path to an operator-supplied PKCS#12 (.pfx) certificate; when set it wins over self-signed.</summary>
+    public string? CertificatePath { get; init; }
+
+    /// <summary>Password for <see cref="CertificatePath"/>, or null for an unencrypted PKCS#12.</summary>
+    public string? CertificatePassword { get; init; }
+
+    /// <summary>
+    /// When no <see cref="CertificatePath"/> is supplied, generate (and persist) a self-signed
+    /// certificate on first start (default true). Set false to require an operator-supplied cert —
+    /// TLS then does not start unless one is configured.
+    /// </summary>
+    public bool GenerateSelfSigned { get; init; } = true;
+}
+
+/// <summary>
+/// The SMTP submission server (RFC 6409, default off). When <see cref="Enabled"/>, a TCP listener on
+/// <see cref="Bind"/>:<see cref="Port"/> lets an external mail client (iPhone Mail, Thunderbird, MailKit)
+/// SEND packet mail; the login is the user's callsign + their BBS mail-password
+/// (<see cref="BbsStore.VerifyMailPassword"/>, set in webmail). This is a submission server, not a relay:
+/// AUTH is required before any mail command, and a sent message is stored as a Personal and routed
+/// exactly like a webmail compose (the stored From is always the authenticated callsign). Off by default
+/// ⇒ a node that does not configure it behaves exactly as before. The bind may be a LAN address (unlike
+/// webmail, whose loopback bind is the app-gateway trust boundary) — pair a LAN bind with <see cref="SmtpTlsConfig"/>.
+/// </summary>
+public sealed record SmtpConfig
+{
+    /// <summary>Whether the SMTP listener is started at all (default false — the whole feature is opt-in).</summary>
+    public bool Enabled { get; init; }
+
+    /// <summary>Bind address. Loopback by default; a LAN address exposes the server to the local network (use TLS).</summary>
+    public string Bind { get; init; } = "127.0.0.1";
+
+    /// <summary>
+    /// TCP port. Defaults to 465 — the IANA implicit-TLS submission port (the iPhone "SSL" model). Binding
+    /// a privileged port (&lt; 1024) needs the privilege to; set a high port for an unprivileged deployment.
+    /// </summary>
+    public int Port { get; init; } = 465;
+
+    /// <summary>Implicit-TLS settings (default on). When on, every accepted socket is wrapped in TLS.</summary>
+    public SmtpTlsConfig Tls { get; init; } = new();
+}
+
+/// <summary>
+/// Implicit-TLS configuration for the SMTP submission listener (RFC 8314: TLS from the first byte, the
+/// iPhone "SSL" model on port 465). When <see cref="Enabled"/> the server wraps each accepted socket in
+/// an <see cref="System.Net.Security.SslStream"/> with server authentication; the certificate is the
+/// operator-supplied PKCS#12 at <see cref="CertificatePath"/>, or — when none is given and
+/// <see cref="GenerateSelfSigned"/> — a self-signed certificate generated on first start and persisted
+/// under the state directory (browsers/clients warn until it is trusted, but the channel is encrypted).
+/// </summary>
+public sealed record SmtpTlsConfig
+{
+    /// <summary>
+    /// Whether accepted sockets are wrapped in implicit TLS. <b>Default true</b> — if you expose SMTP
     /// you want it encrypted (the credential and mail cross the network); with no
     /// <see cref="CertificatePath"/> a self-signed cert is generated (<see cref="GenerateSelfSigned"/>).
     /// Set false only for a deliberately-plaintext deployment (e.g. loopback-only, behind a TLS proxy).
@@ -337,6 +400,41 @@ public static class BbsHostConfigFile
           enabled: false
           bind: 127.0.0.1
           port: 1143
+          tls:
+            enabled: true
+            certificatePath: null
+            certificatePassword: null
+            generateSelfSigned: true
+
+        # smtp: an optional SMTP SUBMISSION server (RFC 6409) so iPhone Mail (or any
+        #       mail client) can SEND packet mail. DEFAULT OFF — leave it off and the node
+        #       behaves exactly as before. The login is the user's CALLSIGN plus their BBS
+        #       mail-password (the same credential as imap; set in webmail). This is a
+        #       SUBMISSION server, not a relay: AUTH is required before any mail command
+        #       (no open relay), and a sent message is stored as a Personal and routed just
+        #       like a webmail compose — the stored From is always the authenticated
+        #       callsign, never the (untrusted) MAIL FROM. v1 is TEXT-ONLY: only the text
+        #       body is taken (attachments / 7plus-on-send are a later slice). Like imap,
+        #       the bind MAY be a LAN address so a phone on the home network can reach it —
+        #       pair a LAN bind with tls.enabled.
+        #   enabled: start the SMTP listener at all (default false)
+        #   bind:    bind address (default 127.0.0.1; set 0.0.0.0 or a LAN IP for phones)
+        #   port:    TCP port (default 465 — the standard implicit-TLS submission port; a
+        #            port < 1024 needs the privilege to bind it)
+        #   tls:     implicit TLS (RFC 8314 — TLS from the first byte, the iPhone "SSL" model)
+        #     enabled:             wrap every connection in TLS (DEFAULT TRUE — if you expose SMTP
+        #                          you want it encrypted; set false only for a deliberately-plaintext
+        #                          deployment, e.g. loopback-only or behind a TLS proxy)
+        #     certificatePath:     operator-supplied PKCS#12 (.pfx); wins over self-signed. Point this
+        #                          at a real cert (e.g. your node's LE cert) for a no-warning client
+        #     certificatePassword: password for that .pfx (null if unencrypted)
+        #     generateSelfSigned:  when no certificatePath, generate + persist a self-signed
+        #                          cert on first start (default true; clients warn until it
+        #                          is trusted, but the channel is encrypted)
+        smtp:
+          enabled: false
+          bind: 127.0.0.1
+          port: 465
           tls:
             enabled: true
             certificatePath: null

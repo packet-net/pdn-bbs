@@ -7,6 +7,7 @@
     <Project Path="src/Bbs.Imap/Bbs.Imap.csproj" />
     <Project Path="src/Bbs.Mime/Bbs.Mime.csproj" />
     <Project Path="src/Bbs.SevenPlus/Bbs.SevenPlus.csproj" />
+    <Project Path="src/Bbs.Smtp/Bbs.Smtp.csproj" />
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/Bbs.Console.Tests/Bbs.Console.Tests.csproj" />
@@ -17,5 +18,6 @@
     <Project Path="tests/Bbs.Interop.Tests/Bbs.Interop.Tests.csproj" />
     <Project Path="tests/Bbs.Mime.Tests/Bbs.Mime.Tests.csproj" />
     <Project Path="tests/Bbs.SevenPlus.Tests/Bbs.SevenPlus.Tests.csproj" />
+    <Project Path="tests/Bbs.Smtp.Tests/Bbs.Smtp.Tests.csproj" />
   </Folder>
 </Solution>

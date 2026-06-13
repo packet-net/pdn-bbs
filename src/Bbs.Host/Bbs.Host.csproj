@@ -14,6 +14,7 @@
     <ProjectReference Include="..\Bbs.Console\Bbs.Console.csproj" />
     <ProjectReference Include="..\Bbs.SevenPlus\Bbs.SevenPlus.csproj" />
     <ProjectReference Include="..\Bbs.Imap\Bbs.Imap.csproj" />
+    <ProjectReference Include="..\Bbs.Smtp\Bbs.Smtp.csproj" />
   </ItemGroup>
 
   <ItemGroup>

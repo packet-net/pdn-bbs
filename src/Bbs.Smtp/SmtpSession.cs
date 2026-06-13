@@ -1,0 +1,523 @@
+using System.Text;
+using Bbs.Core;
+using Bbs.Mime;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
+using MimeKit;
+
+namespace Bbs.Smtp;
+
+/// <summary>
+/// One SMTP submission connection's protocol engine: the state machine (greeting → EHLO → AUTH →
+/// MAIL/RCPT/DATA) and command dispatch over a <see cref="SmtpConnection"/>, backed by a
+/// <see cref="BbsStore"/>. This is a <b>submission</b> server (RFC 6409), not a relay — AUTH (RFC 4954,
+/// PLAIN + LOGIN) is required before any mail command, and the stored message's From is always the
+/// authenticated callsign (the MAIL FROM identity is never trusted). A submitted message is parsed with
+/// MimeKit, its text body taken, decoded to packet recipients, and stored + routed exactly like a
+/// webmail compose.
+/// </summary>
+/// <remarks>
+/// v1 scope is deliberately narrow — text-only personals:
+/// <list type="bullet">
+/// <item>TODO(v1+): attachments and 7plus-on-send — only the text body is taken today.</item>
+/// <item>TODO(v1+): bulletins via SMTP — every submitted message is stored as a
+///   <see cref="MessageType.Personal"/>.</item>
+/// <item>TODO(v1+): DSN / extended-status niceties.</item>
+/// </list>
+/// </remarks>
+public sealed partial class SmtpSession
+{
+    /// <summary>The synthetic mail domain every packet address is rendered under (mirrors <c>ImapBackend.MailDomain</c>).</summary>
+    public const string MailDomain = "pdn";
+
+    private readonly SmtpConnection _connection;
+    private readonly BbsStore _store;
+    private readonly Action<Message> _onStored;
+    private readonly int _maxMessageBytes;
+    private readonly ILogger _logger;
+
+    private string? _callsign;
+    private bool _mailFromSet;
+    private readonly List<string> _recipients = [];
+    private bool _quit;
+
+    /// <summary>Creates a session over <paramref name="connection"/> backed by the BBS <paramref name="store"/>.</summary>
+    /// <param name="connection">The line transport.</param>
+    /// <param name="store">The store — credential verification and message storage.</param>
+    /// <param name="onStored">Invoked once per stored message (the host wires this to routing).</param>
+    /// <param name="maxMessageBytes">The DATA size cap, advertised in the EHLO SIZE extension.</param>
+    /// <param name="logger">Logs auth outcomes (never the password); null = no-op.</param>
+    public SmtpSession(
+        SmtpConnection connection, BbsStore store, Action<Message> onStored, int maxMessageBytes, ILogger? logger = null)
+    {
+        ArgumentNullException.ThrowIfNull(connection);
+        ArgumentNullException.ThrowIfNull(store);
+        ArgumentNullException.ThrowIfNull(onStored);
+        _connection = connection;
+        _store = store;
+        _onStored = onStored;
+        _maxMessageBytes = maxMessageBytes;
+        _logger = logger ?? NullLogger.Instance;
+    }
+
+    /// <summary>
+    /// Runs the session to completion: sends the greeting, then reads and dispatches commands until the
+    /// client QUITs, the connection ends, or cancellation. Protocol errors are answered with status
+    /// codes; only I/O faults propagate.
+    /// </summary>
+    public async Task RunAsync(CancellationToken cancellationToken)
+    {
+        await _connection.WriteAsync("220 pdn-bbs SMTP submission ready\r\n", cancellationToken).ConfigureAwait(false);
+
+        while (!_quit && !cancellationToken.IsCancellationRequested)
+        {
+            string? line = await _connection.ReadLineAsync(cancellationToken).ConfigureAwait(false);
+            if (line is null)
+            {
+                break; // client closed the connection
+            }
+
+            await DispatchAsync(line, cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    private async Task DispatchAsync(string line, CancellationToken cancellationToken)
+    {
+        // The verb is the first token, case-insensitive; the remainder is the argument (kept verbatim
+        // for addresses, which are case-/spacing-sensitive inside the angle brackets).
+        int space = line.IndexOf(' ', StringComparison.Ordinal);
+        string verb = (space < 0 ? line : line[..space]).ToUpperInvariant();
+        string rest = space < 0 ? string.Empty : line[(space + 1)..];
+
+        switch (verb)
+        {
+            case "EHLO":
+                await HandleEhloAsync(extended: true, cancellationToken).ConfigureAwait(false);
+                break;
+            case "HELO":
+                await HandleEhloAsync(extended: false, cancellationToken).ConfigureAwait(false);
+                break;
+            case "AUTH":
+                await HandleAuthAsync(rest, cancellationToken).ConfigureAwait(false);
+                break;
+            case "MAIL":
+                await HandleMailAsync(rest, cancellationToken).ConfigureAwait(false);
+                break;
+            case "RCPT":
+                await HandleRcptAsync(rest, cancellationToken).ConfigureAwait(false);
+                break;
+            case "DATA":
+                await HandleDataAsync(cancellationToken).ConfigureAwait(false);
+                break;
+            case "RSET":
+                ResetTransaction();
+                await _connection.WriteAsync("250 2.0.0 Ok\r\n", cancellationToken).ConfigureAwait(false);
+                break;
+            case "NOOP":
+                await _connection.WriteAsync("250 2.0.0 Ok\r\n", cancellationToken).ConfigureAwait(false);
+                break;
+            case "VRFY":
+                // We never confirm or deny a local address (RFC 5321 §3.5.3 permits 252).
+                await _connection.WriteAsync("252 2.1.5 Cannot VRFY user\r\n", cancellationToken).ConfigureAwait(false);
+                break;
+            case "QUIT":
+                await _connection.WriteAsync("221 2.0.0 Bye\r\n", cancellationToken).ConfigureAwait(false);
+                _quit = true;
+                break;
+            default:
+                await _connection.WriteAsync("500 5.5.2 Unrecognized command\r\n", cancellationToken).ConfigureAwait(false);
+                break;
+        }
+    }
+
+    // ------------------------------------------------------------------ greeting / capabilities
+
+    private async Task HandleEhloAsync(bool extended, CancellationToken cancellationToken)
+    {
+        // EHLO/HELO resets any in-progress transaction (RFC 5321 §4.1.4) but not the authentication.
+        ResetTransaction();
+
+        if (!extended)
+        {
+            await _connection.WriteAsync("250 pdn-bbs\r\n", cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        // Multiline EHLO: every line but the last uses "250-", the last "250 ".
+        var sb = new StringBuilder();
+        sb.Append("250-pdn-bbs\r\n");
+        sb.Append("250-AUTH PLAIN LOGIN\r\n");
+        sb.Append("250-8BITMIME\r\n");
+        sb.Append($"250 SIZE {_maxMessageBytes}\r\n");
+        await _connection.WriteAsync(sb.ToString(), cancellationToken).ConfigureAwait(false);
+    }
+
+    // ------------------------------------------------------------------ auth (RFC 4954)
+
+    private async Task HandleAuthAsync(string rest, CancellationToken cancellationToken)
+    {
+        if (_callsign is not null)
+        {
+            await _connection.WriteAsync("503 5.5.1 Already authenticated\r\n", cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        int space = rest.IndexOf(' ', StringComparison.Ordinal);
+        string mechanism = (space < 0 ? rest : rest[..space]).ToUpperInvariant();
+        string initial = space < 0 ? string.Empty : rest[(space + 1)..].Trim();
+
+        switch (mechanism)
+        {
+            case "PLAIN":
+                await HandleAuthPlainAsync(initial, cancellationToken).ConfigureAwait(false);
+                break;
+            case "LOGIN":
+                await HandleAuthLoginAsync(initial, cancellationToken).ConfigureAwait(false);
+                break;
+            default:
+                await _connection.WriteAsync("504 5.5.4 Unsupported authentication mechanism\r\n", cancellationToken).ConfigureAwait(false);
+                break;
+        }
+    }
+
+    private async Task HandleAuthPlainAsync(string initial, CancellationToken cancellationToken)
+    {
+        // The client may inline the SASL initial response, else we prompt with an empty challenge.
+        string base64 = initial;
+        if (base64.Length == 0)
+        {
+            await _connection.WriteAsync("334 \r\n", cancellationToken).ConfigureAwait(false);
+            string? response = await _connection.ReadLineAsync(cancellationToken).ConfigureAwait(false);
+            if (response is null)
+            {
+                _quit = true;
+                return;
+            }
+
+            base64 = response.Trim();
+            if (base64 == "*")
+            {
+                await _connection.WriteAsync("501 5.7.0 Authentication cancelled\r\n", cancellationToken).ConfigureAwait(false);
+                return;
+            }
+        }
+
+        if (!TryDecodePlain(base64, out string user, out string password))
+        {
+            LogAuthMalformed(_logger, "PLAIN");
+            await _connection.WriteAsync("501 5.5.2 Malformed AUTH PLAIN response\r\n", cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        await CompleteAuthAsync("PLAIN", user, password, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task HandleAuthLoginAsync(string initial, CancellationToken cancellationToken)
+    {
+        // AUTH LOGIN: base64("Username:") then base64("Password:") prompts. The client may inline the
+        // username as the initial response; otherwise we prompt for it.
+        string userBase64 = initial;
+        if (userBase64.Length == 0)
+        {
+            await _connection.WriteAsync("334 VXNlcm5hbWU6\r\n", cancellationToken).ConfigureAwait(false); // "Username:"
+            string? line = await _connection.ReadLineAsync(cancellationToken).ConfigureAwait(false);
+            if (line is null)
+            {
+                _quit = true;
+                return;
+            }
+
+            userBase64 = line.Trim();
+        }
+
+        await _connection.WriteAsync("334 UGFzc3dvcmQ6\r\n", cancellationToken).ConfigureAwait(false); // "Password:"
+        string? passLine = await _connection.ReadLineAsync(cancellationToken).ConfigureAwait(false);
+        if (passLine is null)
+        {
+            _quit = true;
+            return;
+        }
+
+        if (!TryDecodeBase64(userBase64, out string user) || !TryDecodeBase64(passLine.Trim(), out string password))
+        {
+            LogAuthMalformed(_logger, "LOGIN");
+            await _connection.WriteAsync("501 5.5.2 Malformed AUTH LOGIN response\r\n", cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        await CompleteAuthAsync("LOGIN", user, password, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Verifies a decoded username/password with the same logic as <c>ImapBackend.Authenticate</c>:
+    /// strip a trailing <c>@domain</c> from the email-form username (callsigns never contain <c>@</c>),
+    /// then <see cref="BbsStore.VerifyMailPassword"/>. On success the session operates as the normalised
+    /// base callsign. Logs the outcome with the username + mechanism + password length (never the
+    /// password itself).
+    /// </summary>
+    private async Task CompleteAuthAsync(string mechanism, string user, string password, CancellationToken cancellationToken)
+    {
+        int at = user.IndexOf('@', StringComparison.Ordinal);
+        string bareUser = at >= 0 ? user[..at] : user;
+
+        if (bareUser.Length == 0 || !_store.VerifyMailPassword(bareUser, password))
+        {
+            LogAuthFailed(_logger, mechanism, user, password.Length);
+            await _connection.WriteAsync("535 5.7.8 Authentication credentials invalid\r\n", cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        _callsign = Callsigns.StripSsid(Callsigns.Normalize(bareUser));
+        LogAuthOk(_logger, mechanism, _callsign);
+        await _connection.WriteAsync("235 2.7.0 Authentication successful\r\n", cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>Decodes a SASL PLAIN response: <c>base64(authzid NUL authcid NUL passwd)</c> (RFC 4616).</summary>
+    private static bool TryDecodePlain(string base64, out string user, out string password)
+    {
+        user = string.Empty;
+        password = string.Empty;
+        if (!TryDecodeBase64Raw(base64, out byte[] raw))
+        {
+            return false;
+        }
+
+        string decoded = Encoding.UTF8.GetString(raw);
+        string[] parts = decoded.Split('\0');
+        if (parts.Length != 3)
+        {
+            return false;
+        }
+
+        user = parts[1]; // authcid (the authzid in parts[0] is ignored)
+        password = parts[2];
+        return user.Length > 0;
+    }
+
+    private static bool TryDecodeBase64(string base64, out string text)
+    {
+        text = string.Empty;
+        if (!TryDecodeBase64Raw(base64, out byte[] raw))
+        {
+            return false;
+        }
+
+        text = Encoding.UTF8.GetString(raw);
+        return true;
+    }
+
+    private static bool TryDecodeBase64Raw(string base64, out byte[] raw)
+    {
+        raw = [];
+        try
+        {
+            raw = Convert.FromBase64String(base64);
+            return true;
+        }
+        catch (FormatException)
+        {
+            return false;
+        }
+    }
+
+    // ------------------------------------------------------------------ mail / rcpt / data
+
+    private async Task HandleMailAsync(string rest, CancellationToken cancellationToken)
+    {
+        if (_callsign is null)
+        {
+            await _connection.WriteAsync("530 5.7.0 Authentication required\r\n", cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        // "MAIL FROM:<addr> [params]". We accept (and ignore) the address and any SIZE= param — the
+        // stored From is ALWAYS the authenticated callsign, never the trusted-blind MAIL FROM identity.
+        if (!rest.StartsWith("FROM:", StringComparison.OrdinalIgnoreCase))
+        {
+            await _connection.WriteAsync("501 5.5.4 Syntax: MAIL FROM:<address>\r\n", cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        _mailFromSet = true;
+        _recipients.Clear();
+        await _connection.WriteAsync("250 2.1.0 Ok\r\n", cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task HandleRcptAsync(string rest, CancellationToken cancellationToken)
+    {
+        if (_callsign is null)
+        {
+            await _connection.WriteAsync("530 5.7.0 Authentication required\r\n", cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        if (!_mailFromSet)
+        {
+            await _connection.WriteAsync("503 5.5.1 Need MAIL before RCPT\r\n", cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        if (!rest.StartsWith("TO:", StringComparison.OrdinalIgnoreCase))
+        {
+            await _connection.WriteAsync("501 5.5.4 Syntax: RCPT TO:<address>\r\n", cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        string? addrSpec = ExtractAddrSpec(rest["TO:".Length..]);
+        if (addrSpec is null || !PacketAddressCodec.TryDecode(addrSpec, MailDomain, out string packet))
+        {
+            await _connection.WriteAsync("550 5.1.3 Bad recipient address\r\n", cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        if (!_recipients.Contains(packet))
+        {
+            _recipients.Add(packet);
+        }
+
+        await _connection.WriteAsync("250 2.1.5 Ok\r\n", cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task HandleDataAsync(CancellationToken cancellationToken)
+    {
+        if (_callsign is null)
+        {
+            await _connection.WriteAsync("530 5.7.0 Authentication required\r\n", cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        if (!_mailFromSet)
+        {
+            await _connection.WriteAsync("503 5.5.1 Need MAIL before DATA\r\n", cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        if (_recipients.Count == 0)
+        {
+            await _connection.WriteAsync("554 5.5.1 No valid recipients\r\n", cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        await _connection.WriteAsync("354 End data with <CR><LF>.<CR><LF>\r\n", cancellationToken).ConfigureAwait(false);
+
+        byte[] raw;
+        try
+        {
+            raw = await _connection.ReadDataAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (InvalidOperationException)
+        {
+            // The message exceeded the size cap (RFC 1870 §6.3).
+            await _connection.WriteAsync("552 5.3.4 Message exceeds maximum size\r\n", cancellationToken).ConfigureAwait(false);
+            ResetTransaction();
+            return;
+        }
+
+        string subject;
+        byte[] body;
+        try
+        {
+            using var stream = new MemoryStream(raw, writable: false);
+            MimeMessage parsed = MimeMessage.Load(stream, cancellationToken);
+            subject = parsed.Subject ?? string.Empty;
+
+            // v1: text-only. Take the text body; if there is none, flatten to empty.
+            // TODO(v1+): take attachments + handle 7plus-on-send instead of dropping non-text parts.
+            string text = parsed.TextBody ?? string.Empty;
+            body = Encoding.Latin1.GetBytes(text);
+        }
+        catch (Exception ex) when (ex is FormatException or System.IO.IOException)
+        {
+            LogParseFailed(_logger, ex);
+            await _connection.WriteAsync("554 5.6.0 Could not parse message\r\n", cancellationToken).ConfigureAwait(false);
+            ResetTransaction();
+            return;
+        }
+
+        int stored = 0;
+        // One MessageDraft per distinct At (recipients may carry different routes; MessageDraft.At is
+        // message-level). The common case — one recipient — is one draft.
+        foreach (SmtpRecipientGroup group in SmtpRecipientGrouping.Group(_recipients))
+        {
+            // TODO(v1+): bulletins via SMTP — every submission is stored as a Personal.
+            var draft = new MessageDraft
+            {
+                Type = MessageType.Personal,
+                From = _callsign!,
+                Recipients = group.Calls,
+                At = group.At,
+                Subject = subject,
+                Body = body,
+            };
+
+            Message message = _store.AddMessage(draft);
+            _onStored(message);
+            stored++;
+        }
+
+        if (stored == 0)
+        {
+            await _connection.WriteAsync("554 5.5.1 No deliverable recipients\r\n", cancellationToken).ConfigureAwait(false);
+            ResetTransaction();
+            return;
+        }
+
+        LogQueued(_logger, _callsign!, _recipients.Count, stored);
+        ResetTransaction();
+        await _connection.WriteAsync("250 2.0.0 Ok: queued\r\n", cancellationToken).ConfigureAwait(false);
+    }
+
+    // ------------------------------------------------------------------ helpers
+
+    /// <summary>Clears the in-progress MAIL/RCPT transaction (RSET, EHLO, post-DATA). Auth is preserved.</summary>
+    private void ResetTransaction()
+    {
+        _mailFromSet = false;
+        _recipients.Clear();
+    }
+
+    /// <summary>
+    /// Extracts the addr-spec from a <c>&lt;address&gt;</c> path (RFC 5321 §4.1.2), tolerating a trailing
+    /// parameter list after the closing bracket and a bare unbracketed address. Returns null when no
+    /// address is present.
+    /// </summary>
+    public static string? ExtractAddrSpec(string pathAndParams)
+    {
+        ArgumentNullException.ThrowIfNull(pathAndParams);
+        string s = pathAndParams.Trim();
+        int open = s.IndexOf('<', StringComparison.Ordinal);
+        if (open >= 0)
+        {
+            int close = s.IndexOf('>', open + 1);
+            if (close < 0)
+            {
+                return null;
+            }
+
+            string inner = s[(open + 1)..close].Trim();
+            return inner.Length == 0 ? null : inner;
+        }
+
+        // No brackets: take the first whitespace-delimited token (an address possibly followed by params).
+        int space = s.IndexOf(' ', StringComparison.Ordinal);
+        string bare = (space < 0 ? s : s[..space]).Trim();
+        return bare.Length == 0 ? null : bare;
+    }
+
+    // Auth logging — operational/audit. The password is NEVER logged; only its length, which is enough
+    // to tell e.g. a fat-fingered passphrase or an iOS-AutoFilled "strong password" from the real one.
+    [LoggerMessage(Level = LogLevel.Information, Message = "SMTP auth ok: {Callsign} via {Mechanism}")]
+    private static partial void LogAuthOk(ILogger logger, string mechanism, string callsign);
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "SMTP auth FAILED via {Mechanism}: username '{User}' (password length {PasswordLength}) — no matching callsign+mail-password")]
+    private static partial void LogAuthFailed(ILogger logger, string mechanism, string user, int passwordLength);
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "SMTP auth: malformed {Mechanism} response")]
+    private static partial void LogAuthMalformed(ILogger logger, string mechanism);
+
+    [LoggerMessage(Level = LogLevel.Information, Message = "SMTP: {Callsign} submitted a message to {Recipients} recipient(s), stored as {Messages} message(s)")]
+    private static partial void LogQueued(ILogger logger, string callsign, int recipients, int messages);
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "SMTP: failed to parse a submitted message")]
+    private static partial void LogParseFailed(ILogger logger, Exception ex);
+}

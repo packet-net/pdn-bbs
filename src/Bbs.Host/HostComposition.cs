@@ -7,6 +7,7 @@ using Bbs.Host.Rhp;
 using Bbs.Host.Sessions;
 using Bbs.Host.Web;
 using Bbs.Imap;
+using Bbs.Smtp;
 
 namespace Bbs.Host;
 
@@ -132,6 +133,31 @@ public static class HostComposition
                 imapOptions, store, time, sp.GetRequiredService<ILogger<ImapServer>>()));
         }
 
+        // The optional SMTP submission server (default off): registered only when enabled, so a node
+        // that does not configure it constructs nothing and behaves exactly as before. The library is
+        // host-agnostic, so the host supplies the post-store nudge — RoutingService.RouteMessage, the
+        // same routing path webmail compose uses — as the onStored callback. The self-signed TLS cert
+        // (if used) persists alongside the db in the state dir.
+        if (config.Smtp.Enabled)
+        {
+            var smtpOptions = new SmtpServerOptions
+            {
+                Bind = config.Smtp.Bind,
+                Port = config.Smtp.Port,
+                TlsEnabled = config.Smtp.Tls.Enabled,
+                CertificatePath = config.Smtp.Tls.CertificatePath,
+                CertificatePassword = config.Smtp.Tls.CertificatePassword,
+                GenerateSelfSigned = config.Smtp.Tls.GenerateSelfSigned,
+                SelfSignedCertPath = Path.Combine(stateDir, "smtp-cert.pfx"),
+            };
+            builder.Services.AddSingleton(sp =>
+            {
+                RoutingService smtpRouting = sp.GetRequiredService<RoutingService>();
+                return new SmtpServer(
+                    smtpOptions, store, smtpRouting.RouteMessage, time, sp.GetRequiredService<ILogger<SmtpServer>>());
+            });
+        }
+
         // One ComponentService<T> per component: AddHostedService registers through
         // TryAddEnumerable, which de-duplicates by implementation type — with a single
         // non-generic ComponentService only the FIRST of these four registrations survived,
@@ -152,6 +178,13 @@ public static class HostComposition
         {
             builder.Services.AddHostedService(sp => new ComponentService<ImapServer>("imap",
                 sp.GetRequiredService<ImapServer>(), static (server, ct) => server.RunAsync(ct)));
+        }
+
+        // The SMTP accept loop is hosted only when the (default-off) SMTP server was registered above.
+        if (config.Smtp.Enabled)
+        {
+            builder.Services.AddHostedService(sp => new ComponentService<SmtpServer>("smtp",
+                sp.GetRequiredService<SmtpServer>(), static (server, ct) => server.RunAsync(ct)));
         }
 
         WebApplication app = builder.Build();
