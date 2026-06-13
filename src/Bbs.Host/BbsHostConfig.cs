@@ -93,8 +93,13 @@ public sealed record ImapConfig
 /// </summary>
 public sealed record ImapTlsConfig
 {
-    /// <summary>Whether accepted sockets are wrapped in implicit TLS (default false ⇒ plaintext IMAP).</summary>
-    public bool Enabled { get; init; }
+    /// <summary>
+    /// Whether accepted sockets are wrapped in implicit TLS. <b>Default true</b> — if you expose IMAP
+    /// you want it encrypted (the credential and mail cross the network); with no
+    /// <see cref="CertificatePath"/> a self-signed cert is generated (<see cref="GenerateSelfSigned"/>).
+    /// Set false only for a deliberately-plaintext deployment (e.g. loopback-only, behind a TLS proxy).
+    /// </summary>
+    public bool Enabled { get; init; } = true;
 
     /// <summary>Path to an operator-supplied PKCS#12 (.pfx) certificate; when set it wins over self-signed.</summary>
     public string? CertificatePath { get; init; }
@@ -319,8 +324,11 @@ public static class BbsHostConfigFile
         #   port:    TCP port (default 1143 — an unprivileged port; use 143 plaintext or 993
         #            implicit-TLS when the app has the privilege to bind them)
         #   tls:     implicit TLS (RFC 8314 — TLS from the first byte, the iPhone "SSL" model)
-        #     enabled:             wrap every connection in TLS (default false ⇒ plaintext)
-        #     certificatePath:     operator-supplied PKCS#12 (.pfx); wins over self-signed
+        #     enabled:             wrap every connection in TLS (DEFAULT TRUE — if you expose IMAP
+        #                          you want it encrypted; set false only for a deliberately-plaintext
+        #                          deployment, e.g. loopback-only or behind a TLS proxy)
+        #     certificatePath:     operator-supplied PKCS#12 (.pfx); wins over self-signed. Point this
+        #                          at a real cert (e.g. your node's LE cert) for a no-warning client
         #     certificatePassword: password for that .pfx (null if unencrypted)
         #     generateSelfSigned:  when no certificatePath, generate + persist a self-signed
         #                          cert on first start (default true; clients warn until it
@@ -330,7 +338,7 @@ public static class BbsHostConfigFile
           bind: 127.0.0.1
           port: 1143
           tls:
-            enabled: false
+            enabled: true
             certificatePath: null
             certificatePassword: null
             generateSelfSigned: true

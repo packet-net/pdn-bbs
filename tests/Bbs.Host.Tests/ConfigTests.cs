@@ -221,7 +221,7 @@ public sealed class ConfigTests : IDisposable
         Assert.False(config.Imap.Enabled);
         Assert.Equal("127.0.0.1", config.Imap.Bind);
         Assert.Equal(1143, config.Imap.Port);
-        Assert.False(config.Imap.Tls.Enabled);
+        Assert.True(config.Imap.Tls.Enabled); // TLS defaults ON whenever IMAP is enabled
         Assert.True(config.Imap.Tls.GenerateSelfSigned);
         Assert.Null(config.Imap.Tls.CertificatePath);
     }
