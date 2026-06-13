@@ -1,4 +1,7 @@
 using System.Buffers;
+using System.Net.Security;
+using System.Security.Authentication;
+using System.Security.Cryptography.X509Certificates;
 using System.Text;
 
 namespace Bbs.Smtp;
@@ -20,11 +23,15 @@ public sealed class SmtpConnection : IDisposable
     // A generous cap so a malformed client can't drive us out of memory on one command line.
     private const int MaxCommandBytes = 1 << 16; // 64 KiB — SMTP command lines are tiny (RFC 5321 §4.5.3.1.4 caps at 512)
 
-    private readonly Stream _stream;
+    private Stream _stream;
     private readonly int _maxMessageBytes;
     private readonly byte[] _readBuffer = new byte[8192];
     private int _bufferStart;
     private int _bufferEnd;
+
+    // When the transport is upgraded in place (STARTTLS), the new SslStream is owned here so it is disposed
+    // with the connection. The original inner stream is closed by the SslStream (leaveInnerStreamOpen:false).
+    private SslStream? _upgradedStream;
 
     /// <summary>Wraps <paramref name="stream"/> as an SMTP transport with a <paramref name="maxMessageBytes"/> DATA cap.</summary>
     public SmtpConnection(Stream stream, int maxMessageBytes)
@@ -120,6 +127,60 @@ public sealed class SmtpConnection : IDisposable
         return message.WrittenSpan.ToArray();
     }
 
+    /// <summary>
+    /// Upgrades the underlying transport to TLS in place (RFC 3207 STARTTLS): the CURRENT inner stream (the
+    /// plaintext socket stream) is wrapped in a server-authenticated <see cref="SslStream"/>, and on a
+    /// successful handshake the connection's stream is swapped to it so every later read/write rides the
+    /// encrypted channel. The handshake is bounded by <paramref name="handshakeTimeout"/> (mirroring the
+    /// implicit-TLS path) so a peer that completes <c>STARTTLS</c> but never sends a ClientHello cannot hang
+    /// the connection. Any bytes buffered <b>before</b> the handshake are discarded — post-STARTTLS commands
+    /// MUST come only from the TLS stream, so a pre-handshake pipelined command (a known injection vector)
+    /// is never honoured. Throws on handshake failure or timeout (the caller closes the connection).
+    /// </summary>
+    /// <param name="certificate">The server certificate presented in the handshake (shared with implicit TLS).</param>
+    /// <param name="handshakeTimeout">How long to wait for the TLS handshake before failing fast.</param>
+    /// <param name="cancellationToken">Cancels the handshake (server shutdown).</param>
+    public async Task UpgradeToServerTlsAsync(
+        X509Certificate2 certificate, TimeSpan handshakeTimeout, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(certificate);
+        if (_upgradedStream is not null)
+        {
+            throw new InvalidOperationException("The SMTP connection has already been upgraded to TLS.");
+        }
+
+        // Discard anything buffered before the handshake: post-STARTTLS reads must come only from the TLS
+        // stream (RFC 3207 §4.2 / §6 — do not honour commands pipelined across the upgrade boundary).
+        _bufferStart = 0;
+        _bufferEnd = 0;
+
+        var ssl = new SslStream(_stream, leaveInnerStreamOpen: false);
+        using var handshakeCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        handshakeCts.CancelAfter(handshakeTimeout);
+        try
+        {
+            await ssl.AuthenticateAsServerAsync(
+                new SslServerAuthenticationOptions
+                {
+                    ServerCertificate = certificate,
+                    ClientCertificateRequired = false,
+                    EnabledSslProtocols = SslProtocols.Tls12 | SslProtocols.Tls13,
+                },
+                handshakeCts.Token).ConfigureAwait(false);
+        }
+        catch
+        {
+            // Dispose the half-built SslStream (which also closes the inner stream) and surface the fault so
+            // the caller closes the connection.
+            await ssl.DisposeAsync().ConfigureAwait(false);
+            throw;
+        }
+
+        // Swap the live transport to the encrypted stream; it is now owned by the connection.
+        _stream = ssl;
+        _upgradedStream = ssl;
+    }
+
     /// <summary>Writes a US-ASCII response string verbatim (it must already end with CRLF).</summary>
     public async Task WriteAsync(string text, CancellationToken cancellationToken)
     {
@@ -129,5 +190,10 @@ public sealed class SmtpConnection : IDisposable
     }
 
     /// <inheritdoc/>
+    /// <remarks>
+    /// Disposes the live stream — after a STARTTLS upgrade that is the <see cref="SslStream"/> we own, which
+    /// in turn closes the inner socket stream (it was wrapped with <c>leaveInnerStreamOpen:false</c>). The
+    /// server's own <c>using</c> on the original <c>NetworkStream</c> is then a harmless second dispose.
+    /// </remarks>
     public void Dispose() => _stream.Dispose();
 }

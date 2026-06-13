@@ -142,7 +142,19 @@ public sealed record SmtpConfig
     /// </summary>
     public int Port { get; init; } = 465;
 
-    /// <summary>Implicit-TLS settings (default on). When on, every accepted socket is wrapped in TLS.</summary>
+    /// <summary>
+    /// The STARTTLS submission port; <b>0 disables the STARTTLS listener</b>. Defaults to 587 — the IANA
+    /// submission port and the one iPhone Mail's default "Add Mail Account" flow auto-probes for outgoing
+    /// (STARTTLS, no port field). The STARTTLS listener starts plaintext and the client upgrades to TLS in
+    /// band; it offers AUTH only AFTER the upgrade and shares the same certificate as the implicit-TLS path
+    /// (<see cref="Tls"/>). Binding a privileged port (&lt; 1024) needs the privilege to.
+    /// </summary>
+    public int StartTlsPort { get; init; } = 587;
+
+    /// <summary>
+    /// Implicit-TLS settings (default on). When on, every accepted socket on <see cref="Port"/> is wrapped
+    /// in TLS. The same certificate is also used for the STARTTLS upgrade on <see cref="StartTlsPort"/>.
+    /// </summary>
     public SmtpTlsConfig Tls { get; init; } = new();
 }
 
@@ -417,14 +429,24 @@ public static class BbsHostConfigFile
         #       body is taken (attachments / 7plus-on-send are a later slice). Like imap,
         #       the bind MAY be a LAN address so a phone on the home network can reach it —
         #       pair a LAN bind with tls.enabled.
+        #   The server offers TWO submission endpoints from one listener config, both using the
+        #   same certificate (tls below):
+        #     - IMPLICIT TLS on `port` (465): TLS from the first byte (the iPhone "SSL" model).
+        #     - STARTTLS on `startTlsPort` (587): starts plaintext, the client upgrades in band.
+        #       587/STARTTLS is the endpoint iPhone Mail's default "Add Mail Account" flow auto-
+        #       probes for OUTGOING (it has no port field), so offering it lets that default flow
+        #       succeed unaided. STARTTLS never offers AUTH before the TLS upgrade (RFC 3207).
         #   enabled: start the SMTP listener at all (default false)
         #   bind:    bind address (default 127.0.0.1; set 0.0.0.0 or a LAN IP for phones)
-        #   port:    TCP port (default 465 — the standard implicit-TLS submission port; a
-        #            port < 1024 needs the privilege to bind it)
-        #   tls:     implicit TLS (RFC 8314 — TLS from the first byte, the iPhone "SSL" model)
-        #     enabled:             wrap every connection in TLS (DEFAULT TRUE — if you expose SMTP
-        #                          you want it encrypted; set false only for a deliberately-plaintext
-        #                          deployment, e.g. loopback-only or behind a TLS proxy)
+        #   port:    implicit-TLS TCP port (default 465 — the standard implicit-TLS submission
+        #            port; a port < 1024 needs the privilege to bind it)
+        #   startTlsPort: STARTTLS TCP port (default 587 — the iOS-default outgoing port; set 0
+        #            to DISABLE the STARTTLS listener. Uses the same cert as the implicit port)
+        #   tls:     TLS settings — drives the implicit-TLS port AND the STARTTLS upgrade
+        #     enabled:             wrap every connection on `port` in implicit TLS (DEFAULT TRUE —
+        #                          if you expose SMTP you want it encrypted; set false only for a
+        #                          deliberately-plaintext deployment, e.g. loopback-only or behind a
+        #                          TLS proxy. The STARTTLS port still upgrades to TLS regardless)
         #     certificatePath:     operator-supplied PKCS#12 (.pfx); wins over self-signed. Point this
         #                          at a real cert (e.g. your node's LE cert) for a no-warning client
         #     certificatePassword: password for that .pfx (null if unencrypted)
@@ -435,6 +457,7 @@ public static class BbsHostConfigFile
           enabled: false
           bind: 127.0.0.1
           port: 465
+          startTlsPort: 587
           tls:
             enabled: true
             certificatePath: null

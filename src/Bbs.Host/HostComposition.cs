@@ -144,6 +144,9 @@ public static class HostComposition
             {
                 Bind = config.Smtp.Bind,
                 Port = config.Smtp.Port,
+                // STARTTLS on a second port (587 by default, 0 to disable) — the single SmtpServer runs both
+                // accept loops; we do NOT register a second SmtpServer (ComponentService<T> de-dups by type).
+                StartTlsPort = config.Smtp.StartTlsPort,
                 TlsEnabled = config.Smtp.Tls.Enabled,
                 CertificatePath = config.Smtp.Tls.CertificatePath,
                 CertificatePassword = config.Smtp.Tls.CertificatePassword,
