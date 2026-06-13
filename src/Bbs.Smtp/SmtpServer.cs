@@ -18,6 +18,11 @@ namespace Bbs.Smtp;
 /// message is stored as a <see cref="MessageType.Personal"/> and routed exactly like a webmail compose.
 /// Plaintext by default; when TLS is enabled each accepted socket is wrapped in an
 /// <see cref="SslStream"/> with server auth (implicit TLS, port 465) before the session runs.
+/// The single server instance can additionally run a STARTTLS listener (port 587, the iOS-default
+/// outgoing port): it accepts plaintext, advertises STARTTLS (but never AUTH) before the upgrade, and
+/// on <c>STARTTLS</c> wraps the live connection in TLS server-side using the same certificate. Both
+/// accept loops run concurrently from one <see cref="RunAsync"/> (one DI registration, since
+/// <c>ComponentService&lt;T&gt;</c> de-dups by implementation type).
 /// Default-off at the config layer: a node that does not enable SMTP never constructs this.
 /// </summary>
 public sealed partial class SmtpServer
@@ -56,36 +61,105 @@ public sealed partial class SmtpServer
     }
 
     /// <summary>
-    /// The TCP port the listener actually bound. Equals <see cref="SmtpServerOptions.Port"/>, except
-    /// when that is 0 (an ephemeral port for tests) — then it is the OS-assigned port, available once
-    /// the listener has started.
+    /// The TCP port the implicit-TLS listener actually bound. Equals <see cref="SmtpServerOptions.Port"/>,
+    /// except when that is 0 (an ephemeral port for tests) — then it is the OS-assigned port, available
+    /// once the listener has started. 0 while not bound (or when implicit TLS is off and no plaintext
+    /// listener runs).
     /// </summary>
     public int BoundPort { get; private set; }
 
     /// <summary>
-    /// Runs the accept loop until <paramref name="cancellationToken"/> fires. Resolves the TLS cert
-    /// up front (when TLS is on); if the cert can't be produced the TLS listener is not started and the
-    /// method returns without binding — a clean opt-out, never a crash.
+    /// The TCP port the STARTTLS listener actually bound, or 0 when the STARTTLS listener is not running.
+    /// Equals <see cref="SmtpServerOptions.StartTlsPort"/>, except when binding an ephemeral port for tests
+    /// (<see cref="SmtpServerOptions.StartTlsEphemeral"/>) — then it is the OS-assigned port, available once
+    /// the listener has started.
+    /// </summary>
+    public int BoundStartTlsPort { get; private set; }
+
+    /// <summary>Whether the STARTTLS listener is wanted (a non-zero port, or the test ephemeral flag).</summary>
+    private bool StartTlsWanted => _options.StartTlsPort > 0 || _options.StartTlsEphemeral;
+
+    /// <summary>
+    /// Runs BOTH accept loops to completion (implicit TLS on <see cref="SmtpServerOptions.Port"/> when
+    /// <see cref="SmtpServerOptions.TlsEnabled"/>, and STARTTLS on
+    /// <see cref="SmtpServerOptions.StartTlsPort"/> when wanted), until <paramref name="cancellationToken"/>
+    /// fires. The certificate is resolved once up front whenever EITHER listener needs TLS; if no cert can
+    /// be produced the implicit listener returns (its existing clean opt-out) and the STARTTLS listener is
+    /// skipped — never a crash. A STARTTLS port with no cert is logged and skipped while the implicit
+    /// listener (if any) still runs.
     /// </summary>
     public async Task RunAsync(CancellationToken cancellationToken)
     {
-        if (_options.TlsEnabled)
+        // Resolve the cert once if EITHER path needs TLS — both listeners share it.
+        bool tlsNeeded = _options.TlsEnabled || StartTlsWanted;
+        if (tlsNeeded)
         {
             _certificate = SmtpTlsCertificate.Resolve(
                 _options.CertificatePath, _options.CertificatePassword, _options.GenerateSelfSigned,
                 _options.SelfSignedCertPath, _options.Bind, _time, _logger);
+        }
+
+        // Implicit-TLS demands a cert; with none, that listener cannot run (today's clean opt-out). The
+        // STARTTLS listener may still come up only if the cert resolved — see below.
+        if (_options.TlsEnabled && _certificate is null)
+        {
+            LogTlsNoCert(_logger);
+            return;
+        }
+
+        var loops = new List<Task>();
+
+        // Implicit-TLS (or plaintext-when-TlsEnabled-is-false) listener on the primary port.
+        TcpListener implicitListener = StartListener(_options.Port);
+        BoundPort = ((IPEndPoint)implicitListener.LocalEndpoint).Port;
+        LogListening(_logger, _options.Bind, BoundPort, _options.TlsEnabled ? "implicit TLS" : "plaintext");
+        loops.Add(AcceptLoopAsync(implicitListener, SmtpSessionMode.Implicit, cancellationToken));
+
+        // STARTTLS listener (starts plaintext, upgrades in-band). Requires a cert; with none, skip it but
+        // leave the implicit listener running.
+        TcpListener? startTlsListener = null;
+        if (StartTlsWanted)
+        {
             if (_certificate is null)
             {
-                LogTlsNoCert(_logger);
-                return;
+                LogStartTlsNoCert(_logger);
+            }
+            else
+            {
+                startTlsListener = StartListener(_options.StartTlsEphemeral ? 0 : _options.StartTlsPort);
+                BoundStartTlsPort = ((IPEndPoint)startTlsListener.LocalEndpoint).Port;
+                LogListening(_logger, _options.Bind, BoundStartTlsPort, "STARTTLS");
+                loops.Add(AcceptLoopAsync(startTlsListener, SmtpSessionMode.StartTls, cancellationToken));
             }
         }
 
-        var listener = new TcpListener(IPAddress.Parse(_options.Bind), _options.Port);
-        listener.Start();
-        BoundPort = ((IPEndPoint)listener.LocalEndpoint).Port;
-        LogListening(_logger, _options.Bind, BoundPort, _options.TlsEnabled ? "implicit TLS" : "plaintext");
+        try
+        {
+            await Task.WhenAll(loops).ConfigureAwait(false);
+        }
+        finally
+        {
+            implicitListener.Stop();
+            startTlsListener?.Stop();
+            _certificate?.Dispose();
+        }
+    }
 
+    /// <summary>Binds and starts a TCP listener on <see cref="SmtpServerOptions.Bind"/>:<paramref name="port"/>.</summary>
+    private TcpListener StartListener(int port)
+    {
+        var listener = new TcpListener(IPAddress.Parse(_options.Bind), port);
+        listener.Start();
+        return listener;
+    }
+
+    /// <summary>
+    /// One listener's accept loop: spawns a per-connection task in <paramref name="mode"/> for each accepted
+    /// socket, prunes completed sessions, and awaits all in-flight sessions on shutdown. Mirrors the single
+    /// loop the server ran before STARTTLS, now parameterised by mode so both listeners share it.
+    /// </summary>
+    private async Task AcceptLoopAsync(TcpListener listener, SmtpSessionMode mode, CancellationToken cancellationToken)
+    {
         var sessions = new List<Task>();
         try
         {
@@ -93,24 +167,25 @@ public sealed partial class SmtpServer
             {
                 Socket socket = await listener.AcceptSocketAsync(cancellationToken).ConfigureAwait(false);
                 sessions.RemoveAll(t => t.IsCompleted);
-                sessions.Add(HandleConnectionAsync(socket, cancellationToken));
+                sessions.Add(HandleConnectionAsync(socket, mode, cancellationToken));
             }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
             // Shutdown.
         }
-        finally
-        {
-            listener.Stop();
-            _certificate?.Dispose();
-        }
 
         await Task.WhenAll(sessions).ConfigureAwait(false);
     }
 
-    /// <summary>One connection's whole lifetime: optional TLS handshake, then the session. Never throws.</summary>
-    private async Task HandleConnectionAsync(Socket socket, CancellationToken cancellationToken)
+    /// <summary>
+    /// One connection's whole lifetime. For <see cref="SmtpSessionMode.Implicit"/> the socket is wrapped in
+    /// TLS (the existing handshake-timeout-bounded path) before the session runs. For
+    /// <see cref="SmtpSessionMode.StartTls"/> the session runs over plaintext and performs the in-band TLS
+    /// upgrade itself (it holds the cert + timeout); the connection owns and disposes the SslStream it
+    /// creates. Never throws.
+    /// </summary>
+    private async Task HandleConnectionAsync(Socket socket, SmtpSessionMode mode, CancellationToken cancellationToken)
     {
         try
         {
@@ -119,7 +194,7 @@ public sealed partial class SmtpServer
             SslStream? ssl = null;
             try
             {
-                if (_options.TlsEnabled && _certificate is not null)
+                if (mode == SmtpSessionMode.Implicit && _options.TlsEnabled && _certificate is not null)
                 {
                     ssl = new SslStream(networkStream, leaveInnerStreamOpen: false);
 
@@ -150,11 +225,18 @@ public sealed partial class SmtpServer
                 }
 
                 using var connection = new SmtpConnection(stream, _options.MaxMessageBytes);
-                var session = new SmtpSession(connection, _store, _onStored, _options.MaxMessageBytes, _logger);
+
+                // The StartTls session is handed the cert + handshake timeout so it can perform the in-band
+                // upgrade on STARTTLS (the Implicit session is already secure and never upgrades).
+                var session = mode == SmtpSessionMode.StartTls
+                    ? new SmtpSession(connection, _store, _onStored, _options.MaxMessageBytes, mode, _certificate, _options.TlsHandshakeTimeout, _logger)
+                    : new SmtpSession(connection, _store, _onStored, _options.MaxMessageBytes, _logger);
                 await session.RunAsync(cancellationToken).ConfigureAwait(false);
             }
             finally
             {
+                // Dispose the implicit-path SslStream we created here; the StartTls path's SslStream is owned
+                // and disposed by the SmtpConnection (it swaps its own inner stream on upgrade).
                 if (ssl is not null)
                 {
                     await ssl.DisposeAsync().ConfigureAwait(false);
@@ -173,6 +255,9 @@ public sealed partial class SmtpServer
 
     [LoggerMessage(Level = LogLevel.Error, Message = "SMTP: TLS is enabled but no certificate could be resolved; the SMTP listener is not started.")]
     private static partial void LogTlsNoCert(ILogger logger);
+
+    [LoggerMessage(Level = LogLevel.Error, Message = "SMTP: a STARTTLS port is configured but no certificate could be resolved; the STARTTLS listener is not started (the implicit-TLS listener, if any, still runs).")]
+    private static partial void LogStartTlsNoCert(ILogger logger);
 
     [LoggerMessage(Level = LogLevel.Information, Message = "SMTP submission listening on {Bind}:{Port} ({Mode})")]
     private static partial void LogListening(ILogger logger, string bind, int port, string mode);
@@ -196,7 +281,25 @@ public sealed record SmtpServerOptions
     /// <summary>TCP port; 0 binds an OS-assigned ephemeral port (used by tests). 465 = implicit-TLS submission.</summary>
     public int Port { get; init; } = 465;
 
-    /// <summary>Whether each accepted socket is wrapped in implicit TLS.</summary>
+    /// <summary>
+    /// The STARTTLS submission port; 0 disables the STARTTLS listener. 587 is the IANA submission port and
+    /// the one iPhone Mail's "Add Mail Account" flow auto-probes for outgoing (STARTTLS, no port field), so
+    /// offering it lets that default flow succeed unaided. The STARTTLS listener starts plaintext and the
+    /// client upgrades to TLS in-band; it shares the same resolved certificate as the implicit-TLS path. As
+    /// with <see cref="Port"/>, 0 here binds an OS-assigned ephemeral port only when set to a non-zero
+    /// sentinel by tests — a literal 0 simply turns the listener off.
+    /// </summary>
+    public int StartTlsPort { get; init; }
+
+    /// <summary>
+    /// Test-only escape hatch: bind the STARTTLS listener on an OS-assigned ephemeral port even though
+    /// <see cref="StartTlsPort"/> is 0 (a literal 0 otherwise turns the listener off). The harness sets this
+    /// so it can run BOTH the implicit listener and the STARTTLS listener on distinct ephemeral ports in one
+    /// process; production never sets it (it picks a real port via <see cref="StartTlsPort"/>).
+    /// </summary>
+    public bool StartTlsEphemeral { get; init; }
+
+    /// <summary>Whether each accepted socket on <see cref="Port"/> is wrapped in implicit TLS.</summary>
     public bool TlsEnabled { get; init; }
 
     /// <summary>Operator-supplied PKCS#12 path; wins over self-signed when set.</summary>

@@ -1,4 +1,6 @@
+using System.Net.Security;
 using System.Net.Sockets;
+using System.Security.Authentication;
 using System.Text;
 using Bbs.Core;
 
@@ -80,11 +82,11 @@ public sealed class RawSmtpProtocolTests
 internal sealed class RawSmtpClient : IAsyncDisposable
 {
     private readonly TcpClient _tcp;
-    private readonly NetworkStream _stream;
+    private readonly Stream _stream;
     private readonly byte[] _buffer = new byte[16384];
     private readonly StringBuilder _pending = new();
 
-    private RawSmtpClient(TcpClient tcp, NetworkStream stream)
+    private RawSmtpClient(TcpClient tcp, Stream stream)
     {
         _tcp = tcp;
         _stream = stream;
@@ -96,6 +98,29 @@ internal sealed class RawSmtpClient : IAsyncDisposable
         await tcp.ConnectAsync("127.0.0.1", port).ConfigureAwait(false);
         var client = new RawSmtpClient(tcp, tcp.GetStream());
         await client.ReadReplyAsync().ConfigureAwait(false); // consume the 220 greeting
+        return client;
+    }
+
+    /// <summary>
+    /// Connects to an implicit-TLS listener: completes the TLS handshake on connect (accepting the
+    /// self-signed loopback cert) and then consumes the greeting from the encrypted stream. Used to drive
+    /// behaviours MailKit will not — chiefly sending STARTTLS on an already-secure session.
+    /// </summary>
+    public static async Task<RawSmtpClient> ConnectImplicitTlsAsync(int port)
+    {
+        var tcp = new TcpClient();
+        await tcp.ConnectAsync("127.0.0.1", port).ConfigureAwait(false);
+#pragma warning disable CA5359 // accept-any cert is intentional for a self-signed loopback test
+        var ssl = new SslStream(tcp.GetStream(), leaveInnerStreamOpen: false, (_, _, _, _) => true);
+#pragma warning restore CA5359
+        await ssl.AuthenticateAsClientAsync(
+            new SslClientAuthenticationOptions
+            {
+                TargetHost = "localhost",
+                EnabledSslProtocols = SslProtocols.Tls12 | SslProtocols.Tls13,
+            }).ConfigureAwait(false);
+        var client = new RawSmtpClient(tcp, ssl);
+        await client.ReadReplyAsync().ConfigureAwait(false); // consume the 220 greeting (over TLS)
         return client;
     }
 

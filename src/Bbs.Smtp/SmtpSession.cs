@@ -1,3 +1,6 @@
+using System.Net.Sockets;
+using System.Security.Authentication;
+using System.Security.Cryptography.X509Certificates;
 using System.Text;
 using Bbs.Core;
 using Bbs.Mime;
@@ -6,6 +9,27 @@ using Microsoft.Extensions.Logging.Abstractions;
 using MimeKit;
 
 namespace Bbs.Smtp;
+
+/// <summary>
+/// How a <see cref="SmtpSession"/>'s transport is secured, which drives the EHLO advertisement and the
+/// STARTTLS handling.
+/// </summary>
+public enum SmtpSessionMode
+{
+    /// <summary>
+    /// TLS was established on accept (implicit TLS, port 465). The channel is already secure: EHLO
+    /// advertises AUTH; a <c>STARTTLS</c> command is answered <c>503 Already using TLS</c>.
+    /// </summary>
+    Implicit,
+
+    /// <summary>
+    /// The session starts plaintext (port 587). EHLO advertises STARTTLS but NOT AUTH (RFC 3207 §4.3 —
+    /// never offer plaintext auth on an unencrypted link); mail commands are refused until the client
+    /// issues <c>STARTTLS</c>, which upgrades the transport in place. After the upgrade the session resets
+    /// and behaves exactly like <see cref="Implicit"/> (AUTH advertised, STARTTLS no longer offered).
+    /// </summary>
+    StartTls,
+}
 
 /// <summary>
 /// One SMTP submission connection's protocol engine: the state machine (greeting → EHLO → AUTH →
@@ -36,12 +60,24 @@ public sealed partial class SmtpSession
     private readonly int _maxMessageBytes;
     private readonly ILogger _logger;
 
+    // Transport security. _mode is the configured listener mode; _secured tracks whether the channel is
+    // currently encrypted: true from the start for Implicit, and flips to true on a successful STARTTLS
+    // upgrade for StartTls. AUTH (and therefore mail) is only ever permitted while _secured is true.
+    private readonly SmtpSessionMode _mode;
+    private readonly X509Certificate2? _startTlsCertificate;
+    private readonly TimeSpan _startTlsHandshakeTimeout;
+    private bool _secured;
+
     private string? _callsign;
     private bool _mailFromSet;
     private readonly List<string> _recipients = [];
     private bool _quit;
 
-    /// <summary>Creates a session over <paramref name="connection"/> backed by the BBS <paramref name="store"/>.</summary>
+    /// <summary>
+    /// Creates an <see cref="SmtpSessionMode.Implicit"/> session over <paramref name="connection"/> backed
+    /// by the BBS <paramref name="store"/> — the channel is already secure (implicit TLS) or deliberately
+    /// plaintext, and the session never performs an in-band upgrade.
+    /// </summary>
     /// <param name="connection">The line transport.</param>
     /// <param name="store">The store — credential verification and message storage.</param>
     /// <param name="onStored">Invoked once per stored message (the host wires this to routing).</param>
@@ -49,14 +85,44 @@ public sealed partial class SmtpSession
     /// <param name="logger">Logs auth outcomes (never the password); null = no-op.</param>
     public SmtpSession(
         SmtpConnection connection, BbsStore store, Action<Message> onStored, int maxMessageBytes, ILogger? logger = null)
+        : this(connection, store, onStored, maxMessageBytes, SmtpSessionMode.Implicit, certificate: null, startTlsHandshakeTimeout: default, logger)
+    {
+    }
+
+    /// <summary>
+    /// Creates a session in the given <paramref name="mode"/>. A <see cref="SmtpSessionMode.StartTls"/>
+    /// session is handed the <paramref name="certificate"/> and <paramref name="startTlsHandshakeTimeout"/>
+    /// it needs to perform the in-band TLS upgrade on <c>STARTTLS</c>.
+    /// </summary>
+    /// <param name="connection">The line transport.</param>
+    /// <param name="store">The store — credential verification and message storage.</param>
+    /// <param name="onStored">Invoked once per stored message (the host wires this to routing).</param>
+    /// <param name="maxMessageBytes">The DATA size cap, advertised in the EHLO SIZE extension.</param>
+    /// <param name="mode">Whether the transport is already secure (implicit) or upgrades in band (STARTTLS).</param>
+    /// <param name="certificate">The server cert for the STARTTLS upgrade; required for StartTls, else null.</param>
+    /// <param name="startTlsHandshakeTimeout">Bounds the STARTTLS handshake (the implicit path's timeout).</param>
+    /// <param name="logger">Logs auth outcomes (never the password); null = no-op.</param>
+    public SmtpSession(
+        SmtpConnection connection, BbsStore store, Action<Message> onStored, int maxMessageBytes,
+        SmtpSessionMode mode, X509Certificate2? certificate, TimeSpan startTlsHandshakeTimeout, ILogger? logger = null)
     {
         ArgumentNullException.ThrowIfNull(connection);
         ArgumentNullException.ThrowIfNull(store);
         ArgumentNullException.ThrowIfNull(onStored);
+        if (mode == SmtpSessionMode.StartTls)
+        {
+            ArgumentNullException.ThrowIfNull(certificate);
+        }
+
         _connection = connection;
         _store = store;
         _onStored = onStored;
         _maxMessageBytes = maxMessageBytes;
+        _mode = mode;
+        _startTlsCertificate = certificate;
+        _startTlsHandshakeTimeout = startTlsHandshakeTimeout;
+        // Implicit-TLS is secure from the first byte; a StartTls session is plaintext until it upgrades.
+        _secured = mode == SmtpSessionMode.Implicit;
         _logger = logger ?? NullLogger.Instance;
     }
 
@@ -97,17 +163,36 @@ public sealed partial class SmtpSession
             case "HELO":
                 await HandleEhloAsync(extended: false, cancellationToken).ConfigureAwait(false);
                 break;
+            case "STARTTLS":
+                await HandleStartTlsAsync(cancellationToken).ConfigureAwait(false);
+                break;
             case "AUTH":
-                await HandleAuthAsync(rest, cancellationToken).ConfigureAwait(false);
+                if (await RequireSecureChannelAsync(cancellationToken).ConfigureAwait(false))
+                {
+                    await HandleAuthAsync(rest, cancellationToken).ConfigureAwait(false);
+                }
+
                 break;
             case "MAIL":
-                await HandleMailAsync(rest, cancellationToken).ConfigureAwait(false);
+                if (await RequireSecureChannelAsync(cancellationToken).ConfigureAwait(false))
+                {
+                    await HandleMailAsync(rest, cancellationToken).ConfigureAwait(false);
+                }
+
                 break;
             case "RCPT":
-                await HandleRcptAsync(rest, cancellationToken).ConfigureAwait(false);
+                if (await RequireSecureChannelAsync(cancellationToken).ConfigureAwait(false))
+                {
+                    await HandleRcptAsync(rest, cancellationToken).ConfigureAwait(false);
+                }
+
                 break;
             case "DATA":
-                await HandleDataAsync(cancellationToken).ConfigureAwait(false);
+                if (await RequireSecureChannelAsync(cancellationToken).ConfigureAwait(false))
+                {
+                    await HandleDataAsync(cancellationToken).ConfigureAwait(false);
+                }
+
                 break;
             case "RSET":
                 ResetTransaction();
@@ -143,13 +228,89 @@ public sealed partial class SmtpSession
             return;
         }
 
-        // Multiline EHLO: every line but the last uses "250-", the last "250 ".
+        // Multiline EHLO: every line but the last uses "250-", the last "250 ". The capability set depends
+        // on whether the channel is secure yet:
+        //   * Secure (implicit TLS, or after a STARTTLS upgrade) → advertise AUTH; never advertise STARTTLS.
+        //   * StartTls before the upgrade → advertise STARTTLS but NOT AUTH (RFC 3207 §4.3: never offer
+        //     plaintext auth on an unencrypted link; iOS will not auth pre-TLS either).
         var sb = new StringBuilder();
         sb.Append("250-pdn-bbs\r\n");
-        sb.Append("250-AUTH PLAIN LOGIN\r\n");
+        if (_secured)
+        {
+            sb.Append("250-AUTH PLAIN LOGIN\r\n");
+        }
+        else
+        {
+            sb.Append("250-STARTTLS\r\n");
+        }
+
         sb.Append("250-8BITMIME\r\n");
         sb.Append($"250 SIZE {_maxMessageBytes}\r\n");
         await _connection.WriteAsync(sb.ToString(), cancellationToken).ConfigureAwait(false);
+    }
+
+    // ------------------------------------------------------------------ STARTTLS (RFC 3207)
+
+    /// <summary>
+    /// Gate for AUTH/MAIL/RCPT/DATA on a STARTTLS session: returns true when the command may proceed (the
+    /// channel is secure), otherwise writes <c>530 Must issue a STARTTLS command first</c> and returns
+    /// false. On an implicit session the channel is always secure, so this is a pass-through.
+    /// </summary>
+    private async Task<bool> RequireSecureChannelAsync(CancellationToken cancellationToken)
+    {
+        if (_secured)
+        {
+            return true;
+        }
+
+        await _connection.WriteAsync("530 5.7.0 Must issue a STARTTLS command first\r\n", cancellationToken).ConfigureAwait(false);
+        return false;
+    }
+
+    /// <summary>
+    /// Handles the <c>STARTTLS</c> command (RFC 3207). On an already-secure channel (implicit TLS, or a
+    /// second STARTTLS after upgrade) it answers <c>503 Already using TLS</c>. Otherwise it answers
+    /// <c>220 Ready to start TLS</c>, upgrades the connection's transport in place, and — on success —
+    /// RESETS the whole session (any prior EHLO/HELO + MAIL/RCPT, and there is no auth to discard): the
+    /// client MUST send a fresh EHLO over the encrypted channel (RFC 3207 §4.2). The connection's upgrade
+    /// also discards any input buffered before the handshake, so a pipelined pre-STARTTLS command is never
+    /// honoured. On TLS failure the session ends and the connection closes.
+    /// </summary>
+    private async Task HandleStartTlsAsync(CancellationToken cancellationToken)
+    {
+        if (_secured)
+        {
+            await _connection.WriteAsync("503 5.5.1 Already using TLS\r\n", cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        // We only reach here on a StartTls-mode session, which always carries a certificate.
+        if (_startTlsCertificate is null)
+        {
+            await _connection.WriteAsync("454 4.7.0 TLS not available\r\n", cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        await _connection.WriteAsync("220 2.0.0 Ready to start TLS\r\n", cancellationToken).ConfigureAwait(false);
+
+        try
+        {
+            await _connection.UpgradeToServerTlsAsync(_startTlsCertificate, _startTlsHandshakeTimeout, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is IOException or SocketException or AuthenticationException or OperationCanceledException && !cancellationToken.IsCancellationRequested)
+        {
+            // The handshake failed or timed out; close the connection (RFC 3207 §4.1 — no plaintext recovery).
+            LogStartTlsFailed(_logger, ex);
+            _quit = true;
+            return;
+        }
+
+        // Upgrade succeeded — reset ALL prior state (RFC 3207 §4.2). There is no AUTH to clear (we forbid it
+        // pre-TLS); discard the in-progress transaction and require a fresh EHLO over the encrypted channel.
+        _secured = true;
+        _callsign = null;
+        ResetTransaction();
+        LogStartTlsUpgraded(_logger);
     }
 
     // ------------------------------------------------------------------ auth (RFC 4954)
@@ -520,4 +681,10 @@ public sealed partial class SmtpSession
 
     [LoggerMessage(Level = LogLevel.Warning, Message = "SMTP: failed to parse a submitted message")]
     private static partial void LogParseFailed(ILogger logger, Exception ex);
+
+    [LoggerMessage(Level = LogLevel.Information, Message = "SMTP: STARTTLS upgrade succeeded; awaiting a fresh EHLO over the encrypted channel.")]
+    private static partial void LogStartTlsUpgraded(ILogger logger);
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "SMTP: STARTTLS upgrade failed; closing the connection.")]
+    private static partial void LogStartTlsFailed(ILogger logger, Exception ex);
 }
