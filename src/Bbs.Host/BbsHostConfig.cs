@@ -320,9 +320,35 @@ public static class BbsHostConfigFile
     public const string FileName = "bbs.yaml";
 
     /// <summary>
-    /// Loads the config, writing <see cref="DefaultYaml"/> first when the file does not
-    /// exist. <paramref name="getEnv"/> supplies <c>PDN_RHP_HOST</c>/<c>PDN_RHP_PORT</c>
-    /// defaults for an unset RHP endpoint.
+    /// The supervisor environment variable pdn's <c>AppServiceSupervisor</c> sets to the app id
+    /// (<c>bbs</c>) for every supervised app. Its presence is how the BBS detects it is running
+    /// UNDER pdn (vs a standalone deployment) and writes the pdn-flavoured first-run defaults —
+    /// IMAP + SMTP submission as plaintext on loopback, because pdn's tailnet sidecar owns the
+    /// TLS edge (the <c>forward:</c> block in pdn-app.yaml) and the BBS must NOT do its own TLS
+    /// or bind a public interface.
+    /// </summary>
+    public const string PdnAppIdEnv = "PDN_APP_ID";
+
+    /// <summary>
+    /// The fixed loopback IMAP port the BBS serves PLAINTEXT under pdn; pdn's sidecar
+    /// TLS-terminates :993 on the tailnet and forwards here (the <c>forward:</c> target in
+    /// pdn-app.yaml must match this).
+    /// </summary>
+    public const int PdnImapLoopbackPort = 11430;
+
+    /// <summary>
+    /// The fixed loopback SMTP-submission port the BBS serves PLAINTEXT under pdn; pdn's sidecar
+    /// TLS-terminates :465 on the tailnet and forwards here (the <c>forward:</c> target in
+    /// pdn-app.yaml must match this).
+    /// </summary>
+    public const int PdnSmtpLoopbackPort = 11465;
+
+    /// <summary>
+    /// Loads the config, writing the first-run default when the file does not exist —
+    /// <see cref="PdnDefaultYaml"/> when running under pdn (<see cref="PdnAppIdEnv"/> present in
+    /// <paramref name="getEnv"/>), otherwise the standalone <see cref="DefaultYaml"/>.
+    /// <paramref name="getEnv"/> also supplies <c>PDN_RHP_HOST</c>/<c>PDN_RHP_PORT</c> defaults
+    /// for an unset RHP endpoint.
     /// </summary>
     public static (BbsHostConfig Config, bool CreatedDefault) LoadOrCreate(string stateDir, Func<string, string?> getEnv)
     {
@@ -334,7 +360,12 @@ public static class BbsHostConfigFile
         if (!File.Exists(path))
         {
             Directory.CreateDirectory(stateDir);
-            File.WriteAllText(path, DefaultYaml);
+            // Under pdn the tailnet sidecar terminates TLS and forwards plaintext to our
+            // loopback listeners, so the pdn first-run default turns IMAP + SMTP ON as
+            // plaintext-on-loopback. Standalone keeps the historical default (both off; their
+            // own implicit-TLS on 993/465 when the owner opts in).
+            bool underPdn = getEnv(PdnAppIdEnv) is { Length: > 0 };
+            File.WriteAllText(path, underPdn ? PdnDefaultYaml : DefaultYaml);
             created = true;
         }
 
@@ -399,6 +430,13 @@ public static class BbsHostConfigFile
         #       log in. Unlike webmail (loopback-only, the app-gateway trust boundary), the
         #       IMAP bind MAY be a LAN address so a phone on the home network can reach it —
         #       pair a LAN bind with tls.enabled.
+        #       NOTE: this is the STANDALONE default. When the BBS runs UNDER pdn (the
+        #       supervisor sets PDN_APP_ID), the first-run bbs.yaml instead enables IMAP as
+        #       PLAINTEXT on loopback (127.0.0.1:11430, tls.enabled false) — pdn's tailnet
+        #       sidecar TLS-terminates :993 with the node's real Let's Encrypt cert and
+        #       forwards to that loopback port (the forward: block in pdn-app.yaml). Under
+        #       pdn you reach IMAPS over Tailscale at <node>-pdn.<tailnet>.ts.net:993 with a
+        #       trusted cert — no certificate config in the BBS at all.
         #   enabled: start the IMAP listener at all (default false)
         #   bind:    bind address (default 127.0.0.1; set 0.0.0.0 or a LAN IP for phones)
         #   port:    TCP port (default 993 — the standard implicit-TLS IMAP port iPhone Mail
@@ -439,6 +477,13 @@ public static class BbsHostConfigFile
         #       produces a message a recipient can decode back to a file. Like imap, the
         #       bind MAY be a LAN address so a phone on the home network can reach it —
         #       pair a LAN bind with tls.enabled.
+        #       NOTE: this is the STANDALONE default. When the BBS runs UNDER pdn (the
+        #       supervisor sets PDN_APP_ID), the first-run bbs.yaml instead enables SMTP
+        #       submission as PLAINTEXT on loopback (127.0.0.1:11465, tls.enabled false,
+        #       startTlsPort 0) — pdn's tailnet sidecar TLS-terminates :465 with the node's
+        #       real Let's Encrypt cert and forwards to that loopback port (the forward:
+        #       block in pdn-app.yaml). Under pdn you reach SMTPS over Tailscale at
+        #       <node>-pdn.<tailnet>.ts.net:465 with a trusted cert — no cert config needed.
         #   The server offers TWO submission endpoints from one listener config, both using the
         #   same certificate (tls below):
         #     - IMPLICIT TLS on `port` (465): TLS from the first byte (the iPhone "SSL" model).
@@ -540,6 +585,101 @@ public static class BbsHostConfigFile
         # announces itself with a [SID] first line and is handed to the forwarding
         # answerer. Once the wait expires the session is the console's and later input
         # is treated as commands.
+        demuxFirstLineWaitSeconds: 30
+        """;
+
+    /// <summary>
+    /// The commented default written on first run WHEN RUNNING UNDER PDN (the supervisor sets
+    /// <see cref="PdnAppIdEnv"/>). Identical to <see cref="DefaultYaml"/> except that IMAP and
+    /// SMTP submission are turned ON as PLAINTEXT on loopback at the fixed ports
+    /// <see cref="PdnImapLoopbackPort"/> / <see cref="PdnSmtpLoopbackPort"/>: pdn's tailnet
+    /// sidecar owns the TLS edge (it TLS-terminates :993/:465 on the tailnet with the node's
+    /// real Let's Encrypt cert and forwards plaintext here — the <c>forward:</c> block in
+    /// pdn-app.yaml), so the BBS must NOT do its own TLS and must NOT bind a public interface.
+    /// The owner can still edit this file (it is config, the source of truth); the only
+    /// difference from standalone is the first-run posture.
+    /// </summary>
+    public const string PdnDefaultYaml = """
+        # pdn-bbs configuration — created on first run UNDER PDN; edit and restart the app.
+        #
+        # This file was written with pdn's tailnet-forwarding defaults (PDN_APP_ID was set by
+        # the supervisor). IMAP + SMTP submission are PLAINTEXT on loopback below: pdn's
+        # embedded Tailscale node TLS-terminates :993 (IMAPS) and :465 (SMTPS) with the node's
+        # real Let's Encrypt cert and forwards to these loopback ports (the forward: block in
+        # this app's pdn-app.yaml). Reach mail over Tailscale at
+        # <node>-pdn.<tailnet>.ts.net:993 / :465 with a TRUSTED cert — no certificate config
+        # in the BBS at all. Do NOT enable the BBS's own TLS or bind a public interface here;
+        # pdn owns the TLS edge and the trusted name.
+        #
+        # callsign: the BBS callsign (+ optional SSID). This is the callsign the BBS
+        #           binds over RHPv2 — users and partner BBSes connect to it.
+        callsign: N0CALL
+
+        # sysop: the sysop's callsign (sysop rights on the console; sysop view in webmail).
+        sysop: ""
+
+        # hRoute: this BBS's hierarchical route WITHOUT the callsign, e.g. "#23.GBR.EURO"
+        #         (the linmail.cfg H-Route shape). Drives routing and the R: trace line.
+        hRoute: ""
+
+        # web: the webmail bind. MUST stay loopback — pdn's app gateway is the trust
+        #      boundary for the X-Pdn-* identity headers. The port must match the
+        #      ui.upstream in pdn-app.yaml.
+        web:
+          bind: 127.0.0.1
+          port: 18090
+
+        # imap: the read-mostly IMAP4rev1 server so iPhone Mail (or any IMAP client) can read
+        #       packet mail. UNDER PDN this is plaintext on loopback — pdn's sidecar adds TLS
+        #       on the tailnet (:993) and forwards here. The login is the user's CALLSIGN plus
+        #       their BBS mail-password (set in webmail). Keep bind loopback and tls.enabled
+        #       false: the bytes from pdn's sidecar arrive over loopback already, and pdn's
+        #       cert is the trusted one clients see. (For a STANDALONE, non-pdn deployment you
+        #       would instead bind a LAN address and turn tls.enabled on with port 993.)
+        imap:
+          enabled: true
+          bind: 127.0.0.1
+          port: 11430        # pdn forwards tailnet :993 here (must match pdn-app.yaml forward.target)
+          tls:
+            enabled: false   # pdn's sidecar terminates TLS; the BBS stays plaintext on loopback
+            certificatePath: null
+            certificatePassword: null
+            generateSelfSigned: false
+
+        # smtp: the SMTP SUBMISSION server (RFC 6409) so iPhone Mail (or any mail client) can
+        #       SEND packet mail. UNDER PDN this is plaintext on loopback — pdn's sidecar adds
+        #       TLS on the tailnet (:465) and forwards here. AUTH (callsign + mail-password) is
+        #       still required before any mail command; a sent message is stored + routed just
+        #       like a webmail compose. startTlsPort is 0 (no STARTTLS listener): pdn forwards
+        #       only the implicit-TLS :465 endpoint, so there is nothing for STARTTLS to add.
+        #       (For a STANDALONE deployment you would bind a LAN address, turn tls.enabled on
+        #       with port 465, and set startTlsPort 587 for the iOS-default outgoing probe.)
+        smtp:
+          enabled: true
+          bind: 127.0.0.1
+          port: 11465        # pdn forwards tailnet :465 here (must match pdn-app.yaml forward.target)
+          startTlsPort: 0    # no STARTTLS endpoint under pdn — only implicit-TLS :465 is forwarded
+          tls:
+            enabled: false   # pdn's sidecar terminates TLS; the BBS stays plaintext on loopback
+            certificatePath: null
+            certificatePassword: null
+            generateSelfSigned: false
+
+        # rhp: the node's RHPv2 endpoint. When omitted (or null) the supervisor
+        #      environment (PDN_RHP_HOST / PDN_RHP_PORT) is used, falling back to
+        #      127.0.0.1:9000. user/pass only matter when the node sets rhp.requireAuth.
+        rhp:
+          host: null
+          port: null
+          user: null
+          pass: null
+
+        # partners: BBS forwarding partners (compat spec §4.1, v1 subset). See the standalone
+        # default's comments for the full key reference; left empty here.
+        partners: []
+
+        # demuxFirstLineWaitSeconds: how long the inbound demux holds the
+        # forwarding-vs-console decision for a SILENT caller (see standalone default).
         demuxFirstLineWaitSeconds: 30
         """;
 }

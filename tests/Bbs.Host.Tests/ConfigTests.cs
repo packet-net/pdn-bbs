@@ -224,5 +224,77 @@ public sealed class ConfigTests : IDisposable
         Assert.True(config.Imap.Tls.Enabled); // TLS defaults ON whenever IMAP is enabled
         Assert.True(config.Imap.Tls.GenerateSelfSigned);
         Assert.Null(config.Imap.Tls.CertificatePath);
+
+        // SMTP submission is default-off in the standalone default too.
+        Assert.False(config.Smtp.Enabled);
+        Assert.Equal(465, config.Smtp.Port);
+        Assert.Equal(587, config.Smtp.StartTlsPort);
+        Assert.True(config.Smtp.Tls.Enabled);
+    }
+
+    [Fact]
+    public void PdnDefaultYaml_EnablesImapAndSmtpPlaintextOnLoopback()
+    {
+        // Under pdn the tailnet sidecar owns the TLS edge: the BBS serves IMAP + SMTP
+        // submission as PLAINTEXT on fixed loopback ports, never its own TLS / a public bind.
+        BbsHostConfig config = BbsHostConfigFile.Parse(BbsHostConfigFile.PdnDefaultYaml);
+
+        // The non-mail surface is unchanged from standalone.
+        Assert.Equal(BbsHostConfig.PlaceholderCallsign, config.Callsign);
+        Assert.Equal("127.0.0.1", config.Web.Bind);
+        Assert.Equal(18090, config.Web.Port);
+        Assert.Null(config.Rhp.Host);
+        Assert.Null(config.Rhp.Port);
+
+        // IMAP: on, plaintext, loopback, the pinned forward port.
+        Assert.True(config.Imap.Enabled);
+        Assert.Equal("127.0.0.1", config.Imap.Bind);
+        Assert.Equal(BbsHostConfigFile.PdnImapLoopbackPort, config.Imap.Port);
+        Assert.Equal(11430, config.Imap.Port); // matches pdn-app.yaml forward.target
+        Assert.False(config.Imap.Tls.Enabled);
+        Assert.False(config.Imap.Tls.GenerateSelfSigned);
+
+        // SMTP submission: on, plaintext, loopback, the pinned forward port, no STARTTLS.
+        Assert.True(config.Smtp.Enabled);
+        Assert.Equal("127.0.0.1", config.Smtp.Bind);
+        Assert.Equal(BbsHostConfigFile.PdnSmtpLoopbackPort, config.Smtp.Port);
+        Assert.Equal(11465, config.Smtp.Port); // matches pdn-app.yaml forward.target
+        Assert.Equal(0, config.Smtp.StartTlsPort); // pdn forwards only implicit-TLS :465
+        Assert.False(config.Smtp.Tls.Enabled);
+        Assert.False(config.Smtp.Tls.GenerateSelfSigned);
+    }
+
+    [Fact]
+    public void LoadOrCreate_WritesPdnDefault_WhenAppIdPresent()
+    {
+        // PDN_APP_ID present (the supervisor sets it) → the pdn-flavoured first-run default.
+        (BbsHostConfig config, bool created) = BbsHostConfigFile.LoadOrCreate(
+            _dir.FullName, key => key == BbsHostConfigFile.PdnAppIdEnv ? "bbs" : null);
+
+        Assert.True(created);
+        string text = File.ReadAllText(Path.Combine(_dir.FullName, BbsHostConfigFile.FileName));
+        Assert.Contains("created on first run UNDER PDN", text, StringComparison.Ordinal);
+
+        // The mail listeners came up plaintext-on-loopback.
+        Assert.True(config.Imap.Enabled);
+        Assert.Equal(11430, config.Imap.Port);
+        Assert.False(config.Imap.Tls.Enabled);
+        Assert.True(config.Smtp.Enabled);
+        Assert.Equal(11465, config.Smtp.Port);
+        Assert.False(config.Smtp.Tls.Enabled);
+    }
+
+    [Fact]
+    public void LoadOrCreate_WritesStandaloneDefault_WhenNoAppId()
+    {
+        // No PDN_APP_ID → the historical standalone default (mail off; its own TLS when opted in).
+        (BbsHostConfig config, bool created) = BbsHostConfigFile.LoadOrCreate(_dir.FullName, NoEnv);
+
+        Assert.True(created);
+        string text = File.ReadAllText(Path.Combine(_dir.FullName, BbsHostConfigFile.FileName));
+        Assert.DoesNotContain("UNDER PDN", text, StringComparison.Ordinal);
+
+        Assert.False(config.Imap.Enabled);
+        Assert.False(config.Smtp.Enabled);
     }
 }
