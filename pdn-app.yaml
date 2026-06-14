@@ -16,7 +16,7 @@
 manifest: 1
 id: bbs                       # must equal the package directory name
 name: BBS
-version: "0.1.0"
+version: "0.2.0"
 description: Packet-radio mailbox — personal mail, bulletins and NTS traffic with FBB-compatible store-and-forward and webmail.
 icon: mail
 capabilities: [network, web]  # binds its own callsign over RHPv2; serves its own web UI
@@ -33,3 +33,23 @@ ui:
   upstream: http://127.0.0.1:18090
   name: BBS
   icon: mail
+
+# Tailnet port forwards (packet.net docs/network-access.md § App-declared port forwarding).
+# When the node owner has the embedded Tailscale node enabled, pdn's sidecar ListenTLS's
+# each `listen` port on the tailnet with the node's real Let's Encrypt cert for
+# <callsign>-pdn.<tailnet>.ts.net, terminates TLS, and pipes PLAINTEXT to the BBS's loopback
+# `target`. So the BBS serves IMAP/SMTP-submission as plaintext on loopback (see bbs.yaml,
+# written with these defaults under pdn) and never does its own TLS — pdn owns the TLS edge
+# and the trusted name, exactly as the webmail tile is plaintext-loopback behind the gateway.
+# A trusted-cert IMAPS/SMTPS mailbox over Tailscale with zero cert config in the BBS.
+#   - listen:  tailnet-facing port (993 = IMAPS, 465 = SMTPS); 1..65535, never 443.
+#   - target:  the BBS's plaintext loopback listener (must match imap.port / smtp.port in
+#              bbs.yaml under pdn). pdn rejects a non-loopback target.
+#   - tls:     terminate = the sidecar adds TLS with the node cert (the BBS stays plaintext).
+forward:
+  - listen: 993                 # IMAPS on the tailnet
+    target: 127.0.0.1:11430     # → BBS plaintext IMAP loopback (bbs.yaml imap.port)
+    tls: terminate
+  - listen: 465                 # SMTPS submission on the tailnet
+    target: 127.0.0.1:11465     # → BBS plaintext SMTP-submission loopback (bbs.yaml smtp.port)
+    tls: terminate
