@@ -19,7 +19,7 @@
 manifest: 1
 id: bbs                       # must equal the package directory name
 name: BBS
-version: "0.2.4"
+version: "0.2.5"
 description: Packet-radio mailbox — personal mail, bulletins and NTS traffic with FBB-compatible store-and-forward and webmail.
 icon: mail
 capabilities: [packet, web]  # binds its own callsign over RHPv2; serves its own web UI
@@ -32,10 +32,11 @@ service:
   environment: {}             # PDN_APP_STATE / PDN_RHP_HOST / PDN_RHP_PORT come from the supervisor
 
 # pdn reverse-proxies /apps/bbs/ to the loopback upstream and shows a launcher tile.
+# `mode: slot` opts into the single-chrome integrated look: pdn renders the web UI inside its
+# own panel chrome (a borderless iframe carrying ?pdn_embed=1), so the BBS drops its own outer
+# identity bar and threads pdn_embed=1 through every link/form to stay headless across navigation.
 ui:
-  upstream: http://127.0.0.1:18090
-  name: BBS
-  icon: mail
+  mode: slot
 
 # Tailnet port forwards (packet.net docs/network-access.md § App-declared port forwarding).
 # When the node owner has the embedded Tailscale node enabled, pdn's sidecar ListenTLS's

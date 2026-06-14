@@ -433,6 +433,113 @@ public sealed class WebmailTests : IAsyncDisposable
         Assert.DoesNotContain("href=\"/messages/30\"", page2, StringComparison.Ordinal);
     }
 
+    // ------------------------------------------------ slot/headless embed (?pdn_embed=1)
+    // pdn's single-chrome integrated look: the panel renders the app inside its own chrome in a
+    // borderless iframe carrying ?pdn_embed=1. When embedded the app drops its own outer <h1>
+    // station-identity bar (the panel already shows the app name) but keeps the functional content +
+    // the nav tabs, and — because it is server-rendered + no-JS — threads pdn_embed=1 through every
+    // link and form so navigation stays headless within the iframe. Non-embedded output is unchanged.
+
+    [Fact]
+    public async Task Embedded_Inbox_OmitsTheStationHeader_ButKeepsContentAndNavTabs()
+    {
+        ClaimCallsign("tom", "M0LTE");
+        Message stored = _store.AddMessage(new MessageDraft
+        {
+            Type = MessageType.Personal,
+            From = "G8ABC",
+            Recipients = ["M0LTE"],
+            Subject = "embedded hello",
+            Body = Encoding.Latin1.GetBytes("hi\r"),
+        });
+        using HttpClient client = await StartAsync();
+
+        string page = await client.GetStringAsync(new Uri("/?pdn_embed=1", UriKind.Relative));
+
+        // No big <h1> station-identity bar (no double chrome) — but it is still a full HTML doc.
+        Assert.DoesNotContain("<h1>GB7PDN-1 <span", page, StringComparison.Ordinal);
+        Assert.DoesNotContain("webmail</span></h1>", page, StringComparison.Ordinal);
+        Assert.Contains("<!doctype html>", page, StringComparison.Ordinal);
+        Assert.Contains("<title>GB7PDN-1 —", page, StringComparison.Ordinal); // <title> kept (harmless in an iframe)
+
+        // The functional content + nav tabs survive.
+        Assert.Contains("Inbox", page, StringComparison.Ordinal);
+        Assert.Contains("embedded hello", page, StringComparison.Ordinal);
+        Assert.Contains(">Inbox</a>", page, StringComparison.Ordinal);
+        Assert.Contains(">Bulletins</a>", page, StringComparison.Ordinal);
+        Assert.Contains(">Compose</a>", page, StringComparison.Ordinal);
+        Assert.Contains(">Settings</a>", page, StringComparison.Ordinal);
+
+        // The embed signal persists across navigation: every internal link carries pdn_embed=1.
+        Assert.Contains("href=\"/?pdn_embed=1\"", page, StringComparison.Ordinal);            // Inbox tab
+        Assert.Contains("href=\"/bulletins?pdn_embed=1\"", page, StringComparison.Ordinal);   // Bulletins tab
+        Assert.Contains("href=\"/compose?pdn_embed=1\"", page, StringComparison.Ordinal);     // Compose tab
+        Assert.Contains("href=\"/settings?pdn_embed=1\"", page, StringComparison.Ordinal);    // Settings tab
+        Assert.Contains($"href=\"/messages/{stored.Number}?pdn_embed=1\"", page, StringComparison.Ordinal); // message link
+        // Nothing escapes the headless mode (no bare internal link without the flag).
+        _ = stored;
+    }
+
+    [Fact]
+    public async Task Embedded_ComposeForm_CarriesHiddenEmbedInput_AndEmbeddedAction()
+    {
+        ClaimCallsign("tom", "M0LTE");
+        using HttpClient client = await StartAsync();
+
+        string form = await client.GetStringAsync(new Uri("/compose?pdn_embed=1", UriKind.Relative));
+
+        // The form action stays headless and a hidden field carries the signal across the POST.
+        Assert.Contains("action=\"/compose?pdn_embed=1\"", form, StringComparison.Ordinal);
+        Assert.Contains("<input type=\"hidden\" name=\"pdn_embed\" value=\"1\">", form, StringComparison.Ordinal);
+        // No station-identity header in the embedded compose page either.
+        Assert.DoesNotContain("<h1>GB7PDN-1 <span", form, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Embedded_ViaHeader_AlsoSuppressesTheHeader()
+    {
+        // An X-Pdn-Embed: 1 header is honoured equivalently to ?pdn_embed=1 (defensive: the contract
+        // is the query param, but the panel may also signal via the header).
+        ClaimCallsign("tom", "M0LTE");
+        using HttpClient client = await StartAsync();
+        client.DefaultRequestHeaders.Add("X-Pdn-Embed", "1");
+
+        string page = await client.GetStringAsync(new Uri("/", UriKind.Relative));
+
+        Assert.DoesNotContain("<h1>GB7PDN-1 <span", page, StringComparison.Ordinal);
+        Assert.Contains(">Inbox</a>", page, StringComparison.Ordinal);
+        // Even reached via the header, rendered links thread the query param so navigation persists it.
+        Assert.Contains("href=\"/bulletins?pdn_embed=1\"", page, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task NotEmbedded_Inbox_KeepsTheStationHeader_AndPlainLinks()
+    {
+        // The standalone page is unchanged when pdn_embed is absent: the <h1> is present and links
+        // carry no embed flag. (Companion to Header_ShowsTheSsiddStationIdentity_NotTheBareMailCall.)
+        ClaimCallsign("tom", "M0LTE");
+        using HttpClient client = await StartAsync();
+
+        string page = await client.GetStringAsync(new Uri("/", UriKind.Relative));
+
+        Assert.Contains("<h1>GB7PDN-1 <span", page, StringComparison.Ordinal);
+        Assert.DoesNotContain("pdn_embed", page, StringComparison.Ordinal);     // nothing leaks the flag
+        Assert.Contains("<a href=\"/bulletins\">Bulletins</a>", page, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Embedded_PersistsAcrossPrefixedNavigation()
+    {
+        // Under the gateway mount the embed flag rides alongside the prefix on every link.
+        ClaimCallsign("tom", "M0LTE");
+        using HttpClient client = await StartAsync(forwardedPrefix: "/apps/bbs");
+
+        string page = await client.GetStringAsync(new Uri("/?pdn_embed=1", UriKind.Relative));
+        Assert.Contains("href=\"/apps/bbs/bulletins?pdn_embed=1\"", page, StringComparison.Ordinal);
+        Assert.Contains("href=\"/apps/bbs/?pdn_embed=1\"", page, StringComparison.Ordinal);
+        Assert.DoesNotContain("<h1>GB7PDN-1 <span", page, StringComparison.Ordinal);
+    }
+
     // ------------------------------------------------ X-Forwarded-Prefix (gateway mount)
     // Behind pdn's app gateway the app is mounted at /apps/bbs/ with the prefix stripped on
     // proxying; pdn injects X-Forwarded-Prefix and every absolute URL we render or redirect
