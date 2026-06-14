@@ -5,7 +5,7 @@
     <AssemblyName>pdn-bbs</AssemblyName>
     <RootNamespace>Bbs.Host</RootNamespace>
     <!-- Keep in lockstep with pdn-app.yaml `version:` — this stamp feeds the SID and the R: line. -->
-    <Version>0.2.0</Version>
+    <Version>0.2.1</Version>
   </PropertyGroup>
 
   <ItemGroup>

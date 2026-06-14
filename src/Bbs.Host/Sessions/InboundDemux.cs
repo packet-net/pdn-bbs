@@ -126,11 +126,21 @@ public sealed class InboundDemux
             string sidLine = Sid.Build(_sidVersion, offerB2: partner?.AllowB2F ?? false);
             await child.SendAsync(Encoding.Latin1.GetBytes(sidLine + "\r\n"), cancellationToken).ConfigureAwait(false);
 
-            // Start the console greeting flow now; its input parks on the gate.
+            // Start the console greeting flow now; its input parks on the gate. The prompt/greeting
+            // callsign follows the link's ACTUALLY-bound callsign (RhpNodeLink.BoundCallsign), so a
+            // free-SSID probe that walked the configured SSID is reflected in `de <CALL>>` and the
+            // welcome banner — the caller never sees a stale/wrong SSID. Falls back to the static
+            // config when the link has not bound (it always has by accept time) or they match (then
+            // `with` is a no-op-shaped copy carrying the same value).
             var assembler = new LineAssembler();
             var pending = new Queue<string>();
             var terminal = new RhpTerminal(child, assembler, pending, gate.Task);
-            console = BbsConsoleSession.RunAsync(terminal, _store, _consoleConfig, _time, _userSettings, cancellationToken);
+            BbsConsoleConfig sessionConfig =
+                _link.BoundCallsign is { Length: > 0 } bound
+                && !string.Equals(bound, _consoleConfig.BbsCallsign, StringComparison.OrdinalIgnoreCase)
+                    ? _consoleConfig with { BbsCallsign = bound }
+                    : _consoleConfig;
+            console = BbsConsoleSession.RunAsync(terminal, _store, sessionConfig, _time, _userSettings, cancellationToken);
 
             var consumed = new List<byte>();
             bool closedDuringPeek = false;

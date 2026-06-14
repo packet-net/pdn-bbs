@@ -15,8 +15,29 @@ public sealed record BbsHostConfig
     /// <summary>The callsign placeholder a fresh default config carries until the owner edits it.</summary>
     public const string PlaceholderCallsign = "N0CALL";
 
+    /// <summary>
+    /// The default SSID for a callsign derived from the node (<c>PDN_NODE_CALLSIGN</c>): the BBS
+    /// lives at <c>&lt;node-base&gt;-1</c> by default — the classic AX.25 mailbox SSID, and distinct
+    /// from the sibling apps (DAPPS -7, bpqchat -4). The free-SSID probe (see
+    /// <see cref="Callsigns.SsidProbeCandidates"/>) makes the exact default low-stakes: if -1 is
+    /// already claimed on the node the link walks to the next free SSID and keeps it.
+    /// </summary>
+    public const int DerivedDefaultSsid = 1;
+
+    /// <summary>The literal service alias the BBS additionally binds so users can <c>C BBS</c>.</summary>
+    public const string DefaultServiceCallsign = "BBS";
+
     /// <summary>BBS callsign (+ optional SSID) — the RHP bind identity.</summary>
     public string Callsign { get; init; } = PlaceholderCallsign;
+
+    /// <summary>
+    /// A friendly service alias bound IN ADDITION to <see cref="Callsign"/> so users can reach the
+    /// mailbox by an easy name (<c>C BBS</c>). Defaults to <see cref="DefaultServiceCallsign"/>;
+    /// set empty to bind no alias. Inbound connects to either callsign route to the same session
+    /// handler. pdn's RHP server allows binding an arbitrary callsign (it refuses only the node's
+    /// own call + duplicates), and <c>BBS</c> is a valid AX.25 address.
+    /// </summary>
+    public string ServiceCallsign { get; init; } = DefaultServiceCallsign;
 
     /// <summary>Sysop callsign (console sysop rights; webmail sysop view).</summary>
     public string Sysop { get; init; } = "";
@@ -330,6 +351,18 @@ public static class BbsHostConfigFile
     public const string PdnAppIdEnv = "PDN_APP_ID";
 
     /// <summary>
+    /// The supervisor environment variable pdn injects with the NODE's own callsign (e.g.
+    /// <c>M9YYY</c> or <c>M9YYY-2</c>) into every supervised app. When the configured
+    /// <see cref="BbsHostConfig.Callsign"/> is still the placeholder (or blank) and this is set,
+    /// the BBS derives its on-air callsign as <c>&lt;node-base&gt;-&lt;ssid&gt;</c> (see
+    /// <see cref="Callsigns.DeriveFromNode"/>) instead of binding <c>N0CALL</c> — matching the
+    /// sibling apps (DAPPS, bpqchat, convers). An explicit, non-placeholder <c>callsign:</c> in
+    /// <c>bbs.yaml</c> always wins (no derivation). Standalone (no <c>PDN_NODE_CALLSIGN</c>) keeps
+    /// the placeholder.
+    /// </summary>
+    public const string PdnNodeCallsignEnv = "PDN_NODE_CALLSIGN";
+
+    /// <summary>
     /// The fixed loopback IMAP port the BBS serves PLAINTEXT under pdn; pdn's sidecar
     /// TLS-terminates :993 on the tailnet and forwards here (the <c>forward:</c> target in
     /// pdn-app.yaml must match this).
@@ -401,13 +434,82 @@ public static class BbsHostConfigFile
         return config with { Rhp = config.Rhp with { Host = host, Port = port } };
     }
 
+    /// <summary>
+    /// The resolved primary bind callsign and whether the RHP link should SSID-probe it.
+    /// </summary>
+    /// <param name="Callsign">The callsign to bind (normalised, incl. SSID).</param>
+    /// <param name="Probe">
+    /// True when the callsign was DERIVED from the node and should walk to the next free SSID if
+    /// the node refuses the listen with errCode 9 (a real, non-placeholder configured callsign or
+    /// a standalone placeholder never probes).
+    /// </param>
+    /// <param name="NodeCallsign">
+    /// The node's own callsign (<c>PDN_NODE_CALLSIGN</c>) the probe skips the SSID of, or null.
+    /// </param>
+    public readonly record struct ResolvedCallsign(string Callsign, bool Probe, string? NodeCallsign);
+
+    /// <summary>
+    /// Resolves the primary bind callsign (brief change #1). Precedence:
+    /// <list type="number">
+    ///   <item>An explicit, non-placeholder <c>callsign:</c> wins verbatim — no derivation, no probe.</item>
+    ///   <item>Otherwise, when the callsign is the placeholder (or blank) AND <c>PDN_NODE_CALLSIGN</c>
+    ///         is set: derive <c>&lt;node-base&gt;-<see cref="BbsHostConfig.DerivedDefaultSsid"/>&gt;</c>
+    ///         and mark it to PROBE for a free SSID on a duplicate-socket refusal.</item>
+    ///   <item>Otherwise (standalone, no node env): keep the configured placeholder, no probe.</item>
+    /// </list>
+    /// </summary>
+    public static ResolvedCallsign ResolveCallsign(BbsHostConfig config, Func<string, string?> getEnv)
+    {
+        ArgumentNullException.ThrowIfNull(config);
+        ArgumentNullException.ThrowIfNull(getEnv);
+
+        string configured = Callsigns.Normalize(config.Callsign ?? "");
+        bool isPlaceholder = configured.Length == 0
+            || string.Equals(configured, BbsHostConfig.PlaceholderCallsign, StringComparison.OrdinalIgnoreCase);
+
+        // An explicit, non-placeholder callsign always wins (no derivation, no probe).
+        if (!isPlaceholder)
+        {
+            return new ResolvedCallsign(configured, Probe: false, NodeCallsign: null);
+        }
+
+        string? nodeCallsign = getEnv(PdnNodeCallsignEnv);
+        string? derived = Callsigns.DeriveFromNode(nodeCallsign, BbsHostConfig.DerivedDefaultSsid);
+        if (derived is null)
+        {
+            // Standalone (or an unusable node callsign): keep the placeholder, no probe.
+            return new ResolvedCallsign(configured.Length == 0 ? BbsHostConfig.PlaceholderCallsign : configured,
+                Probe: false, NodeCallsign: null);
+        }
+
+        // The primary identity is the FIRST probe candidate, not the raw <base>-<defaultSsid>: when
+        // the default SSID collides with the node's own (the node runs at the default), the first
+        // candidate is already the next free, non-node SSID — so the BBS never adopts the node's own
+        // on-air callsign even before the duplicate-socket probe runs.
+        string node = Callsigns.Normalize(nodeCallsign!);
+        string primary = Callsigns.SsidProbeCandidates(derived, node)[0];
+        return new ResolvedCallsign(primary, Probe: true, NodeCallsign: node);
+    }
+
     /// <summary>The commented default written on first run.</summary>
     public const string DefaultYaml = """
         # pdn-bbs configuration — created on first run; edit and restart the app.
         #
         # callsign: the BBS callsign (+ optional SSID). This is the callsign the BBS
         #           binds over RHPv2 — users and partner BBSes connect to it.
+        #           Left at N0CALL it is a PLACEHOLDER: when the BBS runs UNDER pdn (the
+        #           supervisor sets PDN_NODE_CALLSIGN) it instead DERIVES <node-base>-1
+        #           from the node's callsign and, if -1 is already claimed on the node,
+        #           probes for the next free SSID (skipping 0 and the node's own SSID) —
+        #           exactly like the sibling apps (DAPPS -7, bpqchat -4). Set a real,
+        #           non-placeholder callsign here to PIN an identity: it then wins outright
+        #           (no derivation, no probe). Standalone (no PDN_NODE_CALLSIGN) keeps N0CALL.
         callsign: N0CALL
+
+        # serviceCallsign: a friendly alias bound IN ADDITION to callsign so users can
+        #                  "C BBS" to reach the mailbox (default "BBS"; "" disables it).
+        #                  Inbound connects to either callsign reach the same session.
+        serviceCallsign: BBS
 
         # sysop: the sysop's callsign (sysop rights on the console; sysop view in webmail).
         sysop: ""
@@ -613,7 +715,17 @@ public static class BbsHostConfigFile
         #
         # callsign: the BBS callsign (+ optional SSID). This is the callsign the BBS
         #           binds over RHPv2 — users and partner BBSes connect to it.
+        #           Left at N0CALL it is a PLACEHOLDER: under pdn the supervisor sets
+        #           PDN_NODE_CALLSIGN, so the BBS DERIVES <node-base>-1 from the node's
+        #           callsign and, if -1 is already claimed, probes for the next free SSID
+        #           (skipping 0 and the node's own SSID) — like the sibling apps (DAPPS -7,
+        #           bpqchat -4). Set a real callsign here to PIN it (then no derivation/probe).
         callsign: N0CALL
+
+        # serviceCallsign: a friendly alias bound IN ADDITION to callsign so users can
+        #                  "C BBS" to reach the mailbox (default "BBS"; "" disables it).
+        #                  Inbound connects to either callsign reach the same session.
+        serviceCallsign: BBS
 
         # sysop: the sysop's callsign (sysop rights on the console; sysop view in webmail).
         sysop: ""

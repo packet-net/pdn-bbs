@@ -297,4 +297,94 @@ public sealed class ConfigTests : IDisposable
         Assert.False(config.Imap.Enabled);
         Assert.False(config.Smtp.Enabled);
     }
+
+    // ----- Brief change #1: callsign derivation + the free-SSID probe (ResolveCallsign). -----
+
+    [Fact]
+    public void ResolveCallsign_PlaceholderUnderPdn_DerivesNodeDashSsid_AndProbes()
+    {
+        // Placeholder callsign + PDN_NODE_CALLSIGN present → derive <node-base>-1 and mark to probe.
+        var config = new BbsHostConfig { Callsign = BbsHostConfig.PlaceholderCallsign };
+        BbsHostConfigFile.ResolvedCallsign r = BbsHostConfigFile.ResolveCallsign(
+            config, key => key == BbsHostConfigFile.PdnNodeCallsignEnv ? "M9YYY" : null);
+
+        Assert.Equal("M9YYY-1", r.Callsign); // DerivedDefaultSsid = 1
+        Assert.True(r.Probe);
+        Assert.Equal("M9YYY", r.NodeCallsign);
+    }
+
+    [Fact]
+    public void ResolveCallsign_PlaceholderUnderPdn_StripsNodeOwnSsid()
+    {
+        // The node's own SSID is stripped before deriving (M9YYY-2 → BBS at M9YYY-1).
+        var config = new BbsHostConfig { Callsign = BbsHostConfig.PlaceholderCallsign };
+        BbsHostConfigFile.ResolvedCallsign r = BbsHostConfigFile.ResolveCallsign(
+            config, key => key == BbsHostConfigFile.PdnNodeCallsignEnv ? "M9YYY-2" : null);
+
+        Assert.Equal("M9YYY-1", r.Callsign);
+        Assert.True(r.Probe);
+        Assert.Equal("M9YYY-2", r.NodeCallsign); // kept whole so the probe can skip SSID 2
+    }
+
+    [Fact]
+    public void ResolveCallsign_NodeOwnsTheDefaultSsid_DoesNotAdoptTheNodeOwnCallsign()
+    {
+        // PDN_NODE_CALLSIGN=M9YYY-1 (node at the default BBS SSID): the resolved primary must NOT be
+        // the node's own callsign — it lands on the first free, non-node SSID instead.
+        var config = new BbsHostConfig { Callsign = BbsHostConfig.PlaceholderCallsign };
+        BbsHostConfigFile.ResolvedCallsign r = BbsHostConfigFile.ResolveCallsign(
+            config, key => key == BbsHostConfigFile.PdnNodeCallsignEnv ? "M9YYY-1" : null);
+
+        Assert.NotEqual("M9YYY-1", r.Callsign);
+        Assert.Equal("M9YYY-2", r.Callsign);
+        Assert.True(r.Probe);
+        Assert.Equal("M9YYY-1", r.NodeCallsign);
+    }
+
+    [Fact]
+    public void ResolveCallsign_ExplicitCallsign_WinsOutright_NoDerivationNoProbe()
+    {
+        // An explicit, non-placeholder callsign wins even with PDN_NODE_CALLSIGN set.
+        var config = new BbsHostConfig { Callsign = "GB7ABC-5" };
+        BbsHostConfigFile.ResolvedCallsign r = BbsHostConfigFile.ResolveCallsign(
+            config, key => key == BbsHostConfigFile.PdnNodeCallsignEnv ? "M9YYY" : null);
+
+        Assert.Equal("GB7ABC-5", r.Callsign);
+        Assert.False(r.Probe);
+        Assert.Null(r.NodeCallsign);
+    }
+
+    [Fact]
+    public void ResolveCallsign_Standalone_KeepsPlaceholder_NoProbe()
+    {
+        // No PDN_NODE_CALLSIGN → standalone keeps the placeholder, never probes.
+        var config = new BbsHostConfig { Callsign = BbsHostConfig.PlaceholderCallsign };
+        BbsHostConfigFile.ResolvedCallsign r = BbsHostConfigFile.ResolveCallsign(config, NoEnv);
+
+        Assert.Equal(BbsHostConfig.PlaceholderCallsign, r.Callsign);
+        Assert.False(r.Probe);
+        Assert.Null(r.NodeCallsign);
+    }
+
+    // ----- Brief change #2: the BBS service alias config knob. -----
+
+    [Fact]
+    public void ServiceCallsign_DefaultsToBbs_AndRoundTrips()
+    {
+        Assert.Equal("BBS", new BbsHostConfig().ServiceCallsign);
+
+        BbsHostConfig parsed = BbsHostConfigFile.Parse("callsign: GB7PDN\nserviceCallsign: MAIL");
+        Assert.Equal("MAIL", parsed.ServiceCallsign);
+
+        // The default YAML documents and round-trips the default alias.
+        Assert.Equal("BBS", BbsHostConfigFile.Parse(BbsHostConfigFile.DefaultYaml).ServiceCallsign);
+        Assert.Equal("BBS", BbsHostConfigFile.Parse(BbsHostConfigFile.PdnDefaultYaml).ServiceCallsign);
+    }
+
+    [Fact]
+    public void ServiceCallsign_EmptyDisablesTheAlias()
+    {
+        BbsHostConfig parsed = BbsHostConfigFile.Parse("callsign: GB7PDN\nserviceCallsign: \"\"");
+        Assert.Equal("", parsed.ServiceCallsign);
+    }
 }

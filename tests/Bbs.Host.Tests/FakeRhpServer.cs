@@ -29,6 +29,7 @@ internal sealed class FakeRhpServer : IAsyncDisposable
     private readonly List<Conn> _conns = [];
     private readonly ConcurrentDictionary<int, Channel<byte[]>> _hostBytes = new();
     private readonly ConcurrentDictionary<int, Conn> _handleConns = new();
+    private readonly ConcurrentDictionary<int, string> _handleLocals = new();
     private readonly ConcurrentDictionary<int, byte> _disconnectedHandles = new();
     private TcpListener? _listener;
     private CancellationTokenSource? _cts;
@@ -40,6 +41,17 @@ internal sealed class FakeRhpServer : IAsyncDisposable
 
     /// <summary>Every `bind` observed, in order.</summary>
     public Channel<BindRecord> Binds { get; } = Channel.CreateUnbounded<BindRecord>();
+
+    /// <summary>
+    /// Callsigns the node already has claimed: a `listen` whose bound local is in this set is
+    /// refused with errCode 9 ("Duplicate socket"), exactly as pdn refuses a listen on an
+    /// already-claimed callsign (incl. the node's own). Comparison is case-insensitive. Lets a
+    /// test drive the host's free-SSID probe and the service-alias duplicate path.
+    /// </summary>
+    public HashSet<string> ClaimedCallsigns { get; } = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>Every callsign that successfully `listen`ed (after a 0 reply), in order.</summary>
+    public Channel<string> Listened { get; } = Channel.CreateUnbounded<string>();
 
     /// <summary>Every `open`(Active) observed, in order (after the reply was sent).</summary>
     public Channel<OpenRecord> Opens { get; } = Channel.CreateUnbounded<OpenRecord>();
@@ -165,6 +177,22 @@ internal sealed class FakeRhpServer : IAsyncDisposable
 
     internal void OnHandleOwned(int handle, Conn conn) => _handleConns[handle] = conn;
 
+    internal void OnBound(int handle, string? local)
+    {
+        if (local is not null)
+        {
+            _handleLocals[handle] = local;
+        }
+    }
+
+    internal string? LocalForHandle(int handle) => _handleLocals.GetValueOrDefault(handle);
+
+    internal bool IsClaimed(string local) => ClaimedCallsigns.Contains(local);
+
+    /// <summary>Awaits the next callsign that successfully listened.</summary>
+    public async Task<string> WaitForListenedAsync(TimeSpan? timeout = null) =>
+        await Listened.Reader.ReadAsync().AsTask().WaitAsync(timeout ?? TestTimeout.Default).ConfigureAwait(false);
+
     /// <summary>
     /// Marks a child handle as far-end-disconnected: a subsequent host `send` on it is
     /// refused with errCode 17 ("Not connected"), exactly as the real node reports a write
@@ -285,15 +313,33 @@ internal sealed class FakeRhpServer : IAsyncDisposable
 
                 case "bind":
                     BoundLocal = request["local"]?.GetValue<string>();
+                    server.OnBound(handle, BoundLocal);
                     server.Binds.Writer.TryWrite(new BindRecord(handle, BoundLocal, request["port"]?.GetValue<string>()));
                     await ReplyAsync("bindReply", id, 0, handle).ConfigureAwait(false);
                     break;
 
                 case "listen":
+                {
+                    // pdn refuses a listen on an already-claimed callsign (incl. the node's own)
+                    // with errCode 9 "Duplicate socket" — the host's free-SSID probe trigger.
+                    string? local = server.LocalForHandle(handle);
+                    if (local is not null && server.IsClaimed(local))
+                    {
+                        await ReplyAsync("listenReply", id, 9, handle, "Duplicate socket").ConfigureAwait(false);
+                        break;
+                    }
+
                     ListenerHandle = handle;
+                    BoundLocal = local;
                     server.OnListen(this);
+                    if (local is not null)
+                    {
+                        server.Listened.Writer.TryWrite(local);
+                    }
+
                     await ReplyAsync("listenReply", id, 0, handle).ConfigureAwait(false);
                     break;
+                }
 
                 case "open":
                 {

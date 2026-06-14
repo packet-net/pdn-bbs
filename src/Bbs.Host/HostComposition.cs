@@ -42,7 +42,15 @@ public static class HostComposition
             ? iv.Split('+')[0]
             : "0.1.0";
 
-        string bindCallsign = Callsigns.Normalize(config.Callsign);
+        // Resolve the primary bind callsign (brief change #1): an explicit non-placeholder
+        // callsign wins; otherwise, under pdn (PDN_NODE_CALLSIGN set) derive <node-base>-1 and
+        // mark it to probe for a free SSID; standalone keeps the placeholder. The actual bound
+        // callsign (after any probe) lives on the link as BoundCallsign — what the link reports
+        // when it logs "Bound …". The prompt/identity below use the derived default; the base
+        // callsign (routing/R-lines) is SSID-insensitive, so a probe-walked SSID never affects it.
+        BbsHostConfigFile.ResolvedCallsign resolved =
+            BbsHostConfigFile.ResolveCallsign(config, Environment.GetEnvironmentVariable);
+        string bindCallsign = resolved.Callsign;
         string baseCallsign = Callsigns.StripSsid(bindCallsign);
         var time = TimeProvider.System;
 
@@ -83,6 +91,13 @@ public static class HostComposition
             Host = config.Rhp.Host!,
             Port = config.Rhp.Port!.Value,
             BindCallsign = bindCallsign,
+            ProbeSsid = resolved.Probe,
+            NodeCallsign = resolved.NodeCallsign,
+            // Brief change #2: additionally bind the friendly service alias ("BBS" by default; empty
+            // disables it) so users can `C BBS`. Inbound to either callsign routes to the same demux.
+            ServiceCallsign = string.IsNullOrWhiteSpace(config.ServiceCallsign)
+                ? null
+                : Callsigns.Normalize(config.ServiceCallsign),
             User = config.Rhp.User,
             Pass = config.Rhp.Pass,
         };
@@ -202,6 +217,12 @@ public static class HostComposition
         {
             log.PlaceholderCallsign(BbsHostConfigFile.FileName);
         }
+        else if (resolved.Probe)
+        {
+            // The callsign was derived from the node (PDN_NODE_CALLSIGN). Log it clearly; the link
+            // logs the FINAL bound callsign when it binds (after any free-SSID probe).
+            log.DerivedCallsign(bindCallsign, resolved.NodeCallsign ?? "", BbsHostConfigFile.FileName);
+        }
 
         // Wire the routing → scheduler nudge and sweep the startup backlog (messages stored
         // before a restart that never reached a queue; idempotent for the rest).
@@ -252,6 +273,10 @@ internal static partial class ProgramLog
     [LoggerMessage(EventId = 2, Level = LogLevel.Warning,
         Message = "The BBS callsign is still the N0CALL placeholder — set callsign in {File}")]
     public static partial void PlaceholderCallsign(this ILogger logger, string file);
+
+    [LoggerMessage(EventId = 4, Level = LogLevel.Information,
+        Message = "BBS callsign {Callsign} derived from the node ({NodeCallsign}); the RHP link probes for a free SSID if it is taken. Set callsign in {File} to pin a different identity")]
+    public static partial void DerivedCallsign(this ILogger logger, string callsign, string nodeCallsign, string file);
 
     [LoggerMessage(EventId = 3, Level = LogLevel.Information,
         Message = "pdn-bbs {Version}: callsign {Callsign}, RHP {RhpHost}:{RhpPort}, webmail {WebBind}:{WebPort}")]

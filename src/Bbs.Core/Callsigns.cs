@@ -68,6 +68,86 @@ public static partial class Callsigns
         return normalized.Length > 0 && CallsignShapeRegex().IsMatch(normalized);
     }
 
+    /// <summary>
+    /// Derives the BBS's on-air callsign from the node's own callsign (the supervisor's
+    /// <c>PDN_NODE_CALLSIGN</c>): the base of <paramref name="nodeCallsign"/> — upper-cased,
+    /// any SSID stripped — joined to <paramref name="ssid"/> as <c>&lt;base&gt;-&lt;ssid&gt;</c>.
+    /// Matches the sibling-app convention (DAPPS, bpqchat, convers all do
+    /// <c>&lt;node-base&gt;-&lt;ssid&gt;</c>). Returns null when <paramref name="nodeCallsign"/>
+    /// is null/blank (a standalone deployment with no node) — the caller then keeps its
+    /// configured/placeholder callsign.
+    /// </summary>
+    public static string? DeriveFromNode(string? nodeCallsign, int ssid)
+    {
+        if (string.IsNullOrWhiteSpace(nodeCallsign))
+        {
+            return null;
+        }
+
+        string baseCall = StripSsid(Normalize(nodeCallsign));
+        return baseCall.Length == 0 ? null : $"{baseCall}-{ssid}";
+    }
+
+    /// <summary>
+    /// The full SSID-probe order for a callsign derived from the node (the free-SSID walk the RHP
+    /// link runs when a listen is refused with errCode 9 "Duplicate socket"). Walks SSIDs starting
+    /// at the derivation's own SSID and wrapping (start … 15, then 1 … start−1), each as
+    /// <c>&lt;base&gt;-&lt;ssid&gt;</c>. BOTH skip rules apply to EVERY candidate including the first:
+    /// SSID 0 (the node's bare callsign) is never produced, and the SSID the node itself uses (parsed
+    /// off <paramref name="nodeCallsign"/>) is skipped — so even when the preferred SSID collides with
+    /// the node's own (e.g. the node runs at -1 and the BBS default is also 1) the FIRST candidate is
+    /// already a free, non-node SSID, never the node's own on-air identity. Matches the DAPPS probe
+    /// order so the sibling apps tile the SSID space the same way.
+    /// </summary>
+    public static IReadOnlyList<string> SsidProbeCandidates(string derivedCallsign, string? nodeCallsign)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(derivedCallsign);
+
+        int dash = derivedCallsign.LastIndexOf('-');
+        string baseCall = dash > 0 ? derivedCallsign[..dash] : derivedCallsign;
+        int start = dash > 0 && int.TryParse(
+            derivedCallsign[(dash + 1)..], System.Globalization.NumberStyles.None,
+            System.Globalization.CultureInfo.InvariantCulture, out int s) ? s : 0;
+
+        // The walk lives in 1..15, so anchor an out-of-range/zero preferred SSID at 1.
+        if (start is < 1 or > 15)
+        {
+            start = 1;
+        }
+
+        int nodeSsid = ParseSsid(nodeCallsign);
+
+        var candidates = new List<string>(15);
+        for (int offset = 0; offset < 15; offset++)
+        {
+            int ssid = ((start - 1 + offset) % 15) + 1; // start, start+1 … 15, then 1 … start−1; never 0
+            if (ssid == nodeSsid)
+            {
+                continue; // skip the node's own SSID — including as the very first candidate
+            }
+
+            candidates.Add($"{baseCall}-{ssid}");
+        }
+
+        return candidates;
+    }
+
+    /// <summary>The SSID parsed off a callsign's <c>-NN</c> suffix, or 0 when there is none.</summary>
+    private static int ParseSsid(string? call)
+    {
+        if (string.IsNullOrWhiteSpace(call))
+        {
+            return 0;
+        }
+
+        int dash = call.LastIndexOf('-');
+        return dash > 0 && int.TryParse(
+            call[(dash + 1)..], System.Globalization.NumberStyles.None,
+            System.Globalization.CultureInfo.InvariantCulture, out int ssid)
+            ? ssid
+            : 0;
+    }
+
     [GeneratedRegex("^[A-Z0-9]{1,2}[0-9][A-Z]{1,4}$", RegexOptions.CultureInvariant)]
     private static partial Regex CallsignShapeRegex();
 }

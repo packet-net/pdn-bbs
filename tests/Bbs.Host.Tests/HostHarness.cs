@@ -24,7 +24,12 @@ internal sealed class HostHarness : IAsyncDisposable
     private readonly CancellationTokenSource _cts = new();
     private readonly List<Task> _loops = [];
 
-    public HostHarness(TimeSpan? firstLineWait = null)
+    public HostHarness(
+        TimeSpan? firstLineWait = null,
+        string bindCallsign = OwnCall,
+        bool probeSsid = false,
+        string? nodeCallsign = null,
+        string? serviceCallsign = null)
     {
         _dir = Directory.CreateTempSubdirectory("bbs-host-test-");
         Time = new FakeTimeProvider(new DateTimeOffset(2026, 6, 11, 12, 0, 0, TimeSpan.Zero));
@@ -43,7 +48,10 @@ internal sealed class HostHarness : IAsyncDisposable
             {
                 Host = "127.0.0.1",
                 Port = Server.Port,
-                BindCallsign = OwnCall,
+                BindCallsign = bindCallsign,
+                ProbeSsid = probeSsid,
+                NodeCallsign = nodeCallsign,
+                ServiceCallsign = serviceCallsign,
             },
             Time,
             NullLogger<RhpNodeLink>.Instance);
@@ -107,6 +115,12 @@ internal sealed class HostHarness : IAsyncDisposable
         _loops.Add(Link.RunAsync(_cts.Token));
         await Server.WaitForListenAsync().ConfigureAwait(false);
     }
+
+    /// <summary>
+    /// Starts the link loop WITHOUT waiting for it to listen — for the case where the configured
+    /// callsign is taken and a non-probing link never comes up (so there is no listen to await).
+    /// </summary>
+    public void StartLinkInBackground() => _loops.Add(Link.RunAsync(_cts.Token));
 
     /// <summary>Starts the inbound demux loop.</summary>
     public void StartDemux() => _loops.Add(Demux.RunAsync(_cts.Token));

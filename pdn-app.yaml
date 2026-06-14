@@ -7,16 +7,19 @@
 # packet plane, the app-gateway identity contract for webmail.
 #
 # FIRST-RUN CONFIG — read before enabling: on first start pdn-bbs writes a commented
-# default bbs.yaml into its state dir (/var/lib/packetnet/apps/bbs) and keeps running
-# with the N0CALL placeholder callsign. Edit bbs.yaml — at minimum `callsign:` (the
-# callsign the BBS binds over RHPv2), plus `sysop:`, `hRoute:` and your forwarding
-# `partners:` — then disable/enable (or restart) the app. PDN_RHP_HOST/PDN_RHP_PORT
-# come from the supervisor environment; the message store (bbs.db) lives in the same
-# state dir. The webmail port below MUST match `web.port` in bbs.yaml.
+# default bbs.yaml into its state dir (/var/lib/packetnet/apps/bbs). UNDER PDN it does
+# NOT need a callsign edited in: with the placeholder it DERIVES its on-air callsign from
+# the node (<node-base>-1, probing for a free SSID if -1 is taken — like DAPPS/bpqchat),
+# and additionally binds the friendly service alias `BBS` so users can `C BBS`. Set
+# `callsign:` in bbs.yaml only to PIN a specific identity (it then wins over derivation).
+# You will still usually want `sysop:`, `hRoute:` and your forwarding `partners:` —
+# edit then disable/enable (or restart) the app. PDN_RHP_HOST/PDN_RHP_PORT and
+# PDN_NODE_CALLSIGN come from the supervisor environment; the message store (bbs.db)
+# lives in the same state dir. The webmail port below MUST match `web.port` in bbs.yaml.
 manifest: 1
 id: bbs                       # must equal the package directory name
 name: BBS
-version: "0.2.0"
+version: "0.2.1"
 description: Packet-radio mailbox — personal mail, bulletins and NTS traffic with FBB-compatible store-and-forward and webmail.
 icon: mail
 capabilities: [network, web]  # binds its own callsign over RHPv2; serves its own web UI
