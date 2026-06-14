@@ -237,7 +237,13 @@ public static class HostComposition
             // The same per-user settings singleton the console session uses — a webmail
             // interface-mode flip is the persisted choice the next console connect reads.
             Settings = app.Services.GetRequiredService<IUserSettingsStore>(),
-            BbsCallsign = baseCallsign,
+            // The webmail header/title is the BBS's user-visible identity, so it must match
+            // what the BBS actually binds + answers on (the full bound callsign incl. SSID,
+            // e.g. M9YYY-1) — NOT the SSID-stripped base. Same call the console prompt uses
+            // (BbsCallsign = bindCallsign, line ~81). The base call stays at the FBB wire
+            // layer only (BbsIdentity.Callsign → R: lines/BIDs/B2 Mbo), where mail is
+            // conventionally addressed SSID-less.
+            BbsCallsign = bindCallsign,
             SysopCallsign = config.Sysop,
         });
 

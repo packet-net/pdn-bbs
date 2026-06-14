@@ -55,6 +55,36 @@ public sealed class HostCompositionTests
         Assert.Equal("GB7PDN ready, what next? 73 - thanks for calling GB7PDN. See you next time.", await peer.ReadLineAsync());
         await peer.WaitForHostCloseAsync();
     }
+
+    /// <summary>
+    /// Regression (lab, 2026-06-13): under pdn the BBS derives + binds + answers as
+    /// <c>&lt;node-base&gt;-1</c> (e.g. M9YYY-1), but the webmail header showed the bare
+    /// SSID-stripped node call (M9YYY), reading as the node's own identity (-0). The
+    /// user-visible identity must match what the BBS binds — the FULL bound callsign incl.
+    /// SSID — while the SSID-less base stays at the FBB wire layer (R: lines/BIDs/Mbo).
+    /// This pins the rendered webmail identity to the bound callsign through the exact
+    /// production composition with the callsign DERIVED from PDN_NODE_CALLSIGN.
+    /// </summary>
+    [Fact]
+    public async Task ComposedHost_WebmailIdentity_IsTheBoundCallsignWithSsid_WhenDerivedUnderPdn()
+    {
+        await using var host = await ComposedHost.BuildAsync(start: true, nodeCallsign: "M9YYY");
+
+        // The BBS identity header renders on the callsign-mapped surfaces (the inbox), so link
+        // the pdn user to a callsign first — an unmapped user only sees the claim form.
+        host.Store.UpsertUser(new User { Callsign = "M0ABC", PdnUsername = "tom" });
+
+        using var client = new HttpClient { BaseAddress = new Uri(host.App.Urls.First()) };
+        client.DefaultRequestHeaders.Add("X-Pdn-Gateway", "1");
+        client.DefaultRequestHeaders.Add("X-Pdn-User", "tom");
+
+        string html = await client.GetStringAsync("/");
+
+        // The webmail header + title present the BBS identity. It must be the bound callsign
+        // (derived <node-base>-1 = M9YYY-1, including the SSID) — never the bare node call.
+        Assert.Contains("M9YYY-1", html, StringComparison.Ordinal);
+        Assert.DoesNotContain("M9YYY <span class=\"dim\">webmail</span>", html, StringComparison.Ordinal);
+    }
 }
 
 /// <summary>
@@ -81,15 +111,22 @@ internal sealed class ComposedHost : IAsyncDisposable
 
     public BbsStore Store => App.Services.GetRequiredService<BbsStore>();
 
-    /// <summary>Builds (and with <paramref name="start"/>, starts) the composed host.</summary>
-    public static async Task<ComposedHost> BuildAsync(bool start)
+    /// <summary>
+    /// Builds (and with <paramref name="start"/>, starts) the composed host. With
+    /// <paramref name="nodeCallsign"/> set, the yaml omits an explicit callsign and
+    /// <c>PDN_NODE_CALLSIGN</c> is exported so the BBS DERIVES its identity (the pdn path,
+    /// <c>&lt;node-base&gt;-1</c>); otherwise it pins <c>GB7PDN</c> directly.
+    /// </summary>
+    public static async Task<ComposedHost> BuildAsync(bool start, string? nodeCallsign = null)
     {
         var server = new FakeRhpServer();
         server.Start();
         DirectoryInfo dir = Directory.CreateTempSubdirectory("bbs-composed-test-");
+        // Under derivation (nodeCallsign set) omit the explicit callsign so ResolveCallsign
+        // takes the PDN_NODE_CALLSIGN path; otherwise pin GB7PDN as before.
+        string callsignLine = nodeCallsign is null ? "callsign: GB7PDN\n" : "";
         await File.WriteAllTextAsync(Path.Combine(dir.FullName, "bbs.yaml"), $"""
-            callsign: GB7PDN
-            sysop: M0LTE
+            {callsignLine}sysop: M0LTE
             hRoute: "#23.GBR.EURO"
             web:
               bind: 127.0.0.1
@@ -101,17 +138,20 @@ internal sealed class ComposedHost : IAsyncDisposable
             demuxFirstLineWaitSeconds: 30
             """);
 
-        // HostComposition.Build reads PDN_APP_STATE synchronously; restore straight after.
+        // HostComposition.Build reads PDN_APP_STATE + PDN_NODE_CALLSIGN synchronously; restore straight after.
         string? previous = Environment.GetEnvironmentVariable("PDN_APP_STATE");
+        string? previousNode = Environment.GetEnvironmentVariable("PDN_NODE_CALLSIGN");
         WebApplication app;
         try
         {
             Environment.SetEnvironmentVariable("PDN_APP_STATE", dir.FullName);
+            Environment.SetEnvironmentVariable("PDN_NODE_CALLSIGN", nodeCallsign);
             app = HostComposition.Build([]);
         }
         finally
         {
             Environment.SetEnvironmentVariable("PDN_APP_STATE", previous);
+            Environment.SetEnvironmentVariable("PDN_NODE_CALLSIGN", previousNode);
         }
 
         var host = new ComposedHost(server, app, dir, start);
