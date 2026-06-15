@@ -6,27 +6,33 @@ using Microsoft.Extensions.Logging;
 namespace Bbs.Host.Forwarding;
 
 /// <summary>
-/// A connect script failed (failure text from the node, or a response/SID wait timing
-/// out). The message carries the attempt transcript — what we sent, what came back,
-/// where it stopped (forwarding.md wart 4 / wave F-0).
+/// A connect script failed (failure text from the node, an expect that never arrived, or a
+/// response/SID wait timing out). The message carries the attempt transcript — what we sent,
+/// what came back, where it stopped (forwarding.md wart 4 / wave F-0).
 /// </summary>
 public sealed class ConnectScriptException(string message) : Exception(message);
 
 /// <summary>
-/// Executes a <see cref="ConnectPlan"/>'s post-connect steps over an open RHP child —
-/// the spec §4.4 implicit flow ("you don't need to program the node responses - the
-/// software knows what to look for"):
+/// Executes a <see cref="ConnectPlan"/>'s post-connect steps over an open RHP child. The step
+/// model is expect/send, ported from pdn-bpqchat's <c>RunWithScript</c>:
 ///
 /// <list type="bullet">
-/// <item>Each <see cref="SendLineStep"/> goes out verbatim, CR-terminated (the node
-/// command-line discipline). After every line except the last, the runner waits for the
-/// node's progress before the next — a line containing <c>" CONNECTED"</c> (the leading
+/// <item>For each <see cref="ExpectSendStep"/> with a non-empty <c>Expect</c>, the runner reads
+/// the node stream until that case-insensitive substring appears (a node prompt has no line
+/// terminator, so the match is against accumulated bytes, not lines), bounded by the partner's
+/// ConTimeout; THEN, if <c>Send</c> is non-empty, it sends it CR-terminated and logs
+/// "matched … sent …". This confirms each hop (its prompt seen) before issuing the next command
+/// — what makes a multi-hop walk reliable when round-trip times vary.</item>
+/// <item>A send-only step (empty <c>Expect</c> — a bare script line, the legacy verbatim form)
+/// goes out verbatim, CR-terminated; after every send-only step except the last the runner waits
+/// for the node's progress before the next — a line containing <c>" CONNECTED"</c> (the leading
 /// space is BPQ's own guard against matching DISCONNECTED), starting <c>OK</c>, or a
-/// <c>&gt;</c>-terminated prompt line.</item>
-/// <item>After the LAST line it waits for a SID or <c>&gt;</c> (spec §4.4 verbatim) and
-/// returns the SID line plus any unconsumed tail for the FBB caller session; node chatter
-/// observed on the way (CTEXT, <c>*** Connected to …</c> progress lines) is consumed
-/// here, where it belongs, so the FBB FSM sees a clean stream.</item>
+/// <c>&gt;</c>-terminated prompt line — exactly as before this change ("you don't need to program
+/// the node responses - the software knows what to look for", spec §4.4).</item>
+/// <item>After the LAST step it waits for a SID or <c>&gt;</c> (spec §4.4) and returns the SID
+/// line plus any unconsumed tail for the FBB caller session; node chatter observed on the way
+/// (CTEXT, <c>*** Connected to …</c> progress lines) is consumed here, where it belongs, so the
+/// FBB FSM sees a clean stream.</item>
 /// <item>Failure text at any point — BUSY / FAILURE / SORRY / INVALID / RETRIED /
 /// <c>ERROR - </c> / UNABLE TO CONNECT / DISCONNECTED / FAILED TO CONNECT / REJECTED
 /// (the spec §4.4 ELSE-detection list) — fails the cycle, as does a wait exceeding the
@@ -34,11 +40,11 @@ public sealed class ConnectScriptException(string message) : Exception(message);
 /// the scheduler retries with backoff.</item>
 /// </list>
 ///
-/// Named deviations from LinBPQ (spec §4.4): the failure/progress scans are
+/// Named deviations from LinBPQ (spec §4.4): the failure/progress/expect scans are
 /// case-insensitive (a tolerant superset of BPQ's exact-case scan), and ConTimeout bounds
-/// each response wait rather than the whole handshake. With no steps at all the runner is
-/// a no-op — the bare-open path (dialling a BBS application callsign directly) keeps
-/// today's behaviour, where the FBB caller FSM itself waits out the SID.
+/// each wait rather than the whole handshake. With no steps at all the runner is a no-op —
+/// the bare-open path (dialling a BBS application callsign directly) keeps today's behaviour,
+/// where the FBB caller FSM itself waits out the SID.
 /// </summary>
 public static class ConnectScriptRunner
 {
@@ -52,8 +58,8 @@ public static class ConnectScriptRunner
     /// <summary>
     /// Runs the plan's steps; returns the bytes the FBB caller session must see first
     /// (the SID line + tail once the post-script SID-wait completed; empty for a stepless
-    /// plan). Throws <see cref="ConnectScriptException"/> on failure text or a timed-out
-    /// wait.
+    /// plan). Throws <see cref="ConnectScriptException"/> on failure text, an expect that
+    /// never arrives, or a timed-out wait.
     /// </summary>
     public static async Task<byte[]> RunAsync(
         RhpChildConnection child,
@@ -75,7 +81,7 @@ public static class ConnectScriptRunner
 
         var buffer = new ScriptLineBuffer();
         var transcript = new List<string>();
-        int lastSend = LastSendIndex(plan.Steps);
+        int lastStep = plan.Steps.Count - 1;
         for (int i = 0; i < plan.Steps.Count; i++)
         {
             switch (plan.Steps[i])
@@ -84,12 +90,31 @@ public static class ConnectScriptRunner
                     await Task.Delay(pause.Delay, time, cancellationToken).ConfigureAwait(false);
                     break;
 
-                case SendLineStep send:
-                    LogScriptSend(logger, child.RemoteCallsign, send.Line, null);
-                    transcript.Add("> " + send.Line);
-                    await child.SendAsync(Encoding.Latin1.GetBytes(send.Line + "\r"), cancellationToken)
-                        .ConfigureAwait(false);
-                    if (i != lastSend)
+                case ExpectSendStep step:
+                    if (step.Expect.Length > 0)
+                    {
+                        // Expect/send (bpqchat ScriptStep): wait for the prompt BEFORE sending.
+                        await ExpectAsync(
+                            child, buffer, transcript, step.Expect,
+                            responseWait, time, cancellationToken).ConfigureAwait(false);
+                    }
+
+                    if (step.Send.Length > 0)
+                    {
+                        LogScriptSend(logger, child.RemoteCallsign, step.Send, null);
+                        transcript.Add("> " + step.Send);
+                        await child.SendAsync(Encoding.Latin1.GetBytes(step.Send + "\r"), cancellationToken)
+                            .ConfigureAwait(false);
+                        if (step.Expect.Length > 0)
+                        {
+                            LogScriptMatched(logger, child.RemoteCallsign, step.Expect, step.Send, null);
+                        }
+                    }
+
+                    // A send-only step (legacy verbatim) keeps the inter-line progress wait so
+                    // existing bare-line scripts behave exactly as before. An expect step already
+                    // synchronised on its prompt, so it needs no post-send wait.
+                    if (step.Expect.Length == 0 && step.Send.Length > 0 && i != lastStep)
                     {
                         await WaitForAsync(
                             child, buffer, transcript, IsProgress, "node progress",
@@ -115,6 +140,63 @@ public static class ConnectScriptRunner
         head.CopyTo(initial, 0);
         tail.CopyTo(initial, head.Length);
         return initial;
+    }
+
+    /// <summary>
+    /// Reads inbound bytes until the case-insensitive substring <paramref name="want"/> appears
+    /// in the accumulated stream (a node prompt carries no line terminator — bpqchat's
+    /// byte-window expect). Bytes up to and including the match are consumed (any complete lines
+    /// within them are logged and failure-checked); the remainder stays buffered for the next
+    /// step or the SID wait. Failure text or an empty <paramref name="wait"/> window fail the
+    /// cycle, carrying the attempt transcript.
+    /// </summary>
+    private static async Task ExpectAsync(
+        RhpChildConnection child,
+        ScriptLineBuffer buffer,
+        List<string> transcript,
+        string want,
+        TimeSpan wait,
+        TimeProvider time,
+        CancellationToken cancellationToken)
+    {
+        using var timeout = new CancellationTokenSource(wait, time);
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeout.Token);
+        while (true)
+        {
+            // Failure text anywhere in the complete lines seen so far fails the cycle, even if
+            // the awaited prompt would otherwise be matched later.
+            while (buffer.TryPeekFailingLine(out string failing))
+            {
+                transcript.Add("< " + failing);
+                throw new ConnectScriptException(
+                    $"connect script failed: node said \"{failing}\"{Render(transcript)}");
+            }
+
+            if (buffer.TryConsumeThrough(want))
+            {
+                transcript.Add("< (matched \"" + want + "\")");
+                return;
+            }
+
+            byte[]? data;
+            try
+            {
+                data = await child.ReceiveAsync(linked.Token).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (timeout.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
+            {
+                throw new ConnectScriptException(
+                    $"connect script timed out after {wait.TotalSeconds:0}s waiting for \"{want}\"{Render(transcript)}");
+            }
+
+            if (data is null)
+            {
+                throw new ConnectScriptException(
+                    $"the link dropped while waiting for \"{want}\"{Render(transcript)}");
+            }
+
+            buffer.Feed(data);
+        }
     }
 
     /// <summary>
@@ -183,19 +265,6 @@ public static class ConnectScriptRunner
     private static string Render(List<string> transcript) =>
         transcript.Count == 0 ? "; transcript: (nothing exchanged)" : "; transcript: " + string.Join(" | ", transcript);
 
-    private static int LastSendIndex(IReadOnlyList<ConnectScriptStep> steps)
-    {
-        for (int i = steps.Count - 1; i >= 0; i--)
-        {
-            if (steps[i] is SendLineStep)
-            {
-                return i;
-            }
-        }
-
-        return -1;
-    }
-
     private static bool IsFailure(string line) =>
         FailureMarkers.Any(m => line.Contains(m, StringComparison.OrdinalIgnoreCase));
 
@@ -211,7 +280,8 @@ public static class ConnectScriptRunner
 
     /// <summary>
     /// Line framing over a raw byte tail: CR/LF/CRLF-tolerant line pops with the
-    /// unconsumed remainder recoverable — the FBB handoff needs bytes, not lines.
+    /// unconsumed remainder recoverable — the FBB handoff needs bytes, not lines. Also
+    /// supports the substring-based expect (a node prompt has no line terminator).
     /// </summary>
     private sealed class ScriptLineBuffer
     {
@@ -219,6 +289,56 @@ public static class ConnectScriptRunner
         private bool _skipNextLf;
 
         public void Feed(byte[] data) => _buffer.AddRange(data);
+
+        /// <summary>
+        /// If a complete line whose text contains a failure marker is already buffered (anywhere
+        /// before the next terminator), pops and returns it. Lets the expect wait surface node
+        /// failure text instead of blocking until ConTimeout.
+        /// </summary>
+        public bool TryPeekFailingLine(out string failing)
+        {
+            failing = "";
+            int idx = TerminatorIndex();
+            if (idx < 0)
+            {
+                return false;
+            }
+
+            string line = Encoding.Latin1.GetString([.. _buffer[..idx]]);
+            if (!IsFailure(line))
+            {
+                return false;
+            }
+
+            ConsumeLineAt(idx);
+            failing = line;
+            return true;
+        }
+
+        /// <summary>
+        /// If the accumulated bytes contain <paramref name="want"/> (case-insensitive), consumes
+        /// everything up to AND including the match and returns true; the bytes after the match
+        /// stay buffered. Otherwise leaves the buffer untouched and returns false.
+        /// </summary>
+        public bool TryConsumeThrough(string want)
+        {
+            if (want.Length == 0)
+            {
+                return true;
+            }
+
+            string haystack = Encoding.Latin1.GetString([.. _buffer]);
+            int at = haystack.IndexOf(want, StringComparison.OrdinalIgnoreCase);
+            if (at < 0)
+            {
+                return false;
+            }
+
+            int through = at + want.Length;
+            _buffer.RemoveRange(0, through);
+            _skipNextLf = false;
+            return true;
+        }
 
         public bool TryTakeLine(out string line)
         {
@@ -233,22 +353,44 @@ public static class ConnectScriptRunner
                 _skipNextLf = false;
             }
 
-            int idx = -1;
-            for (int i = 0; i < _buffer.Count; i++)
-            {
-                if (_buffer[i] is 0x0D or 0x0A)
-                {
-                    idx = i;
-                    break;
-                }
-            }
-
+            int idx = TerminatorIndex();
             if (idx < 0)
             {
                 return false;
             }
 
             line = Encoding.Latin1.GetString([.. _buffer[..idx]]);
+            ConsumeLineAt(idx);
+            return true;
+        }
+
+        public byte[] TakeRemaining()
+        {
+            if (_skipNextLf && _buffer.Count > 0 && _buffer[0] == 0x0A)
+            {
+                _buffer.RemoveAt(0);
+            }
+
+            byte[] rest = [.. _buffer];
+            _buffer.Clear();
+            return rest;
+        }
+
+        private int TerminatorIndex()
+        {
+            for (int i = 0; i < _buffer.Count; i++)
+            {
+                if (_buffer[i] is 0x0D or 0x0A)
+                {
+                    return i;
+                }
+            }
+
+            return -1;
+        }
+
+        private void ConsumeLineAt(int idx)
+        {
             int remove = idx + 1;
             if (_buffer[idx] == 0x0D)
             {
@@ -266,19 +408,6 @@ public static class ConnectScriptRunner
             }
 
             _buffer.RemoveRange(0, remove);
-            return true;
-        }
-
-        public byte[] TakeRemaining()
-        {
-            if (_skipNextLf && _buffer.Count > 0 && _buffer[0] == 0x0A)
-            {
-                _buffer.RemoveAt(0);
-            }
-
-            byte[] rest = [.. _buffer];
-            _buffer.Clear();
-            return rest;
         }
     }
 
@@ -289,4 +418,8 @@ public static class ConnectScriptRunner
     private static readonly Action<ILogger, string, string, Exception?> LogScriptLine =
         LoggerMessage.Define<string, string>(LogLevel.Debug, new EventId(2, "ScriptLine"),
             "Connect script to {Remote}: node said \"{Line}\"");
+
+    private static readonly Action<ILogger, string, string, string, Exception?> LogScriptMatched =
+        LoggerMessage.Define<string, string, string>(LogLevel.Information, new EventId(3, "ScriptMatched"),
+            "Connect script to {Remote}: matched \"{Expect}\", sent \"{Send}\"");
 }

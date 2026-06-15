@@ -1074,7 +1074,7 @@ public static class Webmail
             <fieldset>
             <legend>{H(title)}</legend>
             <p><label>Partner callsign<br>{callField}</label></p>
-            <p><label>Connect script <span class="dim">— one line each; the first line names the dial (e.g. <code>C GB7BPQ</code>), later lines are sent verbatim (e.g. <code>BBS</code> at a node prompt)</span><br>
+            <p><label>Connect script <span class="dim">— one line each. The first line names the dial (e.g. <code>C GB7BPQ</code>). Later lines are <code>EXPECT=SEND</code> steps: wait for the text before the <code>=</code> on the link, then send the text after it — e.g. <code>GB7RDG&gt;=BBS</code> waits for the node prompt, then sends <code>BBS</code>. A line with no <code>=</code> is send-only (no wait), e.g. <code>BBS</code></span><br>
             <textarea name="connectScript" rows="3" cols="48" placeholder="C GB7BPQ">{H(script)}</textarea></label></p>
             <p><label>@ addresses <span class="dim">— routes this partner serves; <code>*</code> is the catch-all default uplink (space-separated)</span><br>
             <input name="at" size="48" value="{H(at)}" placeholder="* or GB7BPQ"></label></p>

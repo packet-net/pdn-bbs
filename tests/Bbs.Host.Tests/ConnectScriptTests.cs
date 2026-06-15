@@ -5,13 +5,21 @@ namespace Bbs.Host.Tests;
 
 /// <summary>
 /// Connect-script resolution (compat spec §4.4): the first <c>C [port] &lt;target&gt;</c>
-/// names the RHP open; every later line is a post-connect step sent verbatim;
-/// <c>PAUSE n</c> delays; the directives BPQ interprets locally are recognised, warned
-/// and kept off the wire.
+/// names the RHP open; every later line is an expect/send post-connect step
+/// (<c>EXPECT=SEND</c> split on the first <c>=</c>; a bare line is send-only — the legacy
+/// verbatim form); <c>PAUSE n</c> delays; the directives BPQ interprets locally are
+/// recognised, warned and kept off the wire.
 /// </summary>
 public class ConnectScriptTests
 {
     private static Partner PartnerWith(params string[] script) => new() { Call = "GB7BPQ", ConnectScript = script };
+
+    /// <summary>The (Expect, Send) pair of a step, for terse equality assertions.</summary>
+    private static (string Expect, string Send) Pair(ConnectScriptStep step)
+    {
+        ExpectSendStep es = Assert.IsType<ExpectSendStep>(step);
+        return (es.Expect, es.Send);
+    }
 
     [Fact]
     public void EmptyScript_DialsThePartnerCallWithNoSteps()
@@ -45,26 +53,78 @@ public class ConnectScriptTests
     }
 
     [Fact]
-    public void LinesAfterTheConnectStep_BecomeVerbatimSendSteps()
+    public void BareLinesAfterTheConnectStep_BecomeSendOnlySteps()
     {
-        // The classic navigation: dial the node, then enter its BBS (spec §4.4).
+        // The classic navigation: dial the node, then enter its BBS (spec §4.4). A bare
+        // line (no '=') is send-only — Expect empty — preserving the legacy verbatim form.
         ConnectPlan plan = ConnectScript.Resolve(PartnerWith("C GB7BPQ", "BBS"));
         Assert.Equal("GB7BPQ", plan.Target);
-        SendLineStep step = Assert.IsType<SendLineStep>(Assert.Single(plan.Steps));
-        Assert.Equal("BBS", step.Line);
+        ExpectSendStep step = Assert.IsType<ExpectSendStep>(Assert.Single(plan.Steps));
+        Assert.Equal("", step.Expect);
+        Assert.Equal("BBS", step.Send);
         Assert.Empty(plan.Warnings);
     }
 
     [Fact]
-    public void SecondCLine_IsAVerbatimNodeCommandNotANewTarget()
+    public void ExpectSendLine_BecomesAnExpectThenSendStep()
     {
-        // Spec §4.4's verbatim model: only the FIRST C names the open; a later C is a
-        // node-level connect command typed at the connected node's prompt.
+        // EXPECT=SEND (split on the first '='): wait for the node prompt, then send.
+        ConnectPlan plan = ConnectScript.Resolve(PartnerWith("C GB7RDG", "GB7RDG}=BBS"));
+        Assert.Equal("GB7RDG", plan.Target);
+        ExpectSendStep step = Assert.IsType<ExpectSendStep>(Assert.Single(plan.Steps));
+        Assert.Equal("GB7RDG}", step.Expect);
+        Assert.Equal("BBS", step.Send);
+        Assert.Empty(plan.Warnings);
+    }
+
+    [Fact]
+    public void ExpectSend_SplitsOnTheFirstEqualsAndTrimsBothSides()
+    {
+        // Only the FIRST '=' splits; a later '=' belongs to the SEND. Whitespace around
+        // EXPECT and SEND is trimmed.
+        ConnectPlan plan = ConnectScript.Resolve(PartnerWith("C GB7BPQ", "  prompt> = SET X=Y  "));
+        ExpectSendStep step = Assert.IsType<ExpectSendStep>(Assert.Single(plan.Steps));
+        Assert.Equal("prompt>", step.Expect);
+        Assert.Equal("SET X=Y", step.Send);
+        Assert.Empty(plan.Warnings);
+    }
+
+    [Fact]
+    public void ExpectSend_AllowsAnEmptySend_PureWait()
+    {
+        // "EXPECT=" with nothing after the '=' is a wait-only step (Expect set, Send empty).
+        ConnectPlan plan = ConnectScript.Resolve(PartnerWith("C GB7BPQ", "GB7BPQ>="));
+        ExpectSendStep step = Assert.IsType<ExpectSendStep>(Assert.Single(plan.Steps));
+        Assert.Equal("GB7BPQ>", step.Expect);
+        Assert.Equal("", step.Send);
+        Assert.Empty(plan.Warnings);
+    }
+
+    [Fact]
+    public void MultiHopExpectSend_WalksNodeByNode()
+    {
+        // The explicit multi-hop form from pdn-bpqchat's LAB.md, ported: open the first hop,
+        // then expect each node prompt before sending the next connect.
+        ConnectPlan plan = ConnectScript.Resolve(PartnerWith(
+            "C GB7BBB", "GB7BBB>=C GB7CCC", "GB7CCC>=C GB7DDD", "GB7DDD>=C GB7DDD-4"));
+        Assert.Equal("GB7BBB", plan.Target);
+        Assert.Equal(3, plan.Steps.Count);
+        Assert.Equal(("GB7BBB>", "C GB7CCC"), Pair(plan.Steps[0]));
+        Assert.Equal(("GB7CCC>", "C GB7DDD"), Pair(plan.Steps[1]));
+        Assert.Equal(("GB7DDD>", "C GB7DDD-4"), Pair(plan.Steps[2]));
+        Assert.Empty(plan.Warnings);
+    }
+
+    [Fact]
+    public void SecondBareCLine_IsASendOnlyNodeCommandNotANewTarget()
+    {
+        // Spec §4.4's verbatim model: only the FIRST C names the open; a later bare C is a
+        // node-level connect command typed at the connected node's prompt (send-only).
         ConnectPlan plan = ConnectScript.Resolve(PartnerWith("C GB7BPQ", "C GB7RDG", "BBS"));
         Assert.Equal("GB7BPQ", plan.Target);
         Assert.Equal(2, plan.Steps.Count);
-        Assert.Equal("C GB7RDG", Assert.IsType<SendLineStep>(plan.Steps[0]).Line);
-        Assert.Equal("BBS", Assert.IsType<SendLineStep>(plan.Steps[1]).Line);
+        Assert.Equal(("", "C GB7RDG"), Pair(plan.Steps[0]));
+        Assert.Equal(("", "BBS"), Pair(plan.Steps[1]));
         Assert.Empty(plan.Warnings);
     }
 
@@ -72,12 +132,12 @@ public class ConnectScriptTests
     public void NoLeadingC_DialsThePartnerAndEveryLineIsAStep()
     {
         // Without a leading C the RHP open dials the partner call itself, and even a C
-        // appearing after another step stays a verbatim step.
+        // appearing after another step stays a send-only step.
         ConnectPlan plan = ConnectScript.Resolve(PartnerWith("NODES", "C GB7RDG"));
         Assert.Equal("GB7BPQ", plan.Target);
         Assert.Equal(2, plan.Steps.Count);
-        Assert.Equal("NODES", Assert.IsType<SendLineStep>(plan.Steps[0]).Line);
-        Assert.Equal("C GB7RDG", Assert.IsType<SendLineStep>(plan.Steps[1]).Line);
+        Assert.Equal(("", "NODES"), Pair(plan.Steps[0]));
+        Assert.Equal(("", "C GB7RDG"), Pair(plan.Steps[1]));
         Assert.Empty(plan.Warnings);
     }
 
@@ -88,7 +148,7 @@ public class ConnectScriptTests
         Assert.Equal("GB7BPQ", plan.Target);
         Assert.Equal(2, plan.Steps.Count);
         Assert.Equal(TimeSpan.FromSeconds(5), Assert.IsType<PauseStep>(plan.Steps[0]).Delay);
-        Assert.Equal("BBS", Assert.IsType<SendLineStep>(plan.Steps[1]).Line);
+        Assert.Equal(("", "BBS"), Pair(plan.Steps[1]));
         Assert.Empty(plan.Warnings);
     }
 
@@ -119,7 +179,7 @@ public class ConnectScriptTests
         ];
         ConnectPlan plan = ConnectScript.Resolve(PartnerWith(["C GB7BPQ", .. directives, "BBS"]));
         Assert.Equal("GB7BPQ", plan.Target);
-        Assert.Equal("BBS", Assert.IsType<SendLineStep>(Assert.Single(plan.Steps)).Line);
+        Assert.Equal(("", "BBS"), Pair(Assert.Single(plan.Steps)));
         Assert.Equal(directives.Length, plan.Warnings.Count);
         Assert.All(plan.Warnings, w => Assert.Contains("unsupported", w, StringComparison.Ordinal));
     }
@@ -156,7 +216,7 @@ public class ConnectScriptTests
     {
         ConnectPlan plan = ConnectScript.Resolve(PartnerWith("", "  ", "C GB7BPQ", "", "BBS"));
         Assert.Equal("GB7BPQ", plan.Target);
-        Assert.Equal("BBS", Assert.IsType<SendLineStep>(Assert.Single(plan.Steps)).Line);
+        Assert.Equal(("", "BBS"), Pair(Assert.Single(plan.Steps)));
         Assert.Empty(plan.Warnings);
     }
 }
