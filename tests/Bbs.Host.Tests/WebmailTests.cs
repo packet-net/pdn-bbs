@@ -165,7 +165,7 @@ public sealed class WebmailTests : IAsyncDisposable
     }
 
     [Fact]
-    public async Task Compose_StoresRoutesAndRendersTheMessage()
+    public async Task Compose_StoresRoutes_AndRedirectsHomeWithConfirmation()
     {
         ClaimCallsign("tom", "M0LTE");
         _store.UpsertPartner(new Partner { Call = "GB7BPQ", AtCalls = ["*"] });
@@ -180,10 +180,12 @@ public sealed class WebmailTests : IAsyncDisposable
                 new KeyValuePair<string, string>("subject", "Webmail test"),
                 new KeyValuePair<string, string>("body", "Hello\nWorld"),
             ]));
-        response.EnsureSuccessStatusCode(); // redirect followed to /messages/1
+        response.EnsureSuccessStatusCode(); // redirect followed to the home (status) page
+        // Sending lands on the BBS home with a confirmation, not the raw message view.
+        Assert.EndsWith("/", response.RequestMessage!.RequestUri!.AbsolutePath, StringComparison.Ordinal);
         string page = await response.Content.ReadAsStringAsync();
-        Assert.Contains("Webmail test", page, StringComparison.Ordinal);
-        Assert.Contains("Hello", page, StringComparison.Ordinal);
+        Assert.Contains("Message sent.", page, StringComparison.Ordinal);
+        Assert.Contains("status", page, StringComparison.Ordinal); // the status dashboard
 
         // Same store path as the console: BID generated, AT captured, CR body discipline.
         Message stored = Assert.Single(_store.ListMessages(new MessageQuery()));
@@ -237,7 +239,7 @@ public sealed class WebmailTests : IAsyncDisposable
         });
         using HttpClient client = await StartAsync();
 
-        string inbox = await client.GetStringAsync(new Uri("/", UriKind.Relative));
+        string inbox = await client.GetStringAsync(new Uri("/inbox", UriKind.Relative));
         Assert.Contains("For you", inbox, StringComparison.Ordinal);
 
         string page = await client.GetStringAsync(new Uri($"/messages/{stored.Number}", UriKind.Relative));
@@ -274,7 +276,7 @@ public sealed class WebmailTests : IAsyncDisposable
         });
 
         using HttpClient client = await StartAsync();
-        string inbox = await client.GetStringAsync(new Uri("/", UriKind.Relative));
+        string inbox = await client.GetStringAsync(new Uri("/inbox", UriKind.Relative));
 
         Assert.Contains("RECEIVED-for-me", inbox, StringComparison.Ordinal);
         Assert.DoesNotContain("OUTBOUND-to-self-at-GB7RDG", inbox, StringComparison.Ordinal);
@@ -341,6 +343,39 @@ public sealed class WebmailTests : IAsyncDisposable
         Assert.Contains("delivered here", sent, StringComparison.Ordinal);
         // Not my mail — absent from Sent.
         Assert.DoesNotContain("INBOUND-not-mine", sent, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Home_IsTheStatusDashboard_WithMailboxAndForwardingHealth()
+    {
+        ClaimCallsign("tom", "M0LTE");
+        _store.UpsertPartner(new Partner { Call = "GB7RDG", AtCalls = ["*"] });
+
+        // An unread inbox personal, and an outbound personal queued (then held oversize) to GB7RDG.
+        _store.AddMessage(new MessageDraft
+        {
+            Type = MessageType.Personal, From = "G8ABC", Recipients = ["M0LTE"],
+            Subject = "hi", Body = Encoding.Latin1.GetBytes("x\r"),
+        });
+        Message big = _store.AddMessage(new MessageDraft
+        {
+            Type = MessageType.Personal, From = "M0LTE", Recipients = ["M0LTE"], At = "GB7RDG",
+            Subject = "big", Body = Encoding.Latin1.GetBytes("x\r"),
+        });
+        _store.EnqueueForwards(big.Number, ["GB7RDG"]);
+        _store.HoldMessage(big.Number, "too large for GB7RDG (209595 > 99999 bytes)");
+
+        using HttpClient client = await StartAsync();
+        string home = await client.GetStringAsync(new Uri("/", UriKind.Relative));
+
+        // It's the status page, not the inbox: a summary, the forwarding-health table, the partner.
+        Assert.Contains("status", home, StringComparison.Ordinal);
+        Assert.Contains("Forwarding", home, StringComparison.Ordinal);
+        Assert.Contains("GB7RDG", home, StringComparison.Ordinal);
+        Assert.Contains("1 unread", home, StringComparison.Ordinal);
+        // The held message is flagged for attention, and is NOT shown as an inbox row here.
+        Assert.Contains("held", home, StringComparison.Ordinal);
+        Assert.DoesNotContain(">big<", home, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -681,7 +716,7 @@ public sealed class WebmailTests : IAsyncDisposable
         });
         using HttpClient client = await StartAsync();
 
-        string page = await client.GetStringAsync(new Uri("/?pdn_embed=1", UriKind.Relative));
+        string page = await client.GetStringAsync(new Uri("/inbox?pdn_embed=1", UriKind.Relative));
 
         // No big <h1> station-identity bar (no double chrome) — but it is still a full HTML doc.
         Assert.DoesNotContain("<h1>GB7PDN-1 <span", page, StringComparison.Ordinal);
@@ -692,13 +727,15 @@ public sealed class WebmailTests : IAsyncDisposable
         // The functional content + nav tabs survive.
         Assert.Contains("Inbox", page, StringComparison.Ordinal);
         Assert.Contains("embedded hello", page, StringComparison.Ordinal);
+        Assert.Contains(">Status</a>", page, StringComparison.Ordinal);
         Assert.Contains(">Inbox</a>", page, StringComparison.Ordinal);
         Assert.Contains(">Bulletins</a>", page, StringComparison.Ordinal);
         Assert.Contains(">Compose</a>", page, StringComparison.Ordinal);
         Assert.Contains(">Settings</a>", page, StringComparison.Ordinal);
 
         // The embed signal persists across navigation: every internal link carries pdn_embed=1.
-        Assert.Contains("href=\"/?pdn_embed=1\"", page, StringComparison.Ordinal);            // Inbox tab
+        Assert.Contains("href=\"/?pdn_embed=1\"", page, StringComparison.Ordinal);            // Status tab (home)
+        Assert.Contains("href=\"/inbox?pdn_embed=1\"", page, StringComparison.Ordinal);       // Inbox tab
         Assert.Contains("href=\"/bulletins?pdn_embed=1\"", page, StringComparison.Ordinal);   // Bulletins tab
         Assert.Contains("href=\"/compose?pdn_embed=1\"", page, StringComparison.Ordinal);     // Compose tab
         Assert.Contains("href=\"/settings?pdn_embed=1\"", page, StringComparison.Ordinal);    // Settings tab
@@ -927,16 +964,17 @@ public sealed class WebmailTests : IAsyncDisposable
 
         using HttpClient client = await StartAsync(forwardedPrefix: "/apps/bbs");
 
-        string inbox = await client.GetStringAsync(new Uri("/", UriKind.Relative));
-        Assert.Contains("<a href=\"/apps/bbs/\">Inbox</a>", inbox, StringComparison.Ordinal);
+        string inbox = await client.GetStringAsync(new Uri("/inbox", UriKind.Relative));
+        Assert.Contains("<a href=\"/apps/bbs/\">Status</a>", inbox, StringComparison.Ordinal);
+        Assert.Contains("<a href=\"/apps/bbs/inbox\">Inbox</a>", inbox, StringComparison.Ordinal);
         Assert.Contains("<a href=\"/apps/bbs/bulletins\">Bulletins</a>", inbox, StringComparison.Ordinal);
         Assert.Contains("<a href=\"/apps/bbs/compose\">Compose</a>", inbox, StringComparison.Ordinal);
         Assert.Contains("href=\"/apps/bbs/messages/30\"", inbox, StringComparison.Ordinal);
-        Assert.Contains("href=\"/apps/bbs/?page=2\"", inbox, StringComparison.Ordinal); // pager keeps the prefix
+        Assert.Contains("href=\"/apps/bbs/inbox?page=2\"", inbox, StringComparison.Ordinal); // pager keeps the prefix
         Assert.DoesNotContain("href=\"/messages/", inbox, StringComparison.Ordinal);    // nothing escapes the mount
 
-        string older = await client.GetStringAsync(new Uri("/?page=2", UriKind.Relative));
-        Assert.Contains("href=\"/apps/bbs/?page=1\"", older, StringComparison.Ordinal); // and the "newer" leg
+        string older = await client.GetStringAsync(new Uri("/inbox?page=2", UriKind.Relative));
+        Assert.Contains("href=\"/apps/bbs/inbox?page=1\"", older, StringComparison.Ordinal); // and the "newer" leg
 
         // The read page's kill form (M0LTE is an addressee, so it renders) posts under the mount too.
         string read = await client.GetStringAsync(new Uri("/messages/30", UriKind.Relative));
@@ -962,7 +1000,8 @@ public sealed class WebmailTests : IAsyncDisposable
                 new KeyValuePair<string, string>("body", "x"),
             ]));
         Assert.Equal(HttpStatusCode.Found, response.StatusCode);
-        Assert.Equal("/apps/bbs/messages/1", response.Headers.Location!.OriginalString);
+        // Redirects to the prefixed home with the "Message sent." banner.
+        Assert.StartsWith("/apps/bbs/?notice=", response.Headers.Location!.OriginalString, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -1051,7 +1090,7 @@ public sealed class WebmailTests : IAsyncDisposable
         _store.RecordSevenPlusPart(SevenPlusKey, "SECRET.ZIP  ", 145173, 5, 138, 1, part.Number);
 
         using HttpClient aaa = await StartAsync(pdnUser: "aaa");
-        string aaaInbox = await aaa.GetStringAsync(new Uri("/", UriKind.Relative));
+        string aaaInbox = await aaa.GetStringAsync(new Uri("/inbox", UriKind.Relative));
         Assert.Contains("SECRET.ZIP", aaaInbox, StringComparison.Ordinal);
         Assert.Contains("1/5 parts received", aaaInbox, StringComparison.Ordinal);
 
@@ -1059,7 +1098,7 @@ public sealed class WebmailTests : IAsyncDisposable
         _app = null;
 
         using HttpClient bbb = await StartAsync(pdnUser: "bbb");
-        string bbbInbox = await bbb.GetStringAsync(new Uri("/", UriKind.Relative));
+        string bbbInbox = await bbb.GetStringAsync(new Uri("/inbox", UriKind.Relative));
         Assert.DoesNotContain("SECRET.ZIP", bbbInbox, StringComparison.Ordinal);
         Assert.DoesNotContain("parts received", bbbInbox, StringComparison.Ordinal);
     }
@@ -1612,7 +1651,7 @@ public sealed class WebmailTests : IAsyncDisposable
         });
         using HttpClient client = await StartAsync();
 
-        string inbox = await client.GetStringAsync(new Uri("/", UriKind.Relative));
+        string inbox = await client.GetStringAsync(new Uri("/inbox", UriKind.Relative));
         Assert.Contains("unread-dot", inbox, StringComparison.Ordinal);        // the clear read/unread marker
         Assert.Contains("class=\"unread\"", inbox, StringComparison.Ordinal);  // the row is bold-flagged
         Assert.DoesNotContain(">St<", inbox, StringComparison.Ordinal);        // the archaic status-code column is gone
@@ -1701,7 +1740,7 @@ public sealed class WebmailTests : IAsyncDisposable
         });
         using HttpClient client = await StartAsync();
 
-        string inbox = await client.GetStringAsync(new Uri("/", UriKind.Relative));
+        string inbox = await client.GetStringAsync(new Uri("/inbox", UriKind.Relative));
         Assert.Contains("Date (UTC)", inbox, StringComparison.Ordinal);
         Assert.Contains("2026-06-11 12:00", inbox, StringComparison.Ordinal); // the harness clock, date + time
     }

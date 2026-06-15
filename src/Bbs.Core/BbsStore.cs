@@ -556,6 +556,46 @@ public sealed class BbsStore : IDisposable
     }
 
     /// <summary>
+    /// Mailbox tallies for the status dashboard: <c>Total</c> live messages (every non-killed P/B/T)
+    /// and how many of those are <c>Held</c>. One round-trip; killed messages are excluded from both.
+    /// </summary>
+    public (int Total, int Held) MessageCounts()
+    {
+        lock (_gate)
+        {
+            using SqliteCommand cmd = Command(null,
+                "SELECT " +
+                "SUM(CASE WHEN status<>'K' THEN 1 ELSE 0 END), " +
+                "SUM(CASE WHEN status='H' THEN 1 ELSE 0 END) FROM messages;");
+            using SqliteDataReader reader = cmd.ExecuteReader();
+            reader.Read();
+            int total = reader.IsDBNull(0) ? 0 : (int)reader.GetInt64(0);
+            int held = reader.IsDBNull(1) ? 0 : (int)reader.GetInt64(1);
+            return (total, held);
+        }
+    }
+
+    /// <summary>
+    /// When this BBS last completed a forward to a partner (the newest <c>forwarded_utc</c> of any of
+    /// its legs), or null if it never has. Drives the dashboard's per-partner "last forwarded" column.
+    /// </summary>
+    public DateTimeOffset? LastForwardedTo(string partnerCall)
+    {
+        ArgumentNullException.ThrowIfNull(partnerCall);
+
+        lock (_gate)
+        {
+            using SqliteCommand cmd = Command(null,
+                "SELECT MAX(forwarded_utc) FROM forwards WHERE partner_call=$p;");
+            cmd.Parameters.AddWithValue("$p", Callsigns.Normalize(partnerCall));
+            object? result = cmd.ExecuteScalar();
+            return result is null or DBNull
+                ? null
+                : DateTimeOffset.FromUnixTimeSeconds((long)result);
+        }
+    }
+
+    /// <summary>
     /// How many messages bound for a partner are held (status H) with an unsent leg — i.e. pulled
     /// out of its forward queue (an oversize auto-hold, compat spec §4.1) rather than waiting. The
     /// forwarding card shows this beside the live queue depth so a held message isn't invisible.

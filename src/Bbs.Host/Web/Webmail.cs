@@ -140,7 +140,13 @@ public static class Webmail
             await next().ConfigureAwait(false);
         });
 
-        app.MapGet("/", (HttpContext ctx, int? page) => WithCallsign(ctx, options,
+        // The BBS home is the status dashboard (queue health + mailbox summary); the inbox is a tab.
+        // The PDN nav's "BBS" entry lands here (/apps/bbs/ → /). `notice` shows a one-shot banner,
+        // e.g. "Message sent." after composing.
+        app.MapGet("/", (HttpContext ctx, string? notice) => WithCallsign(ctx, options,
+            (prefix, call) => Status(options, prefix, call, Embed(ctx), Theme(ctx), notice)));
+
+        app.MapGet("/inbox", (HttpContext ctx, int? page) => WithCallsign(ctx, options,
             (prefix, call) => Inbox(options, prefix, call, page ?? 1, Embed(ctx), Theme(ctx))));
 
         app.MapGet("/bulletins", (HttpContext ctx, int? page) => WithCallsign(ctx, options,
@@ -415,13 +421,72 @@ public static class Webmail
         // Personal placeholders are scoped to this user's incoming files only (never leak another
         // user's private incoming-file name into this inbox).
         string placeholders = SevenPlusPlaceholders(o.Store, MessageType.Personal, call);
-        string rows = MessageRows(mine, page, o.PageSize, call, prefix, "/", embed);
+        string rows = MessageRows(mine, page, o.PageSize, call, prefix, "/inbox", embed);
         return Html(Page(o, prefix, call, "Inbox", embed,
             $"""
             <h2>Inbox — personal messages for {H(call)}</h2>
             {placeholders}
             {rows}
             """, theme));
+    }
+
+    /// <summary>
+    /// The BBS home: a status dashboard — mailbox tallies, per-partner forwarding health (waiting /
+    /// held / last forwarded), and an attention callout when mail is held. The PDN nav's "BBS" entry
+    /// lands here. A read-only summary; the actions live on their own tabs (Inbox, Sent, Forwarding).
+    /// </summary>
+    private static IResult Status(WebmailOptions o, string prefix, string call, bool embed, string? theme, string? notice)
+    {
+        (int total, int held) = o.Store.MessageCounts();
+        int unread = o.Store.ListMessages(new MessageQuery { Type = MessageType.Personal, ToCall = call, HomedLocally = true })
+            .Count(m => m.Recipients.Any(r => Callsigns.BaseEquals(r.ToCall, call) && r.ReadAt is null));
+
+        string banner = notice is null ? "" : Inv($"""<p class="saved">{H(notice)}</p>""");
+
+        // Attention callout when anything is held (e.g. oversize auto-holds) — it won't forward until
+        // dealt with, so surface it rather than leaving it buried.
+        string attention = held == 0
+            ? ""
+            : Inv($"""<p class="err">{held} message{(held == 1 ? " is" : "s are")} held — open from <a href="{U(prefix, "/sent", embed)}">Sent</a> to release or kill.</p>""");
+
+        IReadOnlyList<Partner> partners = o.Store.ListPartners();
+        string forwarding = partners.Count == 0
+            ? """<p class="dim">No forwarding partners configured.</p>"""
+            : BuildForwardingHealth(o, partners);
+
+        string body = $"""
+            <h2>{H(o.StationCallsign)} <span class="dim">— status</span></h2>
+            {banner}
+            {attention}
+            <table class="meta">
+            <tr><th>Messages</th><td>{Inv($"{total}")} total{(held > 0 ? Inv($" · {held} held") : "")}</td></tr>
+            <tr><th>Inbox</th><td><a href="{U(prefix, "/inbox", embed)}">{Inv($"{unread}")} unread</a></td></tr>
+            </table>
+            <h3>Forwarding</h3>
+            {forwarding}
+            """;
+        return Html(Page(o, prefix, call, "Status", embed, body, theme));
+    }
+
+    private static string BuildForwardingHealth(WebmailOptions o, IReadOnlyList<Partner> partners)
+    {
+        var sb = new StringBuilder();
+        sb.Append("<table><tr><th>Partner</th><th>State</th><th>Waiting</th><th>Held</th><th>Last forwarded (UTC)</th></tr>");
+        foreach (Partner p in partners.OrderBy(p => p.Call, StringComparer.OrdinalIgnoreCase))
+        {
+            int waiting = o.Store.GetForwardQueue(p.Call).Count;
+            int held = o.Store.CountHeldForwards(p.Call);
+            DateTimeOffset? last = o.Store.LastForwardedTo(p.Call);
+            string state = p.Enabled
+                ? """<span class="badge on">auto-dial on</span>"""
+                : """<span class="badge off">auto-dial off</span>""";
+            string heldCell = held == 0 ? "—" : Inv($"""<span class="badge off">{held}</span>""");
+            string lastCell = last is { } l ? H(l.ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture)) : """<span class="dim">never</span>""";
+            sb.Append(Inv($"<tr><td>{H(p.Call)}</td><td>{state}</td><td>{waiting}</td><td>{heldCell}</td><td class=\"nowrap\">{lastCell}</td></tr>"));
+        }
+
+        sb.Append("</table>");
+        return sb.ToString();
     }
 
     private static IResult Bulletins(WebmailOptions o, string prefix, string call, int page, bool embed, string? theme)
@@ -556,7 +621,7 @@ public static class Webmail
         // message we sent is a Personal, so type alone can't distinguish it from an inbox personal);
         // otherwise fall back to the type-based default (personals → Inbox, else Bulletins).
         bool fromSent = string.Equals(from, "sent", StringComparison.Ordinal);
-        string backPath = fromSent ? "/sent" : message.Type == MessageType.Personal ? "/" : "/bulletins";
+        string backPath = fromSent ? "/sent" : message.Type == MessageType.Personal ? "/inbox" : "/bulletins";
         string backLabel = fromSent ? "Sent" : message.Type == MessageType.Personal ? "Inbox" : "Bulletins";
         return Html(Page(o, prefix, call, Inv($"Message {message.Number}"), embed,
             $"""
@@ -753,7 +818,10 @@ public static class Webmail
             Attachments = attachments,
         });
         o.Routing.RouteMessage(stored);
-        return Results.Redirect(U(prefix, Inv($"/messages/{stored.Number}"), embed));
+        // Back to the BBS home (the status dashboard), where the just-sent message shows up in the
+        // forwarding queue, with a confirmation banner — rather than dumping the sender on the raw
+        // message view.
+        return Results.Redirect(U(prefix, "/", embed) + Notice(embed, "Message sent."));
     }
 
     /// <summary>Strips any directory component from an uploaded filename (both '/' and '\'), defending against a traversal-shaped name.</summary>
@@ -1670,7 +1738,7 @@ public static class Webmail
             <!doctype html>
             <html{{HtmlThemeClass(theme)}}><head><meta charset="utf-8"><title>{{H(o.StationCallsign)}} — {{H(title)}}</title>{{Style}}</head>
             <body><main{{mainClass}}>
-            {{header}}<nav><a href="{{U(prefix, "/", embed)}}">Inbox</a> · <a href="{{U(prefix, "/sent", embed)}}">Sent</a> · <a href="{{U(prefix, "/bulletins", embed)}}">Bulletins</a> · <a href="{{U(prefix, "/compose", embed)}}">Compose</a> · <a href="{{U(prefix, "/settings", embed)}}">Settings</a>{{forwardingTab}}
+            {{header}}<nav><a href="{{U(prefix, "/", embed)}}">Status</a> · <a href="{{U(prefix, "/inbox", embed)}}">Inbox</a> · <a href="{{U(prefix, "/sent", embed)}}">Sent</a> · <a href="{{U(prefix, "/bulletins", embed)}}">Bulletins</a> · <a href="{{U(prefix, "/compose", embed)}}">Compose</a> · <a href="{{U(prefix, "/settings", embed)}}">Settings</a>{{forwardingTab}}
             <span class="dim">signed in as {{H(call)}}</span></nav>
             {{body}}
             </main></body></html>
