@@ -278,6 +278,17 @@ public sealed record PartnerConfig
     /// </summary>
     public bool SendImmediately { get; init; } = true;
 
+    /// <summary>
+    /// Reverse collection ("collect", compat spec §4.1 RequestReverse). Default FALSE — the
+    /// scheduler never dials an empty queue, so a quiet link stays quiet and existing behaviour
+    /// is unchanged. Set TRUE for a partner that holds mail FOR US but cannot dial us (an
+    /// asymmetric link): the scheduler then dials it on the <see cref="IntervalMinutes"/> cadence
+    /// even with nothing of ours to send, and the session's in-session reverse (spec §3.11)
+    /// collects the partner's queue. In-session reverse on a session opened for our OWN mail
+    /// needs no flag — it always happens; this only adds the empty-queue POLL.
+    /// </summary>
+    public bool Collect { get; init; }
+
     /// <summary>TO-field distribution list (compat spec §4.1 TOCalls).</summary>
     public List<string> To { get; init; } = [];
 
@@ -319,6 +330,7 @@ public sealed record PartnerConfig
         AllowB2F = AllowB2,
         ForwardIntervalSeconds = Math.Max(1, IntervalMinutes) * 60,
         ForwardNewImmediately = SendImmediately,
+        Collect = Collect,
 
         // The full script wins over the simple form (documented in DefaultYaml).
         ConnectScript = ConnectScript.Count > 0
@@ -639,6 +651,10 @@ public static class BbsHostConfigFile
         # turn, and vice versa; oracle-proven both ways). intervalMinutes is only the
         # RETRY cadence for mail that could not be delivered — the BBS never dials an
         # empty queue, so a quiet link stays quiet. No polling timers to tune.
+        # EXCEPTION — collect (below): for a partner that holds mail FOR US but cannot
+        # dial us (an asymmetric link), set collect:true to POLL it on the
+        # intervalMinutes cadence even with an empty queue; the session's in-session
+        # reverse then collects whatever it holds. Default off.
         #   call:            partner node callsign (base, no SSID; inbound match is SSID-agnostic)
         #   connect:         simple connect form — the callsign/alias outbound cycles
         #                    dial (default: call). Equivalent to a one-line script
@@ -654,8 +670,16 @@ public static class BbsHostConfigFile
         #   conTimeoutSeconds: per-response-wait timeout for the script + the final SID
         #                    wait (compat spec §4.1 ConTimeout; default 60)
         #   intervalMinutes: retry cadence for queued-but-undelivered mail (default 60;
-        #                    never dials an empty queue)
+        #                    never dials an empty queue — unless collect is on, when it
+        #                    is ALSO the reverse-collection poll cadence)
         #   sendImmediately: dial as soon as a message queues (default true)
+        #   collect:         reverse collection (default false). On ⇒ dial this partner
+        #                    on the intervalMinutes cadence EVEN WITH AN EMPTY QUEUE, to
+        #                    pick up mail it holds for us via the in-session reverse —
+        #                    only for partners that cannot dial us (an asymmetric link).
+        #                    In-session reverse on a session we open for OUR OWN queued
+        #                    mail needs no flag; it always happens. Off ⇒ a quiet link
+        #                    stays quiet (existing behaviour).
         #   to:              TO-field distribution list, e.g. [SYSOP]
         #   at:              AT-field list; "*" entries are the wildcard default route
         #   hr:              hierarchical routes, e.g. [GBR.EURO] (flood matching also
@@ -681,6 +705,10 @@ public static class BbsHostConfigFile
         #      - C GB7RDG
         #      - BBS
         #    at: ["*"]
+        #  - call: GB7CIP          # an asymmetric partner that never dials us:
+        #    connect: GB7CIP       # POLL it to collect the mail it holds for us
+        #    collect: true         # dial on intervalMinutes even with an empty queue
+        #    intervalMinutes: 30
 
         # demuxFirstLineWaitSeconds: how long the inbound demux holds the
         # forwarding-vs-console decision for a SILENT caller. Every caller is greeted

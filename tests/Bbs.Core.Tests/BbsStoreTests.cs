@@ -425,6 +425,7 @@ public sealed class BbsStoreTests : IDisposable
             MaxRxSize = 20000,
             MaxTxSize = 30000,
             AllowB2F = true,
+            Collect = true,
         };
 
         _ts.Store.UpsertPartner(partner);
@@ -444,6 +445,10 @@ public sealed class BbsStoreTests : IDisposable
         Assert.Equal(20000, loaded.MaxRxSize);
         Assert.Equal(30000, loaded.MaxTxSize);
         Assert.True(loaded.AllowB2F);
+        Assert.True(loaded.Collect);
+
+        // A partner without collect set round-trips collect-off (the default — quiet link stays quiet).
+        Assert.False(_ts.Store.GetPartner("GB7AAA")!.Collect);
 
         // Ordered by call — the deterministic routing tie-break order.
         Assert.Equal(["GB7AAA", "GB7BPQ-1"], _ts.Store.ListPartners().Select(p => p.Call));

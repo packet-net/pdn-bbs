@@ -155,6 +155,27 @@ public sealed class ConfigTests : IDisposable
     }
 
     [Fact]
+    public void Collect_DefaultsFalse_AndRoundTripsToThePartner()
+    {
+        // Default off → the scheduler never dials an empty queue (existing behaviour). An
+        // explicit collect:true maps to Partner.Collect (the reverse-collection poll).
+        Assert.False(new PartnerConfig { Call = "GB7BPQ" }.ToPartner().Collect);
+
+        BbsHostConfig config = BbsHostConfigFile.Parse("""
+            callsign: GB7PDN
+            partners:
+              - call: GB7CIP
+                collect: true
+                intervalMinutes: 30
+            """);
+        PartnerConfig partner = Assert.Single(config.Partners);
+        Assert.True(partner.Collect);
+        Partner mapped = partner.ToPartner();
+        Assert.True(mapped.Collect);
+        Assert.Equal(30 * 60, mapped.ForwardIntervalSeconds);
+    }
+
+    [Fact]
     public void ConnectScript_TakesPrecedenceOverSimpleConnect()
     {
         BbsHostConfig config = BbsHostConfigFile.Parse("""
