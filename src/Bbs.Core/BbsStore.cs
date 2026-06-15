@@ -17,7 +17,7 @@ namespace Bbs.Core;
 public sealed class BbsStore : IDisposable
 {
     /// <summary>The schema version this build writes and expects.</summary>
-    public const int CurrentSchemaVersion = 10;
+    public const int CurrentSchemaVersion = 11;
 
     private readonly SqliteConnection _connection;
     private readonly TimeProvider _time;
@@ -701,19 +701,29 @@ public sealed class BbsStore : IDisposable
 
     /// <summary>
     /// Records a forwarding dial that reached the partner and ran (the link works) — clears the
-    /// failure streak and error. Persisted, so the dashboard health survives a restart.
+    /// failure streak and error. Persisted, so the dashboard health survives a restart. The
+    /// negotiated <paramref name="mode"/> ("B2"/"B1") and the peer's raw SID (<paramref name="peerSid"/>)
+    /// are persisted when the cycle got far enough to parse the peer's SID; null leaves the previously
+    /// recorded values untouched (e.g. a reverse-collection poll that found nothing to dial) so the
+    /// dashboard keeps showing the last mode actually negotiated.
     /// </summary>
-    public void RecordForwardingSuccess(string partnerCall)
+    public void RecordForwardingSuccess(string partnerCall, string? mode = null, string? peerSid = null)
     {
         ArgumentNullException.ThrowIfNull(partnerCall);
         lock (_gate)
         {
+            // COALESCE($mode, last_mode) keeps the last known mode when this cycle didn't negotiate
+            // one (a no-op poll), rather than blanking the dashboard cell on the next quiet success.
             using SqliteCommand cmd = Command(null,
-                "INSERT INTO forwarding_status(partner_call,last_attempt_utc,ok,error,consecutive_failures) " +
-                "VALUES($p,$now,1,NULL,0) " +
-                "ON CONFLICT(partner_call) DO UPDATE SET last_attempt_utc=$now, ok=1, error=NULL, consecutive_failures=0;");
+                "INSERT INTO forwarding_status(partner_call,last_attempt_utc,ok,error,consecutive_failures,last_mode,last_peer_sid) " +
+                "VALUES($p,$now,1,NULL,0,$mode,$sid) " +
+                "ON CONFLICT(partner_call) DO UPDATE SET last_attempt_utc=$now, ok=1, error=NULL, consecutive_failures=0, " +
+                "last_mode=COALESCE($mode, forwarding_status.last_mode), " +
+                "last_peer_sid=COALESCE($sid, forwarding_status.last_peer_sid);");
             cmd.Parameters.AddWithValue("$p", Callsigns.Normalize(partnerCall));
             cmd.Parameters.AddWithValue("$now", NowSeconds());
+            cmd.Parameters.AddWithValue("$mode", (object?)mode ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("$sid", (object?)peerSid ?? DBNull.Value);
             cmd.ExecuteNonQuery();
         }
     }
@@ -747,7 +757,7 @@ public sealed class BbsStore : IDisposable
         lock (_gate)
         {
             using SqliteCommand cmd = Command(null,
-                "SELECT last_attempt_utc,ok,error,consecutive_failures FROM forwarding_status WHERE partner_call=$p;");
+                "SELECT last_attempt_utc,ok,error,consecutive_failures,last_mode,last_peer_sid FROM forwarding_status WHERE partner_call=$p;");
             cmd.Parameters.AddWithValue("$p", Callsigns.Normalize(partnerCall));
             using SqliteDataReader reader = cmd.ExecuteReader();
             if (!reader.Read())
@@ -759,7 +769,9 @@ public sealed class BbsStore : IDisposable
                 DateTimeOffset.FromUnixTimeSeconds(reader.GetInt64(0)),
                 reader.GetInt64(1) != 0,
                 reader.IsDBNull(2) ? null : reader.GetString(2),
-                (int)reader.GetInt64(3));
+                (int)reader.GetInt64(3),
+                reader.IsDBNull(4) ? null : reader.GetString(4),
+                reader.IsDBNull(5) ? null : reader.GetString(5));
         }
     }
 
@@ -1990,6 +2002,43 @@ public sealed class BbsStore : IDisposable
             version = 10;
         }
 
+        // v11 — additive only (see Migrate): the negotiated protocol mode + the peer's raw SID on the
+        // forwarding_status row, so the status dashboard can show which protocol (B2/B1) each partner
+        // last spoke. Two nullable TEXT columns (null for every existing row + any partner that has
+        // not yet had a session parse its SID). The two ADDs are each guarded on the column being
+        // absent (SQLite has no ADD COLUMN IF NOT EXISTS), so re-applying upgrades cleanly rather than
+        // throwing "duplicate column name". No existing column/row is touched; safe on the live bbs.db.
+        if (version < 11)
+        {
+            using SqliteTransaction tx = connection.BeginTransaction();
+
+            if (!ColumnExists(connection, tx, "forwarding_status", "last_mode"))
+            {
+                using var ddl = connection.CreateCommand();
+                ddl.Transaction = tx;
+                ddl.CommandText = SchemaV11Mode;
+                ddl.ExecuteNonQuery();
+            }
+
+            if (!ColumnExists(connection, tx, "forwarding_status", "last_peer_sid"))
+            {
+                using var ddl = connection.CreateCommand();
+                ddl.Transaction = tx;
+                ddl.CommandText = SchemaV11PeerSid;
+                ddl.ExecuteNonQuery();
+            }
+
+            using (var stamp = connection.CreateCommand())
+            {
+                stamp.Transaction = tx;
+                stamp.CommandText = "UPDATE meta SET value='11' WHERE key='schema_version';";
+                stamp.ExecuteNonQuery();
+            }
+
+            tx.Commit();
+            version = 11;
+        }
+
         return version;
     }
 
@@ -2175,6 +2224,18 @@ public sealed class BbsStore : IDisposable
     // the release worker clears the marker and routes it; null means it is not a deferred send.
     private const string SchemaV10 = """
         ALTER TABLE messages ADD COLUMN send_release_utc INTEGER;
+        """;
+
+    // v11 — additive only (see Migrate): the last-negotiated protocol mode ("B2"/"B1") + the peer's
+    // raw SID on the forwarding_status row, so the dashboard can show what each partner last spoke.
+    // Two nullable TEXT columns (null for every existing row). Each ADD is column-guarded and applied
+    // separately (SQLite ALTER TABLE adds one column at a time) — see the v11 block in Migrate.
+    private const string SchemaV11Mode = """
+        ALTER TABLE forwarding_status ADD COLUMN last_mode TEXT;
+        """;
+
+    private const string SchemaV11PeerSid = """
+        ALTER TABLE forwarding_status ADD COLUMN last_peer_sid TEXT;
         """;
 
     private void InsertRecipient(SqliteTransaction tx, long number, string toCall, bool cc)

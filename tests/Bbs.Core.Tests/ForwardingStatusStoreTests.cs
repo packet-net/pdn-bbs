@@ -56,4 +56,45 @@ public sealed class ForwardingStatusStoreTests : IDisposable
         _ts.Store.RecordForwardingFailure("gb7rdg", "x");
         Assert.NotNull(_ts.Store.GetForwardingStatus("GB7RDG"));
     }
+
+    [Fact]
+    public void Success_persistsNegotiatedMode_andPeerSid_readBack()
+    {
+        // The forwarding-observability fields (schema v11): a successful cycle records the negotiated
+        // mode + the peer's raw SID, and GetForwardingStatus reads them back — across a reopen.
+        _ts.Store.RecordForwardingSuccess("GB7RDG", "B2", "[BPQ-6.0.25.30-B12FWIHJM$]");
+
+        PartnerForwardingState s = _ts.Store.GetForwardingStatus("GB7RDG")!;
+        Assert.True(s.Ok);
+        Assert.Equal("B2", s.LastMode);
+        Assert.Equal("[BPQ-6.0.25.30-B12FWIHJM$]", s.LastPeerSid);
+
+        PartnerForwardingState reopened = _ts.Reopen().GetForwardingStatus("GB7RDG")!;
+        Assert.Equal("B2", reopened.LastMode);
+        Assert.Equal("[BPQ-6.0.25.30-B12FWIHJM$]", reopened.LastPeerSid);
+    }
+
+    [Fact]
+    public void Success_withNoMode_keepsLastNegotiatedMode()
+    {
+        // A reverse-collection poll that found nothing to dial reports a success with no mode — it
+        // must not blank a previously recorded mode (COALESCE keeps the last actually negotiated).
+        _ts.Store.RecordForwardingSuccess("GB7RDG", "B1", "[BPQ-6.0.24.44-B1FHM$]");
+        _ts.Store.RecordForwardingSuccess("GB7RDG"); // a quiet success, no SID parsed
+
+        PartnerForwardingState s = _ts.Store.GetForwardingStatus("GB7RDG")!;
+        Assert.Equal("B1", s.LastMode);
+        Assert.Equal("[BPQ-6.0.24.44-B1FHM$]", s.LastPeerSid);
+    }
+
+    [Fact]
+    public void Unnegotiated_success_hasNullMode()
+    {
+        // A partner whose only success never parsed a SID has no mode recorded — the dashboard shows
+        // nothing rather than a stale or invented value.
+        _ts.Store.RecordForwardingSuccess("GB7RDG");
+        PartnerForwardingState s = _ts.Store.GetForwardingStatus("GB7RDG")!;
+        Assert.Null(s.LastMode);
+        Assert.Null(s.LastPeerSid);
+    }
 }

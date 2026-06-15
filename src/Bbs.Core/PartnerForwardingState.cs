@@ -11,4 +11,8 @@ namespace Bbs.Core;
 /// <param name="Ok">True if the last cycle reached the partner and ran without erroring.</param>
 /// <param name="Error">The failure reason when <see cref="Ok"/> is false; null on success.</param>
 /// <param name="ConsecutiveFailures">Consecutive failed cycles (0 when the last was a success).</param>
-public sealed record PartnerForwardingState(DateTimeOffset LastAttemptUtc, bool Ok, string? Error, int ConsecutiveFailures);
+/// <param name="LastMode">The last negotiated protocol mode ("B2"/"B1"), or null if none has been observed.</param>
+/// <param name="LastPeerSid">The peer's raw SID as last seen, or null if none has been observed.</param>
+public sealed record PartnerForwardingState(
+    DateTimeOffset LastAttemptUtc, bool Ok, string? Error, int ConsecutiveFailures,
+    string? LastMode = null, string? LastPeerSid = null);

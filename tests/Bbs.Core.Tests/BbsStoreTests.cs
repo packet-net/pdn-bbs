@@ -326,6 +326,51 @@ public sealed class BbsStoreTests : IDisposable
     }
 
     [Fact]
+    public void Migration_FromV10Database_AddsForwardingModeColumns_DataSurvives()
+    {
+        // A v10 database (forwarding_status without last_mode/last_peer_sid) with a real recorded
+        // outcome must upgrade additively on open — the live lab bbs.db is at v10. Produce a genuine
+        // v10 db: open at the current version, record a forwarding outcome, then strip the v11 columns
+        // and reset the version stamp to 10 — the on-disk shape a pre-v11 build left behind. Reopening
+        // must migrate it forward to v11 without touching the existing row.
+        string path = Path.Combine(Directory.CreateTempSubdirectory("bbs-migrate11-").FullName, "v10.db");
+        using (BbsStore seed = BbsStore.Open(path, "GB7PDN", _ts.Time))
+        {
+            seed.RecordForwardingFailure("GB7RDG", "connect refused");
+        }
+
+        DowngradeToV10(path);
+
+        using BbsStore upgraded = BbsStore.Open(path, "GB7PDN", _ts.Time);
+        Assert.Equal(BbsStore.CurrentSchemaVersion, upgraded.SchemaVersion); // upgraded to current (v10 → v11)
+
+        // The pre-existing failure row survived and now reads through the v11 code (no mode yet).
+        PartnerForwardingState legacy = upgraded.GetForwardingStatus("GB7RDG")!;
+        Assert.False(legacy.Ok);
+        Assert.Equal("connect refused", legacy.Error);
+        Assert.Equal(1, legacy.ConsecutiveFailures);
+        Assert.Null(legacy.LastMode);
+        Assert.Null(legacy.LastPeerSid);
+
+        // And the new columns are writable on the upgraded db.
+        upgraded.RecordForwardingSuccess("GB7RDG", "B2", "[BPQ-6.0.25.30-B12FWIHJM$]");
+        PartnerForwardingState after = upgraded.GetForwardingStatus("GB7RDG")!;
+        Assert.Equal("B2", after.LastMode);
+        Assert.Equal("[BPQ-6.0.25.30-B12FWIHJM$]", after.LastPeerSid);
+    }
+
+    /// <summary>Strips the v11 forwarding_status columns and resets the version stamp, leaving a genuine v10 db on disk.</summary>
+    private static void DowngradeToV10(string path)
+    {
+        using var connection = new SqliteConnection($"Data Source={path};Mode=ReadWrite;Pooling=False");
+        connection.Open();
+        // The v11 ADD COLUMNs are plain (non-PK, non-indexed) so DROP COLUMN reproduces the v10 shape.
+        Exec(connection, "ALTER TABLE forwarding_status DROP COLUMN last_peer_sid;");
+        Exec(connection, "ALTER TABLE forwarding_status DROP COLUMN last_mode;");
+        Exec(connection, "UPDATE meta SET value='10' WHERE key='schema_version';");
+    }
+
+    [Fact]
     public void Users_RoundTripAndTouchLogin()
     {
         _ts.Store.UpsertUser(new User

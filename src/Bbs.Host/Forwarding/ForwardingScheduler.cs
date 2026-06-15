@@ -219,7 +219,7 @@ public sealed class ForwardingScheduler
                     outcome.Ran, outcome.Error, queuedAtStart, _store.GetForwardQueue(partner.Call).Count);
                 if (ok)
                 {
-                    _store.RecordForwardingSuccess(partner.Call);
+                    _store.RecordForwardingSuccess(partner.Call, outcome.Mode, outcome.PeerSidRaw);
                 }
                 else
                 {
@@ -245,8 +245,11 @@ public sealed class ForwardingScheduler
     /// works, even if the session closed roughly or the peer dropped after accepting; false only when
     /// we could not connect/navigate (the connect script failed). <see cref="Graceful"/> is the clean
     /// FF/FQ close (drives backoff, unchanged). <see cref="Error"/> is the reason when not Ran.
+    /// <see cref="Mode"/> ("B2"/"B1") and <see cref="PeerSidRaw"/> are the negotiated protocol details
+    /// observed once the peer's SID was parsed (null when the cycle never got that far, e.g. a poll
+    /// that found nothing to dial), persisted on a successful cycle for the dashboard.
     /// </summary>
-    private sealed record CycleOutcome(bool Ran, bool Graceful, string? Error);
+    private sealed record CycleOutcome(bool Ran, bool Graceful, string? Error, string? Mode = null, string? PeerSidRaw = null);
 
     /// <summary>
     /// The dashboard-health verdict for a completed cycle (the connect-exception path is the loop's
@@ -328,8 +331,12 @@ public sealed class ForwardingScheduler
                 .ConfigureAwait(false);
             // The session ran — the link works — so this is healthy for the dashboard even if the
             // peer dropped after accepting (Completed/Graceful false). Delivery itself is recorded
-            // per-message via the forward queue; Graceful still drives backoff as before.
-            return new CycleOutcome(Ran: true, Graceful: result.Graceful, Error: null);
+            // per-message via the forward queue; Graceful still drives backoff as before. Carry the
+            // negotiated mode + peer SID up so a successful cycle persists them for the dashboard.
+            return new CycleOutcome(
+                Ran: true, Graceful: result.Graceful, Error: null,
+                Mode: result.PeerSidRaw is null ? null : (result.B2Active ? "B2" : "B1"),
+                PeerSidRaw: result.PeerSidRaw);
         }
         finally
         {

@@ -569,6 +569,16 @@ public static class Webmail
                 : st.Ok
                     ? """<span class="badge on">ok</span>"""
                     : Inv($"""<span class="badge off">failing ({st.ConsecutiveFailures}): {H(st.Error ?? "unknown error")}</span>""");
+            // The last protocol mode actually negotiated with this partner ("B2"/"B1"), shown only
+            // once observed — a muted secondary note beside the health badge, with the peer's raw SID
+            // (brackets and all) as a hover title. H()-escaped: the SID is peer-controlled.
+            if (st?.LastMode is { } mode)
+            {
+                healthCell += st.LastPeerSid is { } sid
+                    ? Inv($""" <span class="dim" title="{H(sid)}">last mode: {H(mode)}</span>""")
+                    : Inv($""" <span class="dim">last mode: {H(mode)}</span>""");
+            }
+
             sb.Append(Inv($"<tr><td>{H(p.Call)}</td><td>{state}</td><td>{waiting}</td><td>{heldCell}</td><td class=\"nowrap\">{lastCell}</td><td>{healthCell}</td></tr>"));
         }
 

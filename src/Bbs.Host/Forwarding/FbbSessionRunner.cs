@@ -9,7 +9,9 @@ namespace Bbs.Host.Forwarding;
 /// <summary>How one Fbb session over RHP ended.</summary>
 /// <param name="Completed">The FSM reached an end state (vs the link dying / idle timeout).</param>
 /// <param name="Graceful">The FF/FQ close (spec §3.1 step 5) was reached.</param>
-public sealed record FbbSessionResult(bool Completed, bool Graceful);
+/// <param name="PeerSidRaw">The peer's raw SID string (<see cref="Sid.Raw"/>) once parsed, else null.</param>
+/// <param name="B2Active">Whether B2F (FC) was negotiated for this session (<see cref="FbbSession.B2Active"/>).</param>
+public sealed record FbbSessionResult(bool Completed, bool Graceful, string? PeerSidRaw = null, bool B2Active = false);
 
 /// <summary>
 /// Drives a sans-IO <see cref="FbbSession"/> over an RHP child connection, both roles:
@@ -143,10 +145,12 @@ public sealed class FbbSessionRunner
         var state = new RunState(partner, partnerCall, numbers);
 
         await ApplyAsync(session.Advance(new FbbStart()), session, child, state, cancellationToken).ConfigureAwait(false);
+        LogNegotiatedOnce(session, state);
         if (initialData is { Length: > 0 })
         {
             await ApplyAsync(session.Advance(new FbbPeerData(initialData)), session, child, state, cancellationToken)
                 .ConfigureAwait(false);
+            LogNegotiatedOnce(session, state);
         }
 
         while (!state.Over)
@@ -174,9 +178,28 @@ public sealed class FbbSessionRunner
 
             await ApplyAsync(session.Advance(new FbbPeerData(data)), session, child, state, cancellationToken)
                 .ConfigureAwait(false);
+            LogNegotiatedOnce(session, state);
         }
 
-        return new FbbSessionResult(Completed: true, state.Graceful);
+        return new FbbSessionResult(
+            Completed: true, state.Graceful, PeerSidRaw: session.PeerSid?.Raw, B2Active: session.B2Active);
+    }
+
+    /// <summary>
+    /// Emits ONE info line per session capturing the negotiated mode + the peer's raw SID, the first
+    /// time the peer's SID has been parsed (<see cref="FbbSession.PeerSid"/> non-null). Idempotent: a
+    /// <see cref="RunState.NegotiatedLogged"/> latch keeps it to a single line rather than spamming on
+    /// every drive-loop pass. Mode is "B2" when B2F (FC) is active for the session, else "B1".
+    /// </summary>
+    private void LogNegotiatedOnce(FbbSession session, RunState state)
+    {
+        if (state.NegotiatedLogged || session.PeerSid is not { } sid)
+        {
+            return;
+        }
+
+        state.NegotiatedLogged = true;
+        LogNegotiated(_logger, state.PartnerCall, sid.Raw, session.B2Active ? "B2" : "B1", null);
     }
 
     private async Task ApplyAsync(
@@ -304,6 +327,9 @@ public sealed class FbbSessionRunner
         public bool Over { get; set; }
 
         public bool Graceful { get; set; }
+
+        /// <summary>Latch so the negotiated-mode info line is emitted at most once per session.</summary>
+        public bool NegotiatedLogged { get; set; }
     }
 
     private static readonly Action<ILogger, string, double, Exception?> LogIdle =
@@ -330,4 +356,8 @@ public sealed class FbbSessionRunner
         LoggerMessage.Define<string, string>(LogLevel.Information, new EventId(6, "CloseRace"),
             "Forwarding session with {Partner} closed: peer dropped the link before our FQ ({Detail}); "
             + "all messages were delivered — treated as a graceful close");
+
+    private static readonly Action<ILogger, string, string, string, Exception?> LogNegotiated =
+        LoggerMessage.Define<string, string, string>(LogLevel.Information, new EventId(7, "FbbNegotiated"),
+            "Forwarding session with {Partner} negotiated {Mode} (peer SID {PeerSid})");
 }

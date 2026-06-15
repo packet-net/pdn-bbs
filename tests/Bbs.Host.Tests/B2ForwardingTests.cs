@@ -370,6 +370,8 @@ public class B2ForwardingTests
         FbbSessionResult result = await run.WaitAsync(TestTimeout.Default);
         Assert.True(result.Completed);
         Assert.True(result.Graceful); // the dropped closing FQ is not a cycle failure
+        Assert.True(result.B2Active); // the peer advertised B2 and we offered it (the observability fields)
+        Assert.Equal(B2PeerSid, result.PeerSidRaw);
         Assert.Empty(host.Store.GetForwardQueue("GB7BPQ"));
         Assert.Equal(MessageStatus.Forwarded, host.Store.GetMessage(stored.Number)!.Status);
     }
