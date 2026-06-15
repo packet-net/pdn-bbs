@@ -227,8 +227,8 @@ public static class Webmail
         // Gated inside each handler (a non-sysop gets a 403 page; the nav tab is only rendered for the
         // sysop). Both surfaces — the per-partner forms and the bulk YAML block — read/write the same
         // store, so a change in one shows in the other.
-        app.MapGet("/forwarding", (HttpContext ctx, string? tab, string? edit, string? notice) => WithCallsign(ctx, options,
-            (prefix, call) => Forwarding(options, prefix, call, tab, edit, Embed(ctx), Theme(ctx), notice: notice)));
+        app.MapGet("/forwarding", (HttpContext ctx, string? tab, string? edit, string? add, string? notice) => WithCallsign(ctx, options,
+            (prefix, call) => Forwarding(options, prefix, call, tab, edit, Embed(ctx), Theme(ctx), notice: notice, adding: add == "1")));
 
         app.MapPost("/forwarding/partner", async (HttpContext ctx) =>
         {
@@ -906,7 +906,7 @@ public static class Webmail
     /// </summary>
     private static IResult Forwarding(
         WebmailOptions o, string prefix, string call, string? tab, string? editCall, bool embed, string? theme,
-        string? notice = null, bool noticeError = false, string? yamlText = null, int status = StatusCodes.Status200OK)
+        string? notice = null, bool noticeError = false, string? yamlText = null, bool adding = false, int status = StatusCodes.Status200OK)
     {
         if (!IsSysop(o, call))
         {
@@ -935,58 +935,58 @@ public static class Webmail
 
         string body = yamlTab
             ? YamlTab(o, prefix, embed, partners, yamlText)
-            : FormsTab(o, prefix, embed, partners, editCall);
+            : FormsTab(o, prefix, embed, partners, editCall, adding);
 
         return Html(Page(o, prefix, call, "Forwarding", embed,
             $"""
             <h2>Forwarding partners <span class="dim">— {partners.Count} configured</span></h2>
-            <p class="dim">Everything here is configurable by form or YAML — both edit the same store. <code>bbs.yaml</code> only seeds an empty store on first run.</p>
+            <p class="dim">Add and edit forwarding partners as a form, or edit them all at once as YAML.</p>
             {tabs}
             {banner}
             {body}
             """, theme), status);
     }
 
-    /// <summary>The Forms tab: partner cards (each with Edit / Delete / Forward now), an edit form, and the Add form.</summary>
-    private static string FormsTab(WebmailOptions o, string prefix, bool embed, IReadOnlyList<Partner> partners, string? editCall)
+    /// <summary>
+    /// The Forms tab. Adding or editing shows the partner form on its OWN (a focused page with
+    /// Cancel back to the list); otherwise the list — an "Add partner" button above the partner
+    /// cards, each card carrying its own Edit / Forward now / Delete actions.
+    /// </summary>
+    private static string FormsTab(WebmailOptions o, string prefix, bool embed, IReadOnlyList<Partner> partners, string? editCall, bool adding)
     {
-        Partner? editing = editCall is { Length: > 0 } ? o.Store.GetPartner(editCall) : null;
+        if (adding)
+        {
+            return PartnerForm(prefix, embed, partner: null);
+        }
+
+        if (editCall is { Length: > 0 } && o.Store.GetPartner(editCall) is { } editing)
+        {
+            return PartnerForm(prefix, embed, editing);
+        }
 
         var sb = new StringBuilder();
+        sb.Append(Inv($"""<p class="add-row"><a class="btn primary" href="{U(prefix, "/forwarding?add=1", embed)}">Add partner</a></p>"""));
         if (partners.Count == 0)
         {
-            sb.Append("""<p class="dim">No forwarding partners yet. Add one below, or paste a YAML block in the YAML tab.</p>""");
+            sb.Append("""<p class="dim">No forwarding partners yet.</p>""");
         }
         else
         {
             foreach (Partner p in partners)
             {
-                sb.Append(PartnerCard(o, prefix, embed, p, editing));
+                sb.Append(PartnerCard(o, prefix, embed, p));
             }
-        }
-
-        // The Add form only when not editing (one form at a time keeps the page focused; editing shows
-        // the edit form in place of the Add form).
-        if (editing is null)
-        {
-            sb.Append(PartnerForm(prefix, embed, partner: null));
         }
 
         return sb.ToString();
     }
 
     /// <summary>
-    /// One partner's card: dial config + live queue depth + the plain-language routing rules, plus the
-    /// Edit / Delete / Forward-now action row. When this card is the one being edited the inline edit
-    /// form is rendered in its place instead.
+    /// One partner's card: dial config + live queue depth + the plain-language routing rules, plus an
+    /// Edit / Forward now / Delete action row (Edit opens the focused edit form; the other two POST).
     /// </summary>
-    private static string PartnerCard(WebmailOptions o, string prefix, bool embed, Partner p, Partner? editing)
+    private static string PartnerCard(WebmailOptions o, string prefix, bool embed, Partner p)
     {
-        if (editing is not null && Callsigns.BaseEquals(editing.Call, p.Call))
-        {
-            return PartnerForm(prefix, embed, p);
-        }
-
         string badge = p.Enabled
             ? """<span class="badge on">auto-dial on</span>"""
             : """<span class="badge off">auto-dial off</span>""";
@@ -1010,14 +1010,14 @@ public static class Webmail
 
         string mode = p.AllowB2F ? "B2 (binary capable)" : "B1 (text only)";
 
-        // Action row: Edit (link → ?edit=call), Forward now + Delete (posts; the embed/prefix threaded).
+        // Action row: Edit (→ the focused edit form), Forward now + Delete (POSTs); buttons, not links.
         string editHref = U(prefix, Inv($"/forwarding?edit={Uri.EscapeDataString(p.Call)}"), embed);
         string actions = $"""
-            <p class="card-actions">
-            <a href="{editHref}">Edit</a>
-            <form method="post" action="{U(prefix, "/forwarding/partner/forward-now", embed)}">{EmbedField(embed)}<input type="hidden" name="call" value="{H(p.Call)}"><button type="submit" class="link plain">Forward now</button></form>
-            <form method="post" action="{U(prefix, "/forwarding/partner/delete", embed)}">{EmbedField(embed)}<input type="hidden" name="call" value="{H(p.Call)}"><button type="submit" class="link">Delete</button></form>
-            </p>
+            <div class="card-actions">
+            <a class="btn" href="{editHref}">Edit</a>
+            <form method="post" action="{U(prefix, "/forwarding/partner/forward-now", embed)}">{EmbedField(embed)}<input type="hidden" name="call" value="{H(p.Call)}"><button type="submit" class="btn">Forward now</button></form>
+            <form method="post" action="{U(prefix, "/forwarding/partner/delete", embed)}">{EmbedField(embed)}<input type="hidden" name="call" value="{H(p.Call)}"><button type="submit" class="btn danger">Delete</button></form>
+            </div>
             """;
 
         return $$"""
@@ -1064,9 +1064,8 @@ public static class Webmail
         bool collect = editing ? partner!.Collect : false;
         bool allowB2 = editing ? partner!.AllowB2F : false;
 
-        string cancel = editing
-            ? Inv($"""<a class="cancel" href="{U(prefix, "/forwarding", embed)}">Cancel</a>""")
-            : "";
+        // Both add + edit are focused form pages, so both get a Cancel back to the list.
+        string cancel = Inv($"""<a class="btn" href="{U(prefix, "/forwarding", embed)}">Cancel</a>""");
 
         return $"""
             <form method="post" action="{U(prefix, "/forwarding/partner", embed)}">
@@ -1108,7 +1107,7 @@ public static class Webmail
     {
         string text = yamlText ?? PartnerYaml.Serialize(partners);
         return $"""
-            <p class="dim">The whole partner set as YAML — the same <code>partners:</code> block as <code>bbs.yaml</code>. Save applies it to the store: partners in the YAML are created/updated, partners missing from it are removed.</p>
+            <p class="dim">All forwarding partners as YAML. Saving replaces the list with exactly what you enter here.</p>
             <form method="post" action="{U(prefix, "/forwarding/yaml", embed)}">
             {EmbedField(embed)}
             <p><textarea name="yaml" rows="22" cols="80" spellcheck="false">{H(text)}</textarea></p>
@@ -1715,8 +1714,18 @@ public static class Webmail
         }
         nav.subtabs{display:inline-flex;gap:.2rem;margin:0 0 1rem;width:auto}
         nav.subtabs a.active{background:hsl(var(--background));color:hsl(var(--foreground));box-shadow:0 1px 2px 0 hsl(220 26% 7%/.06)}
-        p.card-actions{display:flex;align-items:center;gap:1rem;margin:.75rem 0 0;font-size:.85rem}
-        p.card-actions form{display:inline;margin:0}
+        .card-actions{display:flex;flex-wrap:wrap;align-items:center;gap:.5rem;margin:.85rem 0 0}
+        .card-actions form{display:inline;margin:0}
+        .add-row{margin:0 0 1.1rem}
+        .btn{display:inline-block;font:inherit;font-size:.8rem;font-weight:500;line-height:1.4;
+          padding:.35rem .8rem;border-radius:calc(var(--radius) - 2px);border:1px solid hsl(var(--input));
+          background:hsl(var(--secondary));color:hsl(var(--secondary-foreground));cursor:pointer;text-decoration:none}
+        .btn:hover{background:hsl(var(--accent));text-decoration:none}
+        .btn:focus-visible{outline:none;box-shadow:0 0 0 2px hsl(var(--ring)/.35)}
+        .btn.primary{background:hsl(var(--primary));color:hsl(var(--primary-foreground));border-color:transparent}
+        .btn.primary:hover{background:hsl(var(--primary)/.9)}
+        .btn.danger{background:transparent;color:hsl(var(--danger));border-color:hsl(var(--danger)/.4)}
+        .btn.danger:hover{background:hsl(var(--danger)/.1)}
         button.link.plain{color:hsl(var(--primary))}
         button.link.plain:hover{color:hsl(var(--primary)/.85)}
         a.cancel{font-size:.85rem;color:hsl(var(--muted-foreground));margin-left:.5rem}

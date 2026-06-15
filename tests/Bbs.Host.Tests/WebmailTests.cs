@@ -1890,14 +1890,38 @@ public sealed class WebmailTests : IAsyncDisposable
         _store.UpsertPartner(new Partner { Call = "GB7BPQ", AtCalls = ["*"] });
         using HttpClient client = await StartAsync(pdnUser: "tom", forwardedPrefix: "/apps/bbs");
 
-        // Slot/embed: pdn renders us in a borderless iframe with ?pdn_embed=1.
+        // Slot/embed: pdn renders us in a borderless iframe with ?pdn_embed=1. The LIST view's
+        // Add button, per-card POST forms, and the YAML tab link all carry the mount prefix +
+        // ?pdn_embed=1; the POST forms also carry the hidden embed field so it survives the POST.
         string forms = await client.GetStringAsync(new Uri("/forwarding?pdn_embed=1", UriKind.Relative));
-        // Every action/href carries the mount prefix; in embed mode each also carries ?pdn_embed=1,
-        // and forms additionally carry the hidden embed field so the signal survives a POST.
-        Assert.Contains("action=\"/apps/bbs/forwarding/partner?pdn_embed=1\"", forms, StringComparison.Ordinal);
+        Assert.Contains("href=\"/apps/bbs/forwarding?add=1&pdn_embed=1\"", forms, StringComparison.Ordinal);
         Assert.Contains("/apps/bbs/forwarding/partner/forward-now?pdn_embed=1", forms, StringComparison.Ordinal);
         Assert.Contains("href=\"/apps/bbs/forwarding?tab=yaml&pdn_embed=1", forms, StringComparison.Ordinal);
         Assert.Contains("name=\"pdn_embed\" value=\"1\"", forms, StringComparison.Ordinal);
+
+        // The focused Add form (?add=1) posts to the prefixed + embedded create route.
+        string addForm = await client.GetStringAsync(new Uri("/forwarding?add=1&pdn_embed=1", UriKind.Relative));
+        Assert.Contains("action=\"/apps/bbs/forwarding/partner?pdn_embed=1\"", addForm, StringComparison.Ordinal);
+        Assert.Contains("name=\"pdn_embed\" value=\"1\"", addForm, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Editor_AddIsAFocusedView_NotInlineInTheList()
+    {
+        ClaimCallsign("tom", "G0SYS");
+        _store.UpsertPartner(new Partner { Call = "GB7BPQ", AtCalls = ["*"] });
+        using HttpClient client = await StartAsync(pdnUser: "tom");
+
+        // The list view offers an "Add partner" button, NOT an inline new-partner form.
+        string list = await client.GetStringAsync(new Uri("/forwarding", UriKind.Relative));
+        Assert.Contains("/forwarding?add=1", list, StringComparison.Ordinal);                 // the Add button
+        Assert.DoesNotContain("name=\"call\" placeholder", list, StringComparison.Ordinal);   // no inline call input
+
+        // The focused Add view renders the form alone — editable callsign, "Add partner" + Cancel.
+        string add = await client.GetStringAsync(new Uri("/forwarding?add=1", UriKind.Relative));
+        Assert.Contains("name=\"call\" placeholder", add, StringComparison.Ordinal);
+        Assert.Contains(">Add partner</button>", add, StringComparison.Ordinal);
+        Assert.Contains(">Cancel</a>", add, StringComparison.Ordinal);
     }
 
     [Fact]
