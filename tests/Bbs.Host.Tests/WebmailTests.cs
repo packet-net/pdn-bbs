@@ -1327,4 +1327,92 @@ public sealed class WebmailTests : IAsyncDisposable
         string page = await response.Content.ReadAsStringAsync();
         Assert.Contains("claim", page, StringComparison.OrdinalIgnoreCase);
     }
+
+    // ------------------------------------------------ forwarding view (sysop, read-only)
+    // A sysop-only, read-only picture of how mail leaves this BBS: one panel per configured partner
+    // with its dial config, the LIVE forward-queue depth, and the routing rules translated out of FBB
+    // vocabulary. The nav tab + the route are sysop-gated; a non-sysop never sees the tab and a direct
+    // GET 403s. It does NOT surface last-contact/last-error (the store persists no session outcome).
+
+    [Fact]
+    public async Task Forwarding_Sysop_ListsPartnerWithTranslatedRoutingAndLiveQueueDepth()
+    {
+        ClaimCallsign("tom", "G0SYS"); // the configured SysopCallsign
+        _store.UpsertPartner(new Partner
+        {
+            Call = "GB7BPQ",
+            Enabled = true,
+            AtCalls = ["*"],                 // → "default uplink (catch-all)"
+            HRoutes = ["GBR.EURO"],          // → "Areas"
+            BbsHa = "GB7BPQ.#23.GBR.EURO",   // → "Partner address"
+            ConnectScript = ["C GB7BPQ"],
+            ForwardIntervalSeconds = 1800,   // → "every 30 min"
+            ForwardNewImmediately = true,    // → "and as soon as a message is queued"
+        });
+        // One message queued to the partner → the live depth the store can answer.
+        Message m = _store.AddMessage(new MessageDraft
+        {
+            Type = MessageType.Personal,
+            From = "M0LTE",
+            Recipients = ["G8ABC"],
+            At = "GB7BPQ",
+            Subject = "queued",
+            Body = Encoding.Latin1.GetBytes("x\r"),
+        });
+        _store.EnqueueForwards(m.Number, ["GB7BPQ"]);
+
+        using HttpClient client = await StartAsync(pdnUser: "tom");
+
+        // The sysop sees the nav tab.
+        string inbox = await client.GetStringAsync(new Uri("/", UriKind.Relative));
+        Assert.Contains(">Forwarding</a>", inbox, StringComparison.Ordinal);
+
+        string page = await client.GetStringAsync(new Uri("/forwarding", UriKind.Relative));
+        Assert.Contains("GB7BPQ", page, StringComparison.Ordinal);
+        Assert.Contains("auto-dial on", page, StringComparison.Ordinal);
+        Assert.Contains("C GB7BPQ", page, StringComparison.Ordinal);                 // connect script
+        Assert.Contains("every 30 min", page, StringComparison.Ordinal);             // schedule
+        Assert.Contains("as soon as a message is queued", page, StringComparison.Ordinal);
+        Assert.Contains("Default uplink", page, StringComparison.Ordinal);           // at:* translated
+        Assert.Contains("GBR.EURO", page, StringComparison.Ordinal);                 // areas
+        Assert.Contains("GB7BPQ.#23.GBR.EURO", page, StringComparison.Ordinal);      // partner HA
+        Assert.Contains("message waiting", page, StringComparison.Ordinal);          // live queue depth
+    }
+
+    [Fact]
+    public async Task Forwarding_DisabledPartner_ShowsAutoDialOff()
+    {
+        ClaimCallsign("tom", "G0SYS");
+        _store.UpsertPartner(new Partner { Call = "GB7XYZ", Enabled = false, AtCalls = ["*"] });
+        using HttpClient client = await StartAsync(pdnUser: "tom");
+
+        string page = await client.GetStringAsync(new Uri("/forwarding", UriKind.Relative));
+        Assert.Contains("GB7XYZ", page, StringComparison.Ordinal);
+        Assert.Contains("auto-dial off", page, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Forwarding_NoPartners_ShowsEmptyState()
+    {
+        ClaimCallsign("tom", "G0SYS");
+        using HttpClient client = await StartAsync(pdnUser: "tom");
+
+        string page = await client.GetStringAsync(new Uri("/forwarding", UriKind.Relative));
+        Assert.Contains("No forwarding partners", page, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Forwarding_NonSysop_Gets403_AndSeesNoNavTab()
+    {
+        // A regular (non-sysop) user: the route 403s and the nav tab is never rendered for them.
+        ClaimCallsign("tom", "M0LTE");
+        using HttpClient client = await StartAsync(pdnUser: "tom");
+
+        string inbox = await client.GetStringAsync(new Uri("/", UriKind.Relative));
+        Assert.DoesNotContain(">Forwarding</a>", inbox, StringComparison.Ordinal);
+
+        HttpResponseMessage response = await client.GetAsync(new Uri("/forwarding", UriKind.Relative));
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+        Assert.Contains("sysop only", await response.Content.ReadAsStringAsync(), StringComparison.OrdinalIgnoreCase);
+    }
 }

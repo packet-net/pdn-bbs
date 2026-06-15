@@ -58,8 +58,8 @@ public sealed record WebmailOptions
 /// usernames map to BBS callsigns through the Core user table
 /// (<see cref="User.PdnUsername"/>); an unmapped username gets a claim-your-callsign form.
 /// Surfaces: inbox (personals to my callsign), bulletins (paged), read, compose (P/B
-/// through the same store path as the console — BID generation + routing enqueue), and
-/// kill-my-message. No JS, two forms.
+/// through the same store path as the console — BID generation + routing enqueue),
+/// kill-my-message, settings, and a sysop-only read-only forwarding view. No JS.
 /// </summary>
 public static class Webmail
 {
@@ -204,6 +204,11 @@ public static class Webmail
 
         app.MapPost("/settings/mailpw/clear", (HttpContext ctx) => WithCallsign(ctx, options,
             (prefix, call) => ClearMailPassword(options, prefix, call, Embed(ctx), Theme(ctx))));
+
+        // Sysop-only, read-only: how mail forwards to neighbouring BBSes. Gated inside the handler
+        // (a non-sysop gets a 403 page; the nav tab is only rendered for the sysop).
+        app.MapGet("/forwarding", (HttpContext ctx) => WithCallsign(ctx, options,
+            (prefix, call) => Forwarding(options, prefix, call, Embed(ctx), Theme(ctx))));
     }
 
     private const string PdnUserKey = "pdnUser";
@@ -806,6 +811,147 @@ public static class Webmail
             removed ? "Mail password removed. External mail apps can no longer sign in." : "No mail password was set.", theme: theme);
     }
 
+    // ---------------------------------------------------------------- forwarding (sysop, read-only)
+
+    /// <summary>
+    /// The sysop-only forwarding view: a read-only picture of how mail leaves this BBS for its
+    /// neighbours. One panel per configured partner — identity + auto-dial state, the connect
+    /// script, the poll schedule, the LIVE forward-queue depth (the one dynamic datum the store
+    /// can answer — <see cref="BbsStore.GetForwardQueue"/>), the size caps, the B1/B2 mode, and the
+    /// routing rules translated out of FBB vocabulary (<c>at: ["*"]</c> → "default uplink", etc.).
+    /// </summary>
+    /// <remarks>
+    /// Read-only by design: partners are defined in <c>bbs.yaml</c> and synced into the store at
+    /// start-up, so this view never mutates config. It deliberately does NOT show last-contact /
+    /// last-error — the store persists no forwarding-session outcome (the <c>forwards</c> table is
+    /// only <c>queued_utc</c>/<c>forwarded_utc</c>, and the scheduler keeps no queryable status), so
+    /// surfacing those would need an engine change to record session results. That's a named
+    /// deferral, not an oversight.
+    /// </remarks>
+    private static IResult Forwarding(WebmailOptions o, string prefix, string call, bool embed, string? theme)
+    {
+        if (!IsSysop(o, call))
+        {
+            return Html(Page(o, prefix, call, "Forwarding", embed,
+                """
+                <h2>Forwarding</h2>
+                <p class="err">This page is for the sysop only.</p>
+                """, theme), StatusCodes.Status403Forbidden);
+        }
+
+        IReadOnlyList<Partner> partners = o.Store.ListPartners();
+        string cards;
+        if (partners.Count == 0)
+        {
+            cards = """<p class="dim">No forwarding partners are configured. Partners are defined in <code>bbs.yaml</code> and loaded at start-up.</p>""";
+        }
+        else
+        {
+            var sb = new StringBuilder();
+            foreach (Partner p in partners)
+            {
+                sb.Append(PartnerCard(o, p));
+            }
+
+            cards = sb.ToString();
+        }
+
+        return Html(Page(o, prefix, call, "Forwarding", embed,
+            $"""
+            <h2>Forwarding partners <span class="dim">— {partners.Count} configured</span></h2>
+            <p class="dim">Read-only view of how mail forwards to neighbouring BBSes. Partners are configured in <code>bbs.yaml</code> and applied when the BBS restarts.</p>
+            {cards}
+            """, theme));
+    }
+
+    /// <summary>One partner's panel: dial config + live queue depth + the plain-language routing rules.</summary>
+    private static string PartnerCard(WebmailOptions o, Partner p)
+    {
+        string badge = p.Enabled
+            ? """<span class="badge on">auto-dial on</span>"""
+            : """<span class="badge off">auto-dial off</span>""";
+
+        int queued = o.Store.GetForwardQueue(p.Call).Count;
+        string queue = queued == 0
+            ? """<span class="dim">empty</span>"""
+            : Inv($"<b>{queued}</b> message{(queued == 1 ? "" : "s")} waiting");
+
+        string connect = p.ConnectScript.Count == 0
+            ? """<span class="dim">none</span>"""
+            : H(string.Join("  ·  ", p.ConnectScript));
+
+        string schedule = Inv($"every {Math.Max(1, p.ForwardIntervalSeconds / 60)} min")
+            + (p.ForwardNewImmediately ? ", and as soon as a message is queued" : "");
+
+        string limits = p.MaxRxSize >= 99999 && p.MaxTxSize >= 99999
+            ? """<span class="dim">no size limit</span>"""
+            : Inv($"accepts ≤ {p.MaxRxSize:N0} B · sends ≤ {p.MaxTxSize:N0} B");
+
+        string mode = p.AllowB2F ? "B2 (binary capable)" : "B1 (text only)";
+
+        return $$"""
+            <fieldset>
+            <legend>{{H(p.Call)}} {{badge}}</legend>
+            <table class="meta">
+            <tr><th>Connect</th><td>{{connect}}</td></tr>
+            <tr><th>Schedule</th><td>{{H(schedule)}}</td></tr>
+            <tr><th>Queue</th><td>{{queue}}</td></tr>
+            <tr><th>Limits</th><td>{{limits}}</td></tr>
+            <tr><th>Mode</th><td>{{H(mode)}}</td></tr>
+            </table>
+            {{RoutingSummary(p)}}
+            </fieldset>
+            """;
+    }
+
+    /// <summary>
+    /// The partner's routing rules in plain language. Mirrors the priority order
+    /// <see cref="Bbs.Core.RoutingEngine"/> applies: exact recipients (<c>ToCalls</c>), the
+    /// <c>@</c>-addresses it serves (<c>AtCalls</c>; a <c>*</c> entry is the last-resort default
+    /// uplink), the hierarchical flood/personal areas (<c>HRoutes</c>/<c>HRoutesP</c>), and the
+    /// partner's own HA used for the flood "in target area" test (<c>BbsHa</c>).
+    /// </summary>
+    private static string RoutingSummary(Partner p)
+    {
+        var rows = new List<string>();
+
+        bool wildcard = p.AtCalls.Any(a => a.Contains('*', StringComparison.Ordinal));
+        List<string> namedAt = p.AtCalls.Where(a => !a.Contains('*', StringComparison.Ordinal)).ToList();
+
+        if (wildcard)
+        {
+            rows.Add(RouteRow("Default uplink", "catch-all — mail no other partner claims forwards here"));
+        }
+
+        if (namedAt.Count > 0)
+        {
+            rows.Add(RouteRow("@ addresses", string.Join(", ", namedAt)));
+        }
+
+        if (p.ToCalls.Count > 0)
+        {
+            rows.Add(RouteRow("Recipients", string.Join(", ", p.ToCalls)));
+        }
+
+        List<string> areas = p.HRoutes.Concat(p.HRoutesP).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        if (areas.Count > 0)
+        {
+            rows.Add(RouteRow("Areas", string.Join(", ", areas)));
+        }
+
+        if (!string.IsNullOrWhiteSpace(p.BbsHa))
+        {
+            rows.Add(RouteRow("Partner address", p.BbsHa!));
+        }
+
+        return rows.Count == 0
+            ? """<p class="dim">No routing rules — this partner receives nothing automatically.</p>"""
+            : "<ul class=\"routes\">" + string.Concat(rows) + "</ul>";
+    }
+
+    private static string RouteRow(string label, string value) =>
+        Inv($"""<li><span class="label">{H(label)}</span>{H(value)}</li>""");
+
     // ---------------------------------------------------------------- rendering
 
     private static bool IsSysop(WebmailOptions o, string call) =>
@@ -891,11 +1037,16 @@ public static class Webmail
         // Embedded: trim the top padding so the content sits flush under the panel's own header. An
         // inline style (not a shared-stylesheet rule) keeps the standalone page's CSS byte-for-byte.
         string mainClass = embed ? """ class="embed" style="padding-top:.5rem" """.TrimEnd() : "";
+        // The forwarding view is a sysop tool — only the sysop sees its nav tab (the route itself
+        // also 403s a non-sysop). Regular users get the unchanged four-tab nav.
+        string forwardingTab = IsSysop(o, call)
+            ? Inv($""" · <a href="{U(prefix, "/forwarding", embed)}">Forwarding</a>""")
+            : "";
         return $$"""
             <!doctype html>
             <html{{HtmlThemeClass(theme)}}><head><meta charset="utf-8"><title>{{H(o.StationCallsign)}} — {{H(title)}}</title>{{Style}}</head>
             <body><main{{mainClass}}>
-            {{header}}<nav><a href="{{U(prefix, "/", embed)}}">Inbox</a> · <a href="{{U(prefix, "/bulletins", embed)}}">Bulletins</a> · <a href="{{U(prefix, "/compose", embed)}}">Compose</a> · <a href="{{U(prefix, "/settings", embed)}}">Settings</a>
+            {{header}}<nav><a href="{{U(prefix, "/", embed)}}">Inbox</a> · <a href="{{U(prefix, "/bulletins", embed)}}">Bulletins</a> · <a href="{{U(prefix, "/compose", embed)}}">Compose</a> · <a href="{{U(prefix, "/settings", embed)}}">Settings</a>{{forwardingTab}}
             <span class="dim">— de {{H(call)}}</span></nav>
             {{body}}
             </main></body></html>
@@ -1045,6 +1196,22 @@ public static class Webmail
           color:hsl(var(--danger));text-decoration:underline;
         }
         button.link:hover{background:none;color:hsl(var(--danger)/.85)}
+        code{
+          font-family:"JetBrains Mono",ui-monospace,SFMono-Regular,monospace;font-size:.85em;
+          background:hsl(var(--muted)/.6);padding:.05rem .3rem;border-radius:calc(var(--radius) - 4px);
+        }
+        .badge{
+          display:inline-block;font-size:.7rem;font-weight:600;padding:.1rem .45rem;
+          border-radius:9999px;text-transform:uppercase;letter-spacing:.03em;vertical-align:middle;margin-left:.4rem;
+        }
+        .badge.on{color:hsl(var(--success));background:hsl(var(--success)/.12)}
+        .badge.off{color:hsl(var(--muted-foreground));background:hsl(var(--muted)/.7)}
+        ul.routes{list-style:none;padding:0;margin:.5rem 0 0;font-size:.85rem}
+        ul.routes li{padding:.15rem 0;border-bottom:0}
+        ul.routes .label{
+          display:inline-block;min-width:8.5rem;color:hsl(var(--muted-foreground));
+          font-size:.72rem;text-transform:uppercase;letter-spacing:.03em;font-weight:600;margin-right:.5rem;
+        }
         </style>
         """;
 
