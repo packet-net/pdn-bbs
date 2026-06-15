@@ -24,6 +24,11 @@ public sealed class WebmailTests : IAsyncDisposable
     private readonly InMemoryUserSettingsStore _settings = new();
     private WebApplication? _app;
 
+    // Forwarding-editor seam observers: the harness counts OnPartnersChanged calls and records each
+    // "forward now" partner so a test can assert the scheduler reconcile / nudge actually fired.
+    private int _partnersChanged;
+    private readonly List<string> _forwardNow = [];
+
     public WebmailTests()
     {
         _dir = Directory.CreateTempSubdirectory("bbs-webmail-test-");
@@ -61,6 +66,8 @@ public sealed class WebmailTests : IAsyncDisposable
             // mail own-call "GB7PDN" the store/engine use above — so BIDs are GB7PDN while the title is GB7PDN-1.
             StationCallsign = "GB7PDN-1",
             SysopCallsign = "G0SYS", // distinct from the test users — sysop may read/kill anything
+            OnPartnersChanged = () => Interlocked.Increment(ref _partnersChanged),
+            OnForwardNow = call => { lock (_forwardNow) { _forwardNow.Add(call); } },
         };
         if (maxUploadBytes is { } cap)
         {
@@ -1582,5 +1589,341 @@ public sealed class WebmailTests : IAsyncDisposable
         HttpResponseMessage response = await client.GetAsync(new Uri("/forwarding", UriKind.Relative));
         Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
         Assert.Contains("sysop only", await response.Content.ReadAsStringAsync(), StringComparison.OrdinalIgnoreCase);
+    }
+
+    // ------------------------------------------------ forwarding EDITOR (sysop): forms + YAML
+    // Store-first: both the per-partner forms and the bulk YAML block edit the SQLite store (the
+    // source of truth). Every mutation fires OnPartnersChanged (the scheduler reconcile seam); forward-
+    // now fires OnForwardNow (the nudge). A change in one surface shows in the other (parity). The whole
+    // editor is sysop-gated. bbs.yaml is seed-only and not touched by the editor.
+
+    private static FormUrlEncodedContent Form(params (string Key, string Value)[] fields) =>
+        new(fields.Select(f => new KeyValuePair<string, string>(f.Key, f.Value)));
+
+    [Fact]
+    public async Task Editor_ForwardingTab_HasFormsAndYamlSwitch()
+    {
+        ClaimCallsign("tom", "G0SYS");
+        using HttpClient client = await StartAsync(pdnUser: "tom");
+
+        string forms = await client.GetStringAsync(new Uri("/forwarding", UriKind.Relative));
+        Assert.Contains(">Forms</a>", forms, StringComparison.Ordinal);
+        Assert.Contains(">YAML</a>", forms, StringComparison.Ordinal);
+        Assert.Contains("Add partner", forms, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Editor_CreatePartnerViaForm_WritesStore_AndFiresReconcile()
+    {
+        ClaimCallsign("tom", "G0SYS");
+        using HttpClient client = await StartAsync(pdnUser: "tom", autoRedirect: false);
+
+        HttpResponseMessage post = await client.PostAsync(new Uri("/forwarding/partner", UriKind.Relative), Form(
+            ("call", "gb7bpq"),
+            ("connectScript", "C GB7BPQ\nBBS"),
+            ("at", "*"),
+            ("hr", "GBR.EURO"),
+            ("bbsHa", "GB7BPQ.#23.GBR.EURO"),
+            ("intervalMinutes", "30"),
+            ("conTimeoutSeconds", "45"),
+            ("maxRx", "50000"),
+            ("maxTx", "40000"),
+            ("enabled", "1"),
+            ("sendImmediately", "1"),
+            ("allowB2", "1")));
+        Assert.Equal(HttpStatusCode.Redirect, post.StatusCode);
+
+        Partner? p = _store.GetPartner("GB7BPQ");
+        Assert.NotNull(p);
+        Assert.Equal(["C GB7BPQ", "BBS"], p!.ConnectScript);
+        Assert.Equal(["*"], p.AtCalls);
+        Assert.Equal(["GBR.EURO"], p.HRoutes);
+        Assert.Equal("GB7BPQ.#23.GBR.EURO", p.BbsHa);
+        Assert.Equal(30 * 60, p.ForwardIntervalSeconds);
+        Assert.Equal(45, p.ConTimeoutSeconds);
+        Assert.Equal(50000, p.MaxRxSize);
+        Assert.Equal(40000, p.MaxTxSize);
+        Assert.True(p.Enabled);
+        Assert.True(p.ForwardNewImmediately);
+        Assert.True(p.AllowB2F);
+        Assert.False(p.Collect); // checkbox unchecked → not posted → false
+        Assert.Equal(1, _partnersChanged);
+    }
+
+    [Fact]
+    public async Task Editor_EditPartnerViaForm_UpdatesStore_AndFiresReconcile()
+    {
+        ClaimCallsign("tom", "G0SYS");
+        _store.UpsertPartner(new Partner { Call = "GB7BPQ", Enabled = true, AtCalls = ["*"], ForwardNewImmediately = true });
+        using HttpClient client = await StartAsync(pdnUser: "tom", autoRedirect: false);
+
+        // The edit form is reachable at ?edit=CALL.
+        string editForm = await client.GetStringAsync(new Uri("/forwarding?edit=GB7BPQ", UriKind.Relative));
+        Assert.Contains("Edit GB7BPQ", editForm, StringComparison.Ordinal);
+
+        // Disable it + clear send-immediately + add an area.
+        HttpResponseMessage post = await client.PostAsync(new Uri("/forwarding/partner", UriKind.Relative), Form(
+            ("call", "GB7BPQ"),
+            ("at", "*"),
+            ("hr", "GBR.EURO DEU.EURO"),
+            ("intervalMinutes", "60"),
+            ("conTimeoutSeconds", "60"),
+            ("maxRx", "99999"),
+            ("maxTx", "99999")));
+        // enabled / sendImmediately checkboxes not posted → both turn off.
+        Assert.Equal(HttpStatusCode.Redirect, post.StatusCode);
+
+        Partner? p = _store.GetPartner("GB7BPQ");
+        Assert.NotNull(p);
+        Assert.False(p!.Enabled);
+        Assert.False(p.ForwardNewImmediately);
+        Assert.Equal(["GBR.EURO", "DEU.EURO"], p.HRoutes);
+        Assert.Equal(1, _partnersChanged);
+    }
+
+    [Fact]
+    public async Task Editor_DeletePartnerViaForm_RemovesFromStore_AndFiresReconcile()
+    {
+        ClaimCallsign("tom", "G0SYS");
+        _store.UpsertPartner(new Partner { Call = "GB7BPQ", AtCalls = ["*"] });
+        using HttpClient client = await StartAsync(pdnUser: "tom", autoRedirect: false);
+
+        HttpResponseMessage post = await client.PostAsync(new Uri("/forwarding/partner/delete", UriKind.Relative),
+            Form(("call", "GB7BPQ")));
+        Assert.Equal(HttpStatusCode.Redirect, post.StatusCode);
+
+        Assert.Null(_store.GetPartner("GB7BPQ"));
+        Assert.Equal(1, _partnersChanged);
+    }
+
+    [Fact]
+    public async Task Editor_ForwardNow_NudgesThatPartner()
+    {
+        ClaimCallsign("tom", "G0SYS");
+        _store.UpsertPartner(new Partner { Call = "GB7BPQ", AtCalls = ["*"] });
+        using HttpClient client = await StartAsync(pdnUser: "tom", autoRedirect: false);
+
+        HttpResponseMessage post = await client.PostAsync(new Uri("/forwarding/partner/forward-now", UriKind.Relative),
+            Form(("call", "GB7BPQ")));
+        Assert.Equal(HttpStatusCode.Redirect, post.StatusCode);
+
+        Assert.Equal(["GB7BPQ"], _forwardNow);
+        Assert.Equal(0, _partnersChanged); // forward-now is a nudge, not a config mutation
+    }
+
+    [Fact]
+    public async Task Editor_InvalidCallsign_IsRejected_WithNoStoreChange()
+    {
+        ClaimCallsign("tom", "G0SYS");
+        using HttpClient client = await StartAsync(pdnUser: "tom");
+
+        HttpResponseMessage post = await client.PostAsync(new Uri("/forwarding/partner", UriKind.Relative),
+            Form(("call", "NOTACALL"))); // no digit in the call position → not callsign-shaped
+        Assert.Equal(HttpStatusCode.BadRequest, post.StatusCode);
+        Assert.Contains("look like a callsign", await post.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+        Assert.Empty(_store.ListPartners());
+        Assert.Equal(0, _partnersChanged);
+    }
+
+    [Fact]
+    public async Task Editor_YamlTab_RendersStorePartnersAsYaml()
+    {
+        ClaimCallsign("tom", "G0SYS");
+        _store.UpsertPartner(new Partner
+        {
+            Call = "GB7BPQ",
+            AtCalls = ["*"],
+            HRoutes = ["GBR.EURO"],
+            HRoutesP = ["GBR.EURO"],
+            BbsHa = "GB7BPQ.#23.GBR.EURO",
+            ConnectScript = ["C GB7BPQ"],
+        });
+        using HttpClient client = await StartAsync(pdnUser: "tom");
+
+        string yaml = await client.GetStringAsync(new Uri("/forwarding?tab=yaml", UriKind.Relative));
+        // The textarea carries the partners: block (HTML-encoded).
+        Assert.Contains("GB7BPQ", yaml, StringComparison.Ordinal);
+        Assert.Contains("connectScript", yaml, StringComparison.Ordinal);
+        Assert.Contains("GBR.EURO", yaml, StringComparison.Ordinal);
+        Assert.Contains("<textarea", yaml, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Editor_SaveYaml_AppliesAddRemoveChange_ToStore()
+    {
+        ClaimCallsign("tom", "G0SYS");
+        // Two partners already in the store; the YAML will keep one (changed), drop the other, add a new one.
+        _store.UpsertPartner(new Partner { Call = "GB7OLD", AtCalls = ["*"] });
+        _store.UpsertPartner(new Partner { Call = "GB7BPQ", AtCalls = ["*"], Enabled = true });
+        using HttpClient client = await StartAsync(pdnUser: "tom", autoRedirect: false);
+
+        string yaml = """
+            partners:
+              - call: GB7BPQ
+                enabled: false
+                at: ["*"]
+              - call: GB7NEW
+                at: ["EURO"]
+            """;
+        HttpResponseMessage post = await client.PostAsync(new Uri("/forwarding/yaml", UriKind.Relative),
+            Form(("yaml", yaml)));
+        Assert.Equal(HttpStatusCode.Redirect, post.StatusCode);
+
+        Assert.Null(_store.GetPartner("GB7OLD"));               // removed (absent from YAML)
+        Partner? bpq = _store.GetPartner("GB7BPQ");
+        Assert.NotNull(bpq);
+        Assert.False(bpq!.Enabled);                              // changed
+        Partner? added = _store.GetPartner("GB7NEW");
+        Assert.NotNull(added);                                   // added
+        Assert.Equal(["EURO"], added!.AtCalls);
+        Assert.Equal(1, _partnersChanged);
+    }
+
+    [Fact]
+    public async Task Editor_SaveInvalidYaml_ShowsError_AndDoesNotTouchStore()
+    {
+        ClaimCallsign("tom", "G0SYS");
+        _store.UpsertPartner(new Partner { Call = "GB7BPQ", AtCalls = ["*"] });
+        using HttpClient client = await StartAsync(pdnUser: "tom");
+
+        HttpResponseMessage post = await client.PostAsync(new Uri("/forwarding/yaml", UriKind.Relative),
+            Form(("yaml", "partners:\n  - call: GB7BPQ\n   bad: : indent")));
+        Assert.Equal(HttpStatusCode.BadRequest, post.StatusCode);
+        string body = await post.Content.ReadAsStringAsync();
+        Assert.Contains("class=\"err\"", body, StringComparison.Ordinal);
+        // The store is untouched: the original partner is still exactly as it was.
+        Partner? p = _store.GetPartner("GB7BPQ");
+        Assert.NotNull(p);
+        Assert.Equal(0, _partnersChanged);
+    }
+
+    [Fact]
+    public async Task Editor_SaveYamlWithInvalidCall_ShowsError_AndDoesNotTouchStore()
+    {
+        ClaimCallsign("tom", "G0SYS");
+        _store.UpsertPartner(new Partner { Call = "GB7BPQ", AtCalls = ["*"] });
+        using HttpClient client = await StartAsync(pdnUser: "tom");
+
+        HttpResponseMessage post = await client.PostAsync(new Uri("/forwarding/yaml", UriKind.Relative),
+            Form(("yaml", "partners:\n  - call: NOTACALL\n    at: [\"*\"]")));
+        Assert.Equal(HttpStatusCode.BadRequest, post.StatusCode);
+        Assert.Contains("look like a callsign", await post.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+        // No GB7NEW added, GB7BPQ unchanged, nothing deleted.
+        Assert.Single(_store.ListPartners());
+        Assert.NotNull(_store.GetPartner("GB7BPQ"));
+        Assert.Equal(0, _partnersChanged);
+    }
+
+    [Fact]
+    public async Task Editor_Parity_FormEditAppearsInYaml_AndYamlEditAppearsInForms()
+    {
+        ClaimCallsign("tom", "G0SYS");
+        using HttpClient client = await StartAsync(pdnUser: "tom");
+
+        // 1) Create via the FORM, then see it in the YAML tab.
+        await client.PostAsync(new Uri("/forwarding/partner", UriKind.Relative), Form(
+            ("call", "GB7BPQ"), ("at", "*"), ("intervalMinutes", "60"), ("conTimeoutSeconds", "60"),
+            ("maxRx", "99999"), ("maxTx", "99999"), ("enabled", "1")));
+        string yaml = await client.GetStringAsync(new Uri("/forwarding?tab=yaml", UriKind.Relative));
+        Assert.Contains("GB7BPQ", yaml, StringComparison.Ordinal);
+
+        // 2) Change via the YAML tab, then see it in the FORMS tab.
+        await client.PostAsync(new Uri("/forwarding/yaml", UriKind.Relative), Form(("yaml", """
+            partners:
+              - call: GB7BPQ
+                at: ["*"]
+              - call: GB7ZZZ
+                at: ["EURO"]
+            """)));
+        string forms = await client.GetStringAsync(new Uri("/forwarding", UriKind.Relative));
+        Assert.Contains("GB7ZZZ", forms, StringComparison.Ordinal); // the YAML-added partner shows as a card
+    }
+
+    [Fact]
+    public async Task Editor_YamlRoundTrip_IsStable()
+    {
+        ClaimCallsign("tom", "G0SYS");
+        // A partner exercising the round-trip-risky fields: non-default bools (enabled false,
+        // sendImmediately false), collect true, a null-ish BbsHa, multi-line script, multiple list items.
+        _store.UpsertPartner(new Partner
+        {
+            Call = "GB7BPQ",
+            Enabled = false,
+            ForwardNewImmediately = false,
+            Collect = true,
+            ConnectScript = ["C GB7BPQ", "BBS"],
+            AtCalls = ["*", "GB7XYZ"],
+            ToCalls = ["SYSOP"],
+            HRoutes = ["GBR.EURO"],
+            HRoutesP = ["GBR.EURO"],
+            ForwardIntervalSeconds = 45 * 60,
+            ConTimeoutSeconds = 30,
+            MaxRxSize = 12345,
+            MaxTxSize = 6789,
+            AllowB2F = true,
+        });
+
+        string first = Bbs.Host.Web.PartnerYaml.Serialize(_store.ListPartners());
+        IReadOnlyList<Partner> reparsed = Bbs.Host.Web.PartnerYaml.Parse(first);
+        string second = Bbs.Host.Web.PartnerYaml.Serialize(reparsed);
+        Assert.Equal(first, second); // serialise → parse → serialise is byte-stable
+
+        // And the reparsed partner equals the stored one on the fields the config shape carries.
+        Partner p = Assert.Single(reparsed);
+        Assert.False(p.Enabled);
+        Assert.False(p.ForwardNewImmediately);
+        Assert.True(p.Collect);
+        Assert.Equal(["C GB7BPQ", "BBS"], p.ConnectScript);
+        Assert.Equal(["*", "GB7XYZ"], p.AtCalls);
+        Assert.Equal(["SYSOP"], p.ToCalls);
+        Assert.Equal(45 * 60, p.ForwardIntervalSeconds);
+        Assert.Equal(30, p.ConTimeoutSeconds);
+        Assert.Equal(12345, p.MaxRxSize);
+        Assert.Equal(6789, p.MaxTxSize);
+        Assert.True(p.AllowB2F);
+    }
+
+    [Fact]
+    public async Task Editor_ForwardedPrefixAndEmbed_AreThreadedThroughLinksAndForms()
+    {
+        ClaimCallsign("tom", "G0SYS");
+        _store.UpsertPartner(new Partner { Call = "GB7BPQ", AtCalls = ["*"] });
+        using HttpClient client = await StartAsync(pdnUser: "tom", forwardedPrefix: "/apps/bbs");
+
+        // Slot/embed: pdn renders us in a borderless iframe with ?pdn_embed=1.
+        string forms = await client.GetStringAsync(new Uri("/forwarding?pdn_embed=1", UriKind.Relative));
+        // Every action/href carries the mount prefix; in embed mode each also carries ?pdn_embed=1,
+        // and forms additionally carry the hidden embed field so the signal survives a POST.
+        Assert.Contains("action=\"/apps/bbs/forwarding/partner?pdn_embed=1\"", forms, StringComparison.Ordinal);
+        Assert.Contains("/apps/bbs/forwarding/partner/forward-now?pdn_embed=1", forms, StringComparison.Ordinal);
+        Assert.Contains("href=\"/apps/bbs/forwarding?tab=yaml&pdn_embed=1", forms, StringComparison.Ordinal);
+        Assert.Contains("name=\"pdn_embed\" value=\"1\"", forms, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Editor_NonSysop_AllMutationRoutes_Get403_WithNoStoreChange()
+    {
+        ClaimCallsign("tom", "M0LTE"); // not the sysop
+        using HttpClient client = await StartAsync(pdnUser: "tom");
+
+        HttpResponseMessage create = await client.PostAsync(new Uri("/forwarding/partner", UriKind.Relative),
+            Form(("call", "GB7BPQ"), ("at", "*")));
+        Assert.Equal(HttpStatusCode.Forbidden, create.StatusCode);
+
+        HttpResponseMessage del = await client.PostAsync(new Uri("/forwarding/partner/delete", UriKind.Relative),
+            Form(("call", "GB7BPQ")));
+        Assert.Equal(HttpStatusCode.Forbidden, del.StatusCode);
+
+        HttpResponseMessage fwd = await client.PostAsync(new Uri("/forwarding/partner/forward-now", UriKind.Relative),
+            Form(("call", "GB7BPQ")));
+        Assert.Equal(HttpStatusCode.Forbidden, fwd.StatusCode);
+
+        HttpResponseMessage yaml = await client.PostAsync(new Uri("/forwarding/yaml", UriKind.Relative),
+            Form(("yaml", "partners:\n  - call: GB7BPQ\n    at: [\"*\"]")));
+        Assert.Equal(HttpStatusCode.Forbidden, yaml.StatusCode);
+
+        Assert.Empty(_store.ListPartners());
+        Assert.Equal(0, _partnersChanged);
+        Assert.Empty(_forwardNow);
     }
 }

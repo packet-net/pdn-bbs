@@ -22,4 +22,9 @@
     <PackageReference Include="YamlDotNet" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- The test assembly exercises internal helpers (the forwarding-editor PartnerYaml round trip). -->
+    <InternalsVisibleTo Include="Bbs.Host.Tests" />
+  </ItemGroup>
+
 </Project>

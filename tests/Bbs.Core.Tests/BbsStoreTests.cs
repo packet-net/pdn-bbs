@@ -426,6 +426,7 @@ public sealed class BbsStoreTests : IDisposable
             MaxTxSize = 30000,
             AllowB2F = true,
             Collect = true,
+            ConTimeoutSeconds = 45,
         };
 
         _ts.Store.UpsertPartner(partner);
@@ -446,9 +447,11 @@ public sealed class BbsStoreTests : IDisposable
         Assert.Equal(30000, loaded.MaxTxSize);
         Assert.True(loaded.AllowB2F);
         Assert.True(loaded.Collect);
+        Assert.Equal(45, loaded.ConTimeoutSeconds);
 
-        // A partner without collect set round-trips collect-off (the default — quiet link stays quiet).
+        // A partner without collect/conTimeout set round-trips the defaults (collect off; 60 s timeout).
         Assert.False(_ts.Store.GetPartner("GB7AAA")!.Collect);
+        Assert.Equal(60, _ts.Store.GetPartner("GB7AAA")!.ConTimeoutSeconds);
 
         // Ordered by call — the deterministic routing tie-break order.
         Assert.Equal(["GB7AAA", "GB7BPQ-1"], _ts.Store.ListPartners().Select(p => p.Call));

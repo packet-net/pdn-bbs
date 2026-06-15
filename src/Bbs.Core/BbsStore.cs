@@ -17,7 +17,7 @@ namespace Bbs.Core;
 public sealed class BbsStore : IDisposable
 {
     /// <summary>The schema version this build writes and expects.</summary>
-    public const int CurrentSchemaVersion = 6;
+    public const int CurrentSchemaVersion = 7;
 
     private readonly SqliteConnection _connection;
     private readonly TimeProvider _time;
@@ -1326,14 +1326,15 @@ public sealed class BbsStore : IDisposable
         {
             using SqliteCommand cmd = Command(null,
                 "INSERT INTO partners(call,enabled,forward_interval_seconds,forward_new_immediately,connect_script," +
-                "to_calls,at_calls,h_routes,h_routes_p,bbs_ha,max_rx_size,max_tx_size,allow_b2f,collect) " +
-                "VALUES($call,$en,$int,$imm,$script,$to,$at,$hr,$hrp,$ha,$rx,$tx,$b2,$col) " +
+                "to_calls,at_calls,h_routes,h_routes_p,bbs_ha,max_rx_size,max_tx_size,allow_b2f,collect,con_timeout_seconds) " +
+                "VALUES($call,$en,$int,$imm,$script,$to,$at,$hr,$hrp,$ha,$rx,$tx,$b2,$col,$cto) " +
                 "ON CONFLICT(call) DO UPDATE SET enabled=excluded.enabled, " +
                 "forward_interval_seconds=excluded.forward_interval_seconds, " +
                 "forward_new_immediately=excluded.forward_new_immediately, connect_script=excluded.connect_script, " +
                 "to_calls=excluded.to_calls, at_calls=excluded.at_calls, h_routes=excluded.h_routes, " +
                 "h_routes_p=excluded.h_routes_p, bbs_ha=excluded.bbs_ha, max_rx_size=excluded.max_rx_size, " +
-                "max_tx_size=excluded.max_tx_size, allow_b2f=excluded.allow_b2f, collect=excluded.collect;");
+                "max_tx_size=excluded.max_tx_size, allow_b2f=excluded.allow_b2f, collect=excluded.collect, " +
+                "con_timeout_seconds=excluded.con_timeout_seconds;");
             cmd.Parameters.AddWithValue("$call", Callsigns.Normalize(partner.Call));
             cmd.Parameters.AddWithValue("$en", partner.Enabled ? 1 : 0);
             cmd.Parameters.AddWithValue("$int", partner.ForwardIntervalSeconds);
@@ -1348,6 +1349,7 @@ public sealed class BbsStore : IDisposable
             cmd.Parameters.AddWithValue("$tx", partner.MaxTxSize);
             cmd.Parameters.AddWithValue("$b2", partner.AllowB2F ? 1 : 0);
             cmd.Parameters.AddWithValue("$col", partner.Collect ? 1 : 0);
+            cmd.Parameters.AddWithValue("$cto", Math.Max(1, partner.ConTimeoutSeconds));
             cmd.ExecuteNonQuery();
         }
     }
@@ -1420,7 +1422,7 @@ public sealed class BbsStore : IDisposable
 
     private const string PartnerSelect =
         "SELECT call,enabled,forward_interval_seconds,forward_new_immediately,connect_script," +
-        "to_calls,at_calls,h_routes,h_routes_p,bbs_ha,max_rx_size,max_tx_size,allow_b2f,collect FROM partners";
+        "to_calls,at_calls,h_routes,h_routes_p,bbs_ha,max_rx_size,max_tx_size,allow_b2f,collect,con_timeout_seconds FROM partners";
 
     /// <summary>Whether <paramref name="table"/> already has a column named <paramref name="column"/> (PRAGMA table_info) — guards idempotent additive ALTERs.</summary>
     private static bool ColumnExists(SqliteConnection connection, SqliteTransaction tx, string table, string column)
@@ -1618,6 +1620,35 @@ public sealed class BbsStore : IDisposable
             version = 6;
         }
 
+        // v7 — per-partner connect handshake timeout (compat spec §4.1 ConTimeout). PURELY ADDITIVE:
+        // the partners table gains a `con_timeout_seconds` column defaulting 60, so every existing
+        // partner keeps the historical 60 s default (the value the scheduler already used when the
+        // column did not exist). This closes a store gap — the field was modelled on the Partner
+        // record and exposed by the forwarding editor but never persisted, so an edited value silently
+        // reverted to 60. No existing column/row is touched; safe to apply to the live lab bbs.db.
+        if (version < 7)
+        {
+            using SqliteTransaction tx = connection.BeginTransaction();
+
+            if (!ColumnExists(connection, tx, "partners", "con_timeout_seconds"))
+            {
+                using var ddl = connection.CreateCommand();
+                ddl.Transaction = tx;
+                ddl.CommandText = SchemaV7;
+                ddl.ExecuteNonQuery();
+            }
+
+            using (var stamp = connection.CreateCommand())
+            {
+                stamp.Transaction = tx;
+                stamp.CommandText = "UPDATE meta SET value='7' WHERE key='schema_version';";
+                stamp.ExecuteNonQuery();
+            }
+
+            tx.Commit();
+            version = 7;
+        }
+
         return version;
     }
 
@@ -1773,6 +1804,13 @@ public sealed class BbsStore : IDisposable
         ALTER TABLE partners ADD COLUMN collect INTEGER NOT NULL DEFAULT 0;
         """;
 
+    // v7 — additive only (see Migrate): the per-partner connect handshake timeout (compat spec §4.1
+    // ConTimeout), defaulting 60 s — the value the scheduler used before the column existed. Lets the
+    // forwarding editor actually persist a per-partner conTimeoutSeconds rather than silently revert it.
+    private const string SchemaV7 = """
+        ALTER TABLE partners ADD COLUMN con_timeout_seconds INTEGER NOT NULL DEFAULT 60;
+        """;
+
     private void InsertRecipient(SqliteTransaction tx, long number, string toCall, bool cc)
     {
         using SqliteCommand cmd = Command(tx,
@@ -1901,6 +1939,7 @@ public sealed class BbsStore : IDisposable
             MaxTxSize = (int)reader.GetInt64(11),
             AllowB2F = reader.GetInt64(12) != 0,
             Collect = reader.GetInt64(13) != 0,
+            ConTimeoutSeconds = (int)reader.GetInt64(14),
         };
     }
 

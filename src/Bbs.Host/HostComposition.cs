@@ -239,13 +239,20 @@ public static class HostComposition
         // Wire the routing → scheduler nudge and sweep the startup backlog (messages stored
         // before a restart that never reached a queue; idempotent for the rest).
         RoutingService routing = app.Services.GetRequiredService<RoutingService>();
-        routing.NudgePartner = app.Services.GetRequiredService<ForwardingScheduler>().Nudge;
+        ForwardingScheduler scheduler = app.Services.GetRequiredService<ForwardingScheduler>();
+        routing.NudgePartner = scheduler.Nudge;
         routing.RouteStartupBacklog();
 
         Webmail.Map(app, new WebmailOptions
         {
             Store = store,
             Routing = routing,
+            // Store-first forwarding editor: after any partner mutation (forms or YAML) ask the
+            // scheduler to (re)scan so a new/enabled partner gets a loop immediately and a
+            // deleted/disabled one is reaped — without waiting for the periodic re-sweep.
+            OnPartnersChanged = scheduler.Reconcile,
+            // "Forward now" reuses the existing nudge seam (RoutingService.NudgePartner == Nudge).
+            OnForwardNow = scheduler.Nudge,
             // The same per-user settings singleton the console session uses — a webmail
             // interface-mode flip is the persisted choice the next console connect reads.
             Settings = app.Services.GetRequiredService<IUserSettingsStore>(),

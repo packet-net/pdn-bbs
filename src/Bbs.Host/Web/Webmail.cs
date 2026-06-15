@@ -19,6 +19,22 @@ public sealed record WebmailOptions
     public required RoutingService Routing { get; init; }
 
     /// <summary>
+    /// Called AFTER any partner mutation through the forwarding editor (create / edit / delete, and
+    /// the bulk YAML apply). Wired in <c>HostComposition</c> to <see cref="Bbs.Host.Forwarding.ForwardingScheduler.Reconcile"/>
+    /// so a newly created/enabled partner gets a forwarding loop immediately and a deleted/disabled
+    /// one is reaped, without waiting for the scheduler's periodic re-sweep. Null in tests/standalone
+    /// that don't run a scheduler — the store mutation still lands; only the reconcile is skipped.
+    /// </summary>
+    public Action? OnPartnersChanged { get; init; }
+
+    /// <summary>
+    /// "Forward now" for a single partner — wired to <see cref="Bbs.Host.Forwarding.ForwardingScheduler.Nudge"/>
+    /// (via <see cref="RoutingService.NudgePartner"/>) so the sysop can dial a partner on demand from
+    /// the editor. Null when no scheduler is running (the button still renders but is a no-op).
+    /// </summary>
+    public Action<string>? OnForwardNow { get; init; }
+
+    /// <summary>
     /// The per-user console preferences store (the same singleton the console session uses —
     /// <c>HostComposition</c> wires the <see cref="Bbs.Host.Sessions.JsonUserSettingsStore"/>).
     /// Backs the <c>/settings</c> interface-mode toggle so a webmail flip is the same persisted
@@ -207,10 +223,68 @@ public static class Webmail
         app.MapPost("/settings/mailpw/clear", (HttpContext ctx) => WithCallsign(ctx, options,
             (prefix, call) => ClearMailPassword(options, prefix, call, Embed(ctx), Theme(ctx))));
 
-        // Sysop-only, read-only: how mail forwards to neighbouring BBSes. Gated inside the handler
-        // (a non-sysop gets a 403 page; the nav tab is only rendered for the sysop).
-        app.MapGet("/forwarding", (HttpContext ctx) => WithCallsign(ctx, options,
-            (prefix, call) => Forwarding(options, prefix, call, Embed(ctx), Theme(ctx))));
+        // Sysop-only forwarding EDITOR: the Forms | YAML switch over the store (the source of truth).
+        // Gated inside each handler (a non-sysop gets a 403 page; the nav tab is only rendered for the
+        // sysop). Both surfaces — the per-partner forms and the bulk YAML block — read/write the same
+        // store, so a change in one shows in the other.
+        app.MapGet("/forwarding", (HttpContext ctx, string? tab, string? edit, string? notice) => WithCallsign(ctx, options,
+            (prefix, call) => Forwarding(options, prefix, call, tab, edit, Embed(ctx), Theme(ctx), notice: notice)));
+
+        app.MapPost("/forwarding/partner", async (HttpContext ctx) =>
+        {
+            string prefix = Prefix(ctx);
+            bool embed = Embed(ctx);
+            string? call = FindCallsign(options.Store, PdnUser(ctx));
+            if (call is null)
+            {
+                return Results.Redirect(U(prefix, "/", embed));
+            }
+
+            IFormCollection form = await ctx.Request.ReadFormAsync().ConfigureAwait(false);
+            return SavePartner(options, prefix, call, form, embed, Theme(ctx));
+        });
+
+        app.MapPost("/forwarding/partner/delete", async (HttpContext ctx) =>
+        {
+            string prefix = Prefix(ctx);
+            bool embed = Embed(ctx);
+            string? call = FindCallsign(options.Store, PdnUser(ctx));
+            if (call is null)
+            {
+                return Results.Redirect(U(prefix, "/", embed));
+            }
+
+            IFormCollection form = await ctx.Request.ReadFormAsync().ConfigureAwait(false);
+            return DeletePartnerPost(options, prefix, call, form["call"].ToString(), embed, Theme(ctx));
+        });
+
+        app.MapPost("/forwarding/partner/forward-now", async (HttpContext ctx) =>
+        {
+            string prefix = Prefix(ctx);
+            bool embed = Embed(ctx);
+            string? call = FindCallsign(options.Store, PdnUser(ctx));
+            if (call is null)
+            {
+                return Results.Redirect(U(prefix, "/", embed));
+            }
+
+            IFormCollection form = await ctx.Request.ReadFormAsync().ConfigureAwait(false);
+            return ForwardNow(options, prefix, call, form["call"].ToString(), embed, Theme(ctx));
+        });
+
+        app.MapPost("/forwarding/yaml", async (HttpContext ctx) =>
+        {
+            string prefix = Prefix(ctx);
+            bool embed = Embed(ctx);
+            string? call = FindCallsign(options.Store, PdnUser(ctx));
+            if (call is null)
+            {
+                return Results.Redirect(U(prefix, "/", embed));
+            }
+
+            IFormCollection form = await ctx.Request.ReadFormAsync().ConfigureAwait(false);
+            return SaveYaml(options, prefix, call, form["yaml"].ToString(), embed, Theme(ctx));
+        });
     }
 
     private const string PdnUserKey = "pdnUser";
@@ -819,24 +893,20 @@ public static class Webmail
             removed ? "Mail password removed. External mail apps can no longer sign in." : "No mail password was set.", theme: theme);
     }
 
-    // ---------------------------------------------------------------- forwarding (sysop, read-only)
+    // ---------------------------------------------------------------- forwarding editor (sysop)
 
     /// <summary>
-    /// The sysop-only forwarding view: a read-only picture of how mail leaves this BBS for its
-    /// neighbours. One panel per configured partner — identity + auto-dial state, the connect
-    /// script, the poll schedule, the LIVE forward-queue depth (the one dynamic datum the store
-    /// can answer — <see cref="BbsStore.GetForwardQueue"/>), the size caps, the B1/B2 mode, and the
-    /// routing rules translated out of FBB vocabulary (<c>at: ["*"]</c> → "default uplink", etc.).
+    /// The sysop-only forwarding EDITOR — a Forms | YAML switch over the partner store (the source of
+    /// truth, store-first). The Forms tab shows one card per partner (its dial config, the LIVE
+    /// forward-queue depth, the plain-language routing rules) with Edit / Delete / Forward now, an
+    /// edit form when <paramref name="editCall"/> names a partner, and an Add-partner form. The YAML
+    /// tab is the same store rendered as the <c>partners:</c> block (the bbs.yaml shape) in a textarea
+    /// the sysop can edit and save. Both surfaces read/write the store, so a change in one shows in the
+    /// other; bbs.yaml is seed-only (it seeds an empty store at first run).
     /// </summary>
-    /// <remarks>
-    /// Read-only by design: partners are defined in <c>bbs.yaml</c> and synced into the store at
-    /// start-up, so this view never mutates config. It deliberately does NOT show last-contact /
-    /// last-error — the store persists no forwarding-session outcome (the <c>forwards</c> table is
-    /// only <c>queued_utc</c>/<c>forwarded_utc</c>, and the scheduler keeps no queryable status), so
-    /// surfacing those would need an engine change to record session results. That's a named
-    /// deferral, not an oversight.
-    /// </remarks>
-    private static IResult Forwarding(WebmailOptions o, string prefix, string call, bool embed, string? theme)
+    private static IResult Forwarding(
+        WebmailOptions o, string prefix, string call, string? tab, string? editCall, bool embed, string? theme,
+        string? notice = null, bool noticeError = false, string? yamlText = null, int status = StatusCodes.Status200OK)
     {
         if (!IsSysop(o, call))
         {
@@ -847,34 +917,76 @@ public static class Webmail
                 """, theme), StatusCodes.Status403Forbidden);
         }
 
+        bool yamlTab = string.Equals(tab, "yaml", StringComparison.OrdinalIgnoreCase);
         IReadOnlyList<Partner> partners = o.Store.ListPartners();
-        string cards;
-        if (partners.Count == 0)
-        {
-            cards = """<p class="dim">No forwarding partners are configured. Partners are defined in <code>bbs.yaml</code> and loaded at start-up.</p>""";
-        }
-        else
-        {
-            var sb = new StringBuilder();
-            foreach (Partner p in partners)
-            {
-                sb.Append(PartnerCard(o, p));
-            }
+        string banner = notice is null
+            ? ""
+            : Inv($"""<p class="{(noticeError ? "err" : "saved")}">{H(notice)}</p>""");
 
-            cards = sb.ToString();
-        }
+        // The tab switch — both links thread the prefix + embed; the active tab is marked.
+        string formsHref = U(prefix, "/forwarding", embed);
+        string yamlHref = U(prefix, "/forwarding?tab=yaml", embed);
+        string tabs = $"""
+            <nav class="subtabs">
+            <a href="{formsHref}"{(yamlTab ? "" : " class=\"active\"")}>Forms</a>
+            <a href="{yamlHref}"{(yamlTab ? " class=\"active\"" : "")}>YAML</a>
+            </nav>
+            """;
+
+        string body = yamlTab
+            ? YamlTab(o, prefix, embed, partners, yamlText)
+            : FormsTab(o, prefix, embed, partners, editCall);
 
         return Html(Page(o, prefix, call, "Forwarding", embed,
             $"""
             <h2>Forwarding partners <span class="dim">— {partners.Count} configured</span></h2>
-            <p class="dim">Read-only view of how mail forwards to neighbouring BBSes. Partners are configured in <code>bbs.yaml</code> and applied when the BBS restarts.</p>
-            {cards}
-            """, theme));
+            <p class="dim">Everything here is configurable by form or YAML — both edit the same store. <code>bbs.yaml</code> only seeds an empty store on first run.</p>
+            {tabs}
+            {banner}
+            {body}
+            """, theme), status);
     }
 
-    /// <summary>One partner's panel: dial config + live queue depth + the plain-language routing rules.</summary>
-    private static string PartnerCard(WebmailOptions o, Partner p)
+    /// <summary>The Forms tab: partner cards (each with Edit / Delete / Forward now), an edit form, and the Add form.</summary>
+    private static string FormsTab(WebmailOptions o, string prefix, bool embed, IReadOnlyList<Partner> partners, string? editCall)
     {
+        Partner? editing = editCall is { Length: > 0 } ? o.Store.GetPartner(editCall) : null;
+
+        var sb = new StringBuilder();
+        if (partners.Count == 0)
+        {
+            sb.Append("""<p class="dim">No forwarding partners yet. Add one below, or paste a YAML block in the YAML tab.</p>""");
+        }
+        else
+        {
+            foreach (Partner p in partners)
+            {
+                sb.Append(PartnerCard(o, prefix, embed, p, editing));
+            }
+        }
+
+        // The Add form only when not editing (one form at a time keeps the page focused; editing shows
+        // the edit form in place of the Add form).
+        if (editing is null)
+        {
+            sb.Append(PartnerForm(prefix, embed, partner: null));
+        }
+
+        return sb.ToString();
+    }
+
+    /// <summary>
+    /// One partner's card: dial config + live queue depth + the plain-language routing rules, plus the
+    /// Edit / Delete / Forward-now action row. When this card is the one being edited the inline edit
+    /// form is rendered in its place instead.
+    /// </summary>
+    private static string PartnerCard(WebmailOptions o, string prefix, bool embed, Partner p, Partner? editing)
+    {
+        if (editing is not null && Callsigns.BaseEquals(editing.Call, p.Call))
+        {
+            return PartnerForm(prefix, embed, p);
+        }
+
         string badge = p.Enabled
             ? """<span class="badge on">auto-dial on</span>"""
             : """<span class="badge off">auto-dial off</span>""";
@@ -889,13 +1001,24 @@ public static class Webmail
             : H(string.Join("  ·  ", p.ConnectScript));
 
         string schedule = Inv($"every {Math.Max(1, p.ForwardIntervalSeconds / 60)} min")
-            + (p.ForwardNewImmediately ? ", and as soon as a message is queued" : "");
+            + (p.ForwardNewImmediately ? ", and as soon as a message is queued" : "")
+            + (p.Collect ? ", and polls even when nothing is queued (collect)" : "");
 
         string limits = p.MaxRxSize >= 99999 && p.MaxTxSize >= 99999
             ? """<span class="dim">no size limit</span>"""
             : Inv($"accepts ≤ {p.MaxRxSize:N0} B · sends ≤ {p.MaxTxSize:N0} B");
 
         string mode = p.AllowB2F ? "B2 (binary capable)" : "B1 (text only)";
+
+        // Action row: Edit (link → ?edit=call), Forward now + Delete (posts; the embed/prefix threaded).
+        string editHref = U(prefix, Inv($"/forwarding?edit={Uri.EscapeDataString(p.Call)}"), embed);
+        string actions = $"""
+            <p class="card-actions">
+            <a href="{editHref}">Edit</a>
+            <form method="post" action="{U(prefix, "/forwarding/partner/forward-now", embed)}">{EmbedField(embed)}<input type="hidden" name="call" value="{H(p.Call)}"><button type="submit" class="link plain">Forward now</button></form>
+            <form method="post" action="{U(prefix, "/forwarding/partner/delete", embed)}">{EmbedField(embed)}<input type="hidden" name="call" value="{H(p.Call)}"><button type="submit" class="link">Delete</button></form>
+            </p>
+            """;
 
         return $$"""
             <fieldset>
@@ -908,9 +1031,244 @@ public static class Webmail
             <tr><th>Mode</th><td>{{H(mode)}}</td></tr>
             </table>
             {{RoutingSummary(p)}}
+            {{actions}}
             </fieldset>
             """;
     }
+
+    /// <summary>
+    /// The add/edit partner form — EVERY <see cref="PartnerConfig"/> field with a plain-language label.
+    /// When <paramref name="partner"/> is non-null it's the edit form (the call is read-only, the key);
+    /// null is the Add form. List fields (to/at/hr) are space-separated text inputs; the connect script
+    /// is a textarea, one line each; bools are checkboxes. Posts to <c>/forwarding/partner</c>.
+    /// </summary>
+    private static string PartnerForm(string prefix, bool embed, Partner? partner)
+    {
+        bool editing = partner is not null;
+        string title = editing ? Inv($"Edit {H(partner!.Call)}") : "Add partner";
+        string callField = editing
+            ? Inv($"""<input type="hidden" name="call" value="{H(partner!.Call)}"><b>{H(partner.Call)}</b> <span class="dim">— the partner's callsign can't be changed; delete and re-add to rename.</span>""")
+            : """<input name="call" placeholder="e.g. GB7BPQ" maxlength="9" required>""";
+
+        string script = editing ? string.Join("\n", partner!.ConnectScript) : "";
+        string to = editing ? string.Join(" ", partner!.ToCalls) : "";
+        string at = editing ? string.Join(" ", partner!.AtCalls) : "";
+        string hr = editing ? string.Join(" ", partner!.HRoutes) : "";
+        string bbsHa = editing ? partner!.BbsHa ?? "" : "";
+        int interval = editing ? Math.Max(1, partner!.ForwardIntervalSeconds / 60) : 60;
+        int conTimeout = editing ? partner!.ConTimeoutSeconds : 60;
+        int maxRx = editing ? partner!.MaxRxSize : 99999;
+        int maxTx = editing ? partner!.MaxTxSize : 99999;
+        bool enabled = editing ? partner!.Enabled : true;
+        bool sendImmediately = editing ? partner!.ForwardNewImmediately : true;
+        bool collect = editing ? partner!.Collect : false;
+        bool allowB2 = editing ? partner!.AllowB2F : false;
+
+        string cancel = editing
+            ? Inv($"""<a class="cancel" href="{U(prefix, "/forwarding", embed)}">Cancel</a>""")
+            : "";
+
+        return $"""
+            <form method="post" action="{U(prefix, "/forwarding/partner", embed)}">
+            {EmbedField(embed)}
+            <fieldset>
+            <legend>{H(title)}</legend>
+            <p><label>Partner callsign<br>{callField}</label></p>
+            <p><label>Connect script <span class="dim">— one line each; the first line names the dial (e.g. <code>C GB7BPQ</code>), later lines are sent verbatim (e.g. <code>BBS</code> at a node prompt)</span><br>
+            <textarea name="connectScript" rows="3" cols="48" placeholder="C GB7BPQ">{H(script)}</textarea></label></p>
+            <p><label>@ addresses <span class="dim">— routes this partner serves; <code>*</code> is the catch-all default uplink (space-separated)</span><br>
+            <input name="at" size="48" value="{H(at)}" placeholder="* or GB7BPQ"></label></p>
+            <p><label>Recipients <span class="dim">— exact TO callsigns to route here (space-separated)</span><br>
+            <input name="to" size="48" value="{H(to)}" placeholder="SYSOP"></label></p>
+            <p><label>Areas <span class="dim">— hierarchical routes for floods + personals, e.g. <code>GBR.EURO</code> (space-separated)</span><br>
+            <input name="hr" size="48" value="{H(hr)}" placeholder="GBR.EURO"></label></p>
+            <p><label>Partner address <span class="dim">— the partner's own full HA, needed for flood matching, e.g. <code>GB7BPQ.#23.GBR.EURO</code></span><br>
+            <input name="bbsHa" size="48" value="{H(bbsHa)}" placeholder="GB7BPQ.#23.GBR.EURO"></label></p>
+            <p><label>Dial every <input type="number" name="intervalMinutes" min="1" value="{Inv($"{interval}")}" style="width:6rem"> minutes <span class="dim">— retry cadence for queued mail</span></label></p>
+            <p><label>Connect timeout <input type="number" name="conTimeoutSeconds" min="1" value="{Inv($"{conTimeout}")}" style="width:6rem"> seconds <span class="dim">— per response wait during the connect handshake</span></label></p>
+            <p><label>Max accepted <input type="number" name="maxRx" min="0" value="{Inv($"{maxRx}")}" style="width:8rem"> bytes <span class="dim">— largest message accepted from this partner</span></label></p>
+            <p><label>Max sent <input type="number" name="maxTx" min="0" value="{Inv($"{maxTx}")}" style="width:8rem"> bytes <span class="dim">— largest message proposed to this partner</span></label></p>
+            <p><label><input type="checkbox" name="enabled" value="1"{(enabled ? " checked" : "")}> Auto-dial enabled <span class="dim">— off ⇒ messages still queue but aren't dialled out</span></label></p>
+            <p><label><input type="checkbox" name="sendImmediately" value="1"{(sendImmediately ? " checked" : "")}> Send immediately <span class="dim">— dial as soon as a message is queued for this partner</span></label></p>
+            <p><label><input type="checkbox" name="collect" value="1"{(collect ? " checked" : "")}> Collect <span class="dim">— poll on the dial cadence even with an empty queue, to pick up mail a partner that can't dial us holds for us</span></label></p>
+            <p><label><input type="checkbox" name="allowB2" value="1"{(allowB2 ? " checked" : "")}> Allow B2 <span class="dim">— opt in to binary B2 (Winlink/FBB) with this partner; off ⇒ B1 text forwarding</span></label></p>
+            <p><button type="submit">{(editing ? "Save changes" : "Add partner")}</button> {cancel}</p>
+            </fieldset>
+            </form>
+            """;
+    }
+
+    /// <summary>
+    /// The YAML tab: a textarea of the store's partners as the <c>partners:</c> block (the bbs.yaml
+    /// shape). Save parses + validates + applies to the store (upsert each parsed partner, delete
+    /// store partners absent from the YAML). <paramref name="yamlText"/> is the sysop's unsaved text
+    /// re-shown after a parse error; null renders the current store.
+    /// </summary>
+    private static string YamlTab(WebmailOptions o, string prefix, bool embed, IReadOnlyList<Partner> partners, string? yamlText)
+    {
+        string text = yamlText ?? PartnerYaml.Serialize(partners);
+        return $"""
+            <p class="dim">The whole partner set as YAML — the same <code>partners:</code> block as <code>bbs.yaml</code>. Save applies it to the store: partners in the YAML are created/updated, partners missing from it are removed.</p>
+            <form method="post" action="{U(prefix, "/forwarding/yaml", embed)}">
+            {EmbedField(embed)}
+            <p><textarea name="yaml" rows="22" cols="80" spellcheck="false">{H(text)}</textarea></p>
+            <p><button type="submit">Save YAML</button> <a class="cancel" href="{U(prefix, "/forwarding?tab=yaml", embed)}">Reset</a></p>
+            </form>
+            """;
+    }
+
+    /// <summary>
+    /// Creates or updates a partner from the posted add/edit form, then reconciles the scheduler and
+    /// redirects back to the Forms tab with a notice. The call is validated (non-empty + callsign
+    /// shape) via the same <see cref="PartnerConfig.ToPartner"/> mapping the YAML/startup paths use; an
+    /// invalid call re-renders the form with the error and leaves the store untouched.
+    /// </summary>
+    private static IResult SavePartner(WebmailOptions o, string prefix, string call, IFormCollection form, bool embed, string? theme)
+    {
+        if (!IsSysop(o, call))
+        {
+            return Forwarding(o, prefix, call, tab: null, editCall: null, embed, theme, status: StatusCodes.Status403Forbidden);
+        }
+
+        string partnerCall = Callsigns.Normalize(form["call"].ToString());
+        bool editing = o.Store.GetPartner(partnerCall) is not null;
+        if (partnerCall.Length == 0 || !Callsigns.IsCallsignShaped(partnerCall))
+        {
+            // Re-render the relevant form with the error; nothing written.
+            return Forwarding(o, prefix, call, tab: null, editCall: editing ? partnerCall : null, embed, theme,
+                notice: partnerCall.Length == 0 ? "A partner callsign is required." : $"'{partnerCall}' doesn't look like a callsign.",
+                noticeError: true, status: StatusCodes.Status400BadRequest);
+        }
+
+        var config = new PartnerConfig
+        {
+            Call = partnerCall,
+            ConnectScript = SplitLines(form["connectScript"].ToString()),
+            To = SplitTokens(form["to"].ToString()),
+            At = SplitTokens(form["at"].ToString()),
+            Hr = SplitTokens(form["hr"].ToString()),
+            BbsHa = form["bbsHa"].ToString().Trim() is { Length: > 0 } ha ? ha : null,
+            IntervalMinutes = ParseInt(form["intervalMinutes"], 60),
+            ConTimeoutSeconds = ParseInt(form["conTimeoutSeconds"], 60),
+            MaxRx = ParseInt(form["maxRx"], 99999),
+            MaxTx = ParseInt(form["maxTx"], 99999),
+            Enabled = Checked(form["enabled"]),
+            SendImmediately = Checked(form["sendImmediately"]),
+            Collect = Checked(form["collect"]),
+            AllowB2 = Checked(form["allowB2"]),
+        };
+
+        o.Store.UpsertPartner(config.ToPartner());
+        o.OnPartnersChanged?.Invoke();
+        return Results.Redirect(U(prefix, "/forwarding", embed) + Notice(embed, editing ? $"Saved {partnerCall}." : $"Added {partnerCall}."));
+    }
+
+    /// <summary>Deletes a partner (sysop only), reconciles, and redirects to the Forms tab with a notice.</summary>
+    private static IResult DeletePartnerPost(WebmailOptions o, string prefix, string call, string partnerCall, bool embed, string? theme)
+    {
+        if (!IsSysop(o, call))
+        {
+            return Forwarding(o, prefix, call, tab: null, editCall: null, embed, theme, status: StatusCodes.Status403Forbidden);
+        }
+
+        string normalized = Callsigns.Normalize(partnerCall);
+        bool removed = o.Store.DeletePartner(normalized);
+        if (removed)
+        {
+            o.OnPartnersChanged?.Invoke();
+        }
+
+        return Results.Redirect(U(prefix, "/forwarding", embed)
+            + Notice(embed, removed ? $"Removed {normalized}." : $"No partner '{normalized}' to remove."));
+    }
+
+    /// <summary>"Forward now" for one partner (sysop only): nudges its loop, then redirects to the Forms tab with a notice.</summary>
+    private static IResult ForwardNow(WebmailOptions o, string prefix, string call, string partnerCall, bool embed, string? theme)
+    {
+        if (!IsSysop(o, call))
+        {
+            return Forwarding(o, prefix, call, tab: null, editCall: null, embed, theme, status: StatusCodes.Status403Forbidden);
+        }
+
+        string normalized = Callsigns.Normalize(partnerCall);
+        Partner? partner = o.Store.GetPartner(normalized);
+        if (partner is null)
+        {
+            return Results.Redirect(U(prefix, "/forwarding", embed) + Notice(embed, $"No partner '{normalized}'."));
+        }
+
+        o.OnForwardNow?.Invoke(normalized);
+        return Results.Redirect(U(prefix, "/forwarding", embed) + Notice(embed, $"Forwarding to {normalized} now."));
+    }
+
+    /// <summary>
+    /// Applies the posted YAML to the store: parse + validate (<see cref="PartnerYaml.Parse"/>), then
+    /// upsert every parsed partner and delete store partners absent from the YAML — the whole set in
+    /// one transaction-less but lock-guarded pass. A parse/validation error re-renders the YAML tab
+    /// with the error + the user's text, touching NOTHING in the store.
+    /// </summary>
+    private static IResult SaveYaml(WebmailOptions o, string prefix, string call, string yaml, bool embed, string? theme)
+    {
+        if (!IsSysop(o, call))
+        {
+            return Forwarding(o, prefix, call, tab: "yaml", editCall: null, embed, theme, status: StatusCodes.Status403Forbidden);
+        }
+
+        IReadOnlyList<Partner> parsed;
+        try
+        {
+            parsed = PartnerYaml.Parse(yaml);
+        }
+        catch (PartnerYamlException ex)
+        {
+            // Re-render the YAML view with the error AND the user's exact text; store untouched.
+            return Forwarding(o, prefix, call, tab: "yaml", editCall: null, embed, theme,
+                notice: ex.Message, noticeError: true, yamlText: yaml, status: StatusCodes.Status400BadRequest);
+        }
+
+        // Apply: upsert each parsed partner, then delete any store partner not in the parsed set.
+        var keep = new HashSet<string>(parsed.Select(p => Callsigns.Normalize(p.Call)), StringComparer.OrdinalIgnoreCase);
+        foreach (Partner p in parsed)
+        {
+            o.Store.UpsertPartner(p);
+        }
+
+        foreach (Partner existing in o.Store.ListPartners())
+        {
+            if (!keep.Contains(Callsigns.Normalize(existing.Call)))
+            {
+                o.Store.DeletePartner(existing.Call);
+            }
+        }
+
+        o.OnPartnersChanged?.Invoke();
+        return Results.Redirect(U(prefix, "/forwarding?tab=yaml", embed)
+            + Notice(embed, Inv($"Applied — {parsed.Count} partner{(parsed.Count == 1 ? "" : "s")} now configured."), already: true));
+    }
+
+    /// <summary>Appends a <c>notice=</c> query param to a redirect URL (the redirect target reads it for the banner).</summary>
+    private static string Notice(bool embed, string message, bool already = false)
+    {
+        // `embed` already added "?pdn_embed=1" via U(); `already` is for a URL that already has a query
+        // (tab=yaml). Choose the right separator either way.
+        char sep = (embed || already) ? '&' : '?';
+        return sep + "notice=" + Uri.EscapeDataString(message);
+    }
+
+    /// <summary>Splits a connect-script textarea into trimmed, non-empty lines.</summary>
+    private static List<string> SplitLines(string text) =>
+        [.. text.ReplaceLineEndings("\n").Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)];
+
+    /// <summary>Splits a space-separated (or comma-separated) list field into trimmed, non-empty tokens.</summary>
+    private static List<string> SplitTokens(string text) =>
+        [.. text.Split([' ', ',', '\t', '\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)];
+
+    /// <summary>A number field with a fallback when blank/unparseable.</summary>
+    private static int ParseInt(Microsoft.Extensions.Primitives.StringValues value, int fallback) =>
+        int.TryParse(value.ToString().Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out int parsed) ? parsed : fallback;
+
+    /// <summary>A checkbox is "on" when present with our value (unchecked checkboxes aren't posted at all).</summary>
+    private static bool Checked(Microsoft.Extensions.Primitives.StringValues value) => value.Count > 0;
 
     /// <summary>
     /// The partner's routing rules in plain language. Mirrors the priority order
@@ -1355,6 +1713,13 @@ public static class Webmail
           display:inline-block;min-width:8.5rem;color:hsl(var(--muted-foreground));
           font-size:.72rem;text-transform:uppercase;letter-spacing:.03em;font-weight:600;margin-right:.5rem;
         }
+        nav.subtabs{display:inline-flex;gap:.2rem;margin:0 0 1rem;width:auto}
+        nav.subtabs a.active{background:hsl(var(--background));color:hsl(var(--foreground));box-shadow:0 1px 2px 0 hsl(220 26% 7%/.06)}
+        p.card-actions{display:flex;align-items:center;gap:1rem;margin:.75rem 0 0;font-size:.85rem}
+        p.card-actions form{display:inline;margin:0}
+        button.link.plain{color:hsl(var(--primary))}
+        button.link.plain:hover{color:hsl(var(--primary)/.85)}
+        a.cancel{font-size:.85rem;color:hsl(var(--muted-foreground));margin-left:.5rem}
         </style>
         """;
 
