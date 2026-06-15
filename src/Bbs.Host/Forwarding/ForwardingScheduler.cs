@@ -207,18 +207,23 @@ public sealed class ForwardingScheduler
                 // nothing of ours to send, the session's in-session reverse (spec §3.11) drains
                 // the partner's queue for us. "Nothing to send AND nothing collected" is a clean
                 // graceful no-op (FF↔FQ) — not a failure, so it does not arm the backoff.
+                int queuedAtStart = queue.Count;
                 CycleOutcome outcome = await RunCycleAsync(partner, queue, cancellationToken).ConfigureAwait(false);
                 // Backoff is unchanged: a non-graceful close still arms it (it self-clears once the
-                // queue drains). Health, though, tracks whether we could forward at all — a session
-                // that ran is healthy even if it closed roughly, so it does NOT read as "failing".
+                // queue drains). Health is keyed on actual forward PROGRESS, not just "the session ran":
+                // a cycle that connected but left every queued message still queued reads "failing", not
+                // a quietly-stuck "ok". Progress = the queue shrank (a message delivered, was deferred
+                // because the peer already had it, or was held) or there was nothing to send (a poll).
                 failures = outcome.Graceful ? 0 : failures + 1;
-                if (outcome.Ran)
+                (bool ok, string error) = ClassifyHealth(
+                    outcome.Ran, outcome.Error, queuedAtStart, _store.GetForwardQueue(partner.Call).Count);
+                if (ok)
                 {
                     _store.RecordForwardingSuccess(partner.Call);
                 }
                 else
                 {
-                    _store.RecordForwardingFailure(partner.Call, outcome.Error ?? "could not forward to the partner");
+                    _store.RecordForwardingFailure(partner.Call, error);
                 }
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -242,6 +247,30 @@ public sealed class ForwardingScheduler
     /// FF/FQ close (drives backoff, unchanged). <see cref="Error"/> is the reason when not Ran.
     /// </summary>
     private sealed record CycleOutcome(bool Ran, bool Graceful, string? Error);
+
+    /// <summary>
+    /// The dashboard-health verdict for a completed cycle (the connect-exception path is the loop's
+    /// catch). Failing when we couldn't connect/navigate (<paramref name="ran"/> false), OR when the
+    /// session ran yet made NO forward progress — every message queued at the start is still queued
+    /// (nothing delivered, deferred because the peer already had it, or held). Ok on a clean poll
+    /// (nothing was queued) or when the queue shrank. A non-graceful close is not itself a failure —
+    /// delivery is what matters — so "ran" alone no longer reads "ok".
+    /// </summary>
+    internal static (bool Ok, string Error) ClassifyHealth(bool ran, string? error, int queuedAtStart, int queuedAfter)
+    {
+        if (!ran)
+        {
+            return (false, error ?? "could not connect to the partner");
+        }
+
+        if (queuedAtStart == 0 || queuedAfter < queuedAtStart)
+        {
+            return (true, string.Empty);
+        }
+
+        return (false, Invariant(
+            $"connected but delivered nothing ({queuedAtStart} message{(queuedAtStart == 1 ? "" : "s")} still queued)"));
+    }
 
     private async Task<CycleOutcome> RunCycleAsync(Partner partner, IReadOnlyList<Message> queue, CancellationToken cancellationToken)
     {
