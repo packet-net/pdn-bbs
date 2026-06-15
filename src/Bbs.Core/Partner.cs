@@ -5,7 +5,8 @@ namespace Bbs.Core;
 /// Host binds config onto; persisted via <see cref="BbsStore.UpsertPartner"/>.
 ///
 /// Named deferrals (config keys in compat spec §4.1 not modelled yet): FWDTimes time bands,
-/// RequestReverse/RevFWDInterval, FWDPersonalsOnly, MaxFBBBlock, SendCTRLZ, and the
+/// RevFWDInterval (a SEPARATE collect cadence — we reuse <see cref="ForwardIntervalSeconds"/>
+/// for the collect poll instead), FWDPersonalsOnly, MaxFBBBlock, SendCTRLZ, and the
 /// per-partner protocol gates beyond B2 (AllowBlocked/AllowCompressed/UseB1Protocol are
 /// effectively constant for our B1F-minimum SID — compat spec §3.2/§8).
 /// </summary>
@@ -32,6 +33,18 @@ public sealed record Partner
 
     /// <summary>Dial as soon as a message is queued (compat spec §4.1 FWDNewImmediately).</summary>
     public bool ForwardNewImmediately { get; init; }
+
+    /// <summary>
+    /// Reverse collection ("collect", compat spec §4.1 RequestReverse). When set, the forwarding
+    /// scheduler dials this partner on the <see cref="ForwardIntervalSeconds"/> cadence even when
+    /// our outbound queue is EMPTY — a deliberate poll — so a partner that holds mail FOR US but
+    /// cannot dial us (an asymmetric link) is still collected: every FBB session drains both
+    /// directions (in-session reverse, spec §3.11), so the empty-outbound poll session still
+    /// receives the partner's reverse-forward batch. <b>Default false</b> ⇒ the scheduler never
+    /// dials an empty queue (a quiet link stays quiet); in-session reverse on a session we open
+    /// for our own queued mail needs no flag — it always happens.
+    /// </summary>
+    public bool Collect { get; init; }
 
     /// <summary>
     /// Connect-script lines, replayed verbatim by the Host ("Script lines are sent verbatim to

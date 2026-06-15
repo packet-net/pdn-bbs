@@ -19,7 +19,7 @@ Everything BPQMail's forwarding configuration can express, ours must too. The in
 | Per-partner protocol options (B/B1/B2, MaxBlock) | per-partner `allowB2` (✅ shipped — see "B2F negotiation" below; default off ⇒ B1 unchanged); `maxBlock` still F-1 | ✅ B2 shipped / maxBlock F-1 |
 | Per-partner size caps (MaxRX/MaxTX) | `maxRx`/`maxTx` | ✅ shipped |
 | In-session reverse (`DoReverse`, default on) | inherent — every session drains BOTH directions (FbbSession TakeTurn; oracle-proven both roles vs stock `RequestReverse=0` BPQ, `BidirectionalForwardingInteropTests`) | ✅ shipped |
-| Reverse polling (`RequestReverse`/`RevFWDInterval`) | `collect:` — dial on a timer even with an empty queue. Opt-in safety net ONLY for partners that cannot dial us (asymmetric links, e.g. GB7RDG→GB7CIP for the WW feed); on a symmetric link it is redundant chatter | F-1 (demoted) |
+| Reverse polling (`RequestReverse`/`RevFWDInterval`) | `collect:` — dial on a timer even with an empty queue. Opt-in safety net ONLY for partners that cannot dial us (asymmetric links, e.g. GB7RDG→GB7CIP for the WW feed); on a symmetric link it is redundant chatter | ✅ shipped (default off; reuses `intervalMinutes` as the poll cadence — a separate `RevFWDInterval` is a named deferral) |
 | `FWD <partner> NOW` | console `FWD` sysop verb + webmail button + the scheduler nudge | F-2 |
 | `FWD QUEUE` inspection | console verb + webmail sysop view | F-2 |
 | `REROUTEMSGS` | **automatic** re-route on config apply (see wart 8) + explicit requeue surface | F-2 |
@@ -80,6 +80,8 @@ Explain output speaks the same language: *"personal → GB7RDG-2: it carries mai
 
 Mail moves because **whoever holds it dials at once** (`immediately: true`, the default), and **every session drains both directions** (FBB in-session reverse is inherent to the block flow — when the caller's proposals are done the answerer gets the turn; proven both ways against stock BPQ with `RequestReverse=0`). Timers are safety nets, not the delivery mechanism: `every` is the retry cadence for queued-but-undelivered mail (the scheduler never dials an empty queue), and `collect` (timed empty-queue polling, BPQ's `RequestReverse`) exists only for asymmetric links where the partner cannot dial us. A quiet link stays quiet.
 
+**`collect` ✅ shipped (2026-06-15, `feat/reverse-forwarding`).** Two parts: (1) the **caller in-session reverse** was already inherent — the `FbbSession` FSM is symmetric, so after a caller's outbound batch + FS the turn reverses and the caller accepts the partner's `FA`/`FB`/`FC` reverse proposals and receives them through the *same* `InboundMessageReceiver` Core path the answerer uses (BID dedup, R-chain loop/age holds, routing). Pinned now by `OutboundForwardingTests.CallerSession_AcceptsPartnerReverseForward_AndStoresIt`. (2) the **reverse poll**: a per-partner `collect:` knob (config key `collect`, default false → `Partner.Collect`, persisted via the additive store migration v6). When set, the scheduler dials on the `intervalMinutes` cadence *even with an empty queue*; the poll session opens with `FF` and the in-session reverse collects whatever the partner holds. "Nothing to send AND nothing collected" is a clean graceful `FF`↔`FQ` no-op (no error, no backoff). The cadence reuses `intervalMinutes` (a separate `RevFWDInterval` is a named deferral); default-off keeps existing behaviour byte-for-byte (a non-collect partner with an empty queue is never dialled). Pinned by `OutboundForwardingTests.ReversePoll_DialsEmptyOutboundPartner_AndCollectsItsQueue`, `ReversePoll_NothingToSendAndNothingCollected_IsACleanNoOp`, and `DefaultPartner_NoCollect_NeverDialsOnEmptyQueue`.
+
 BPQ trap this design dodges (found live, `BidirectionalForwardingInteropTests`): BPQ SSID-strips inbound AX.25 connects before its partner lookup, so a partner record keyed with an SSID silently breaks the reverse-queue join — the dial-in lands on an auto-created plain user and reverse never proposes. BPQ-side partner records for us must be keyed by **base callsign** (production GB7RDG base-keys all 24 of its records).
 
 ## B2F negotiation and the `allowB2` gate (Tom, 2026-06-12)
@@ -117,8 +119,9 @@ partners:
     enabled: true
     every: 30m                 # RETRY cadence for queued mail; an empty queue never dials
     immediately: true          # dial as soon as something queues (the default posture)
-    collect: false             # timed empty-queue polling — only for partners that can't
-                               # dial us; sessions drain both directions regardless
+    collect: false             # ✅ shipped: timed empty-queue polling on `every` cadence —
+                               # only for partners that can't dial us; sessions drain both
+                               # directions regardless (in-session reverse needs no flag)
     window: []                 # when dialling is allowed; empty = always; ["02:00-06:00"]
     priority: null             # explicit tie-break; null = call order
     networkAddress: gb7rdg.#42.gbr.euro   # where this partner sits in the network tree
@@ -143,7 +146,7 @@ partners:
 ## Build waves
 
 - **F-0 (in flight):** greet-first demux + full §4.4 connect scripts with per-step timeouts and attempt transcripts.
-- **F-1 — parity + the home-BBS rule:** **local-delivery-beats-forwarding** (at-is-us / TO-is-local-user → zero targets; the wildcard-AT leak pinned by tests — see design.md § The home-BBS requirement) — **✅ landed** (feat/local-delivery-rule: the `RoutingEngine` personal pre-empt + `BbsStore.UserExists` + the leak/regression test suite) + auto-create users on inbound personals (still F-1); time windows, `collect` (timed empty-queue polling — opt-in safety net for partners that cannot dial us; in-session reverse already shipped), per-recipient fan-out, the `protocol:` block (maxBlock enforcement), `priority`. **B2F (per-partner `allowB2`, default off) — ✅ shipped** (single-recipient/no-attachment path; multi-recipient fan-out + attachments remain F-1, see "B2F negotiation").
+- **F-1 — parity + the home-BBS rule:** **local-delivery-beats-forwarding** (at-is-us / TO-is-local-user → zero targets; the wildcard-AT leak pinned by tests — see design.md § The home-BBS requirement) — **✅ landed** (feat/local-delivery-rule: the `RoutingEngine` personal pre-empt + `BbsStore.UserExists` + the leak/regression test suite) + auto-create users on inbound personals (still F-1); time windows, **`collect` (timed empty-queue polling — opt-in safety net for partners that cannot dial us; in-session reverse was already inherent) — ✅ shipped (2026-06-15, see "Delivery posture" above)**, per-recipient fan-out, the `protocol:` block (maxBlock enforcement), `priority`. **B2F (per-partner `allowB2`, default off) — ✅ shipped** (single-recipient/no-attachment path; multi-recipient fan-out + attachments remain F-1, see "B2F negotiation").
 - **F-2 — the de-warting ops layer:** health tracking + session stats, auto-re-route-on-config-apply, console `FWD`/`ROUTE?` verbs, the webmail sysop pages. **Partial ✅ (2026-06-12):** the plain *read-only* console diagnostics (`forwarding` status, `queue`, `route` explain) shipped, and the webmail interface-mode toggle (`GET`/`POST /settings`) shipped; still outstanding for F-2 — live per-partner health tracking + session stats, the forwarding *action* verbs (forward-now / re-route), auto-re-route-on-config-apply, and the fuller webmail sysop forwarding/queue/BID pages (wart 3/8/9/10).
 - **F-3 — spec SHOULDs that touch forwarding:** NTS routing, WP consumption AND emission (announcing homed users to the network — promoted by the home-BBS requirement), B2F.
 

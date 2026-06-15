@@ -13,6 +13,13 @@ namespace Bbs.Host.Forwarding;
 /// session to the target, and runs the Fbb caller role. One session at a time per partner
 /// is structural (the loop is sequential); failed cycles retry with exponential backoff
 /// capped at the partner interval.
+///
+/// Reverse collection (<see cref="Partner.Collect"/>, default off): a collect partner is
+/// dialled on the FwdInterval cadence EVEN WITH AN EMPTY QUEUE — a deliberate poll. The poll
+/// session opens with FF (nothing of ours) and the FBB in-session reverse (spec §3.11) drains
+/// the partner's queue for us through the same Core receive path the answerer uses. "Nothing
+/// to send AND nothing collected" is a clean graceful no-op (no error, no backoff). Without
+/// collect, an empty queue never dials — a quiet link stays quiet.
 /// </summary>
 public sealed class ForwardingScheduler
 {
@@ -106,14 +113,20 @@ public sealed class ForwardingScheduler
             }
 
             IReadOnlyList<Message> queue = _store.GetForwardQueue(partner.Call);
-            if (queue.Count == 0)
+            if (queue.Count == 0 && !partner.Collect)
             {
-                failures = 0; // nothing to do is not a failure; reverse polling is a named deferral
+                // Nothing to do is not a failure. Without collect set we never dial an empty
+                // queue (a quiet link stays quiet); a collect partner DOES dial here to poll.
+                failures = 0;
                 continue;
             }
 
             try
             {
+                // An empty queue + collect is a deliberate reverse-collection POLL: dial with
+                // nothing of ours to send, the session's in-session reverse (spec §3.11) drains
+                // the partner's queue for us. "Nothing to send AND nothing collected" is a clean
+                // graceful no-op (FF↔FQ) — not a failure, so it does not arm the backoff.
                 bool graceful = await RunCycleAsync(partner, queue, cancellationToken).ConfigureAwait(false);
                 failures = graceful ? 0 : failures + 1;
             }
@@ -138,12 +151,24 @@ public sealed class ForwardingScheduler
         }
 
         IReadOnlyList<OutboundItem> outbound = OutboundBuilder.Build(queue, partner, _identity, _time, _logger);
-        if (outbound.Count == 0)
+        if (outbound.Count == 0 && !partner.Collect)
         {
-            return true; // everything skipped (oversize) — don't dial for nothing
+            // Nothing to send and not a collect partner: don't dial for nothing. A non-empty
+            // queue that built to zero outbound is everything-skipped (oversize) — same verdict.
+            return true;
         }
 
-        LogCycleStart(_logger, partner.Call, plan.Target, outbound.Count, null);
+        if (outbound.Count == 0)
+        {
+            // A reverse-collection poll: dial with an empty outbound batch (we open with FF) and
+            // let the session's in-session reverse pick up whatever the partner holds for us.
+            LogCollectStart(_logger, partner.Call, plan.Target, null);
+        }
+        else
+        {
+            LogCycleStart(_logger, partner.Call, plan.Target, outbound.Count, null);
+        }
+
         RhpChildConnection child = await _link.OpenAsync(plan.Target, plan.Port, cancellationToken).ConfigureAwait(false);
         try
         {
@@ -212,6 +237,10 @@ public sealed class ForwardingScheduler
     private static readonly Action<ILogger, string, string, int, Exception?> LogCycleStart =
         LoggerMessage.Define<string, string, int>(LogLevel.Information, new EventId(2, "CycleStart"),
             "Forwarding cycle to {Partner} via {Target}: {Count} message(s) queued");
+
+    private static readonly Action<ILogger, string, string, Exception?> LogCollectStart =
+        LoggerMessage.Define<string, string>(LogLevel.Information, new EventId(5, "CollectStart"),
+            "Reverse-collection poll to {Partner} via {Target}: empty queue — collecting only");
 
     private static readonly Action<ILogger, string, string, int, Exception?> LogCycleFailed =
         LoggerMessage.Define<string, string, int>(LogLevel.Warning, new EventId(3, "CycleFailed"),

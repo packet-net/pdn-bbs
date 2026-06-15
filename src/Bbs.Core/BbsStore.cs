@@ -17,7 +17,7 @@ namespace Bbs.Core;
 public sealed class BbsStore : IDisposable
 {
     /// <summary>The schema version this build writes and expects.</summary>
-    public const int CurrentSchemaVersion = 5;
+    public const int CurrentSchemaVersion = 6;
 
     private readonly SqliteConnection _connection;
     private readonly TimeProvider _time;
@@ -1326,14 +1326,14 @@ public sealed class BbsStore : IDisposable
         {
             using SqliteCommand cmd = Command(null,
                 "INSERT INTO partners(call,enabled,forward_interval_seconds,forward_new_immediately,connect_script," +
-                "to_calls,at_calls,h_routes,h_routes_p,bbs_ha,max_rx_size,max_tx_size,allow_b2f) " +
-                "VALUES($call,$en,$int,$imm,$script,$to,$at,$hr,$hrp,$ha,$rx,$tx,$b2) " +
+                "to_calls,at_calls,h_routes,h_routes_p,bbs_ha,max_rx_size,max_tx_size,allow_b2f,collect) " +
+                "VALUES($call,$en,$int,$imm,$script,$to,$at,$hr,$hrp,$ha,$rx,$tx,$b2,$col) " +
                 "ON CONFLICT(call) DO UPDATE SET enabled=excluded.enabled, " +
                 "forward_interval_seconds=excluded.forward_interval_seconds, " +
                 "forward_new_immediately=excluded.forward_new_immediately, connect_script=excluded.connect_script, " +
                 "to_calls=excluded.to_calls, at_calls=excluded.at_calls, h_routes=excluded.h_routes, " +
                 "h_routes_p=excluded.h_routes_p, bbs_ha=excluded.bbs_ha, max_rx_size=excluded.max_rx_size, " +
-                "max_tx_size=excluded.max_tx_size, allow_b2f=excluded.allow_b2f;");
+                "max_tx_size=excluded.max_tx_size, allow_b2f=excluded.allow_b2f, collect=excluded.collect;");
             cmd.Parameters.AddWithValue("$call", Callsigns.Normalize(partner.Call));
             cmd.Parameters.AddWithValue("$en", partner.Enabled ? 1 : 0);
             cmd.Parameters.AddWithValue("$int", partner.ForwardIntervalSeconds);
@@ -1347,6 +1347,7 @@ public sealed class BbsStore : IDisposable
             cmd.Parameters.AddWithValue("$rx", partner.MaxRxSize);
             cmd.Parameters.AddWithValue("$tx", partner.MaxTxSize);
             cmd.Parameters.AddWithValue("$b2", partner.AllowB2F ? 1 : 0);
+            cmd.Parameters.AddWithValue("$col", partner.Collect ? 1 : 0);
             cmd.ExecuteNonQuery();
         }
     }
@@ -1419,7 +1420,25 @@ public sealed class BbsStore : IDisposable
 
     private const string PartnerSelect =
         "SELECT call,enabled,forward_interval_seconds,forward_new_immediately,connect_script," +
-        "to_calls,at_calls,h_routes,h_routes_p,bbs_ha,max_rx_size,max_tx_size,allow_b2f FROM partners";
+        "to_calls,at_calls,h_routes,h_routes_p,bbs_ha,max_rx_size,max_tx_size,allow_b2f,collect FROM partners";
+
+    /// <summary>Whether <paramref name="table"/> already has a column named <paramref name="column"/> (PRAGMA table_info) — guards idempotent additive ALTERs.</summary>
+    private static bool ColumnExists(SqliteConnection connection, SqliteTransaction tx, string table, string column)
+    {
+        using var cmd = connection.CreateCommand();
+        cmd.Transaction = tx;
+        cmd.CommandText = $"PRAGMA table_info({table});";
+        using SqliteDataReader reader = cmd.ExecuteReader();
+        while (reader.Read())
+        {
+            if (string.Equals(reader.GetString(1), column, StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
 
     private static void ExecuteRaw(SqliteConnection connection, string sql)
     {
@@ -1566,6 +1585,37 @@ public sealed class BbsStore : IDisposable
 
             tx.Commit();
             version = 5;
+        }
+
+        // v6 — reverse collection ("collect", compat spec §4.1 RequestReverse). PURELY ADDITIVE: the
+        // partners table gains a `collect` column defaulting 0, so every existing partner stays
+        // collect-off (a quiet link stays quiet — existing behaviour). No existing column/row is
+        // touched; safe to apply to the live lab bbs.db.
+        if (version < 6)
+        {
+            using SqliteTransaction tx = connection.BeginTransaction();
+
+            // The ADD COLUMN is guarded on the column being absent: it is a pure no-op when the
+            // column already exists (idempotent additive migration — SQLite has no ADD COLUMN IF
+            // NOT EXISTS), so re-applying v6 over a partners table that already carries `collect`
+            // upgrades cleanly rather than throwing "duplicate column name".
+            if (!ColumnExists(connection, tx, "partners", "collect"))
+            {
+                using var ddl = connection.CreateCommand();
+                ddl.Transaction = tx;
+                ddl.CommandText = SchemaV6;
+                ddl.ExecuteNonQuery();
+            }
+
+            using (var stamp = connection.CreateCommand())
+            {
+                stamp.Transaction = tx;
+                stamp.CommandText = "UPDATE meta SET value='6' WHERE key='schema_version';";
+                stamp.ExecuteNonQuery();
+            }
+
+            tx.Commit();
+            version = 6;
         }
 
         return version;
@@ -1715,6 +1765,14 @@ public sealed class BbsStore : IDisposable
         CREATE INDEX idx_message_read_msg ON message_read(message_number);
         """;
 
+    // v6 — additive only (see Migrate): the reverse-collection ("collect") flag on partners. When
+    // set, the forwarding scheduler dials the partner on its interval cadence even with an empty
+    // queue (a deliberate poll for mail it holds for us — compat spec §4.1 RequestReverse).
+    // Defaults 0 so every pre-existing partner stays collect-off (existing dial-on-queue behaviour).
+    private const string SchemaV6 = """
+        ALTER TABLE partners ADD COLUMN collect INTEGER NOT NULL DEFAULT 0;
+        """;
+
     private void InsertRecipient(SqliteTransaction tx, long number, string toCall, bool cc)
     {
         using SqliteCommand cmd = Command(tx,
@@ -1842,6 +1900,7 @@ public sealed class BbsStore : IDisposable
             MaxRxSize = (int)reader.GetInt64(10),
             MaxTxSize = (int)reader.GetInt64(11),
             AllowB2F = reader.GetInt64(12) != 0,
+            Collect = reader.GetInt64(13) != 0,
         };
     }
 
