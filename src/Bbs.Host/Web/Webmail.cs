@@ -105,23 +105,39 @@ public static class Webmail
             context.Items[EmbedKey] = context.Request.Query["pdn_embed"] == "1"
                 || context.Request.Headers["X-Pdn-Embed"] == "1";
 
+            // Theme handoff (panel → app): an iframe is a separate document that can't see the
+            // panel's manual `.dark` class, so the BBS would otherwise fall back to
+            // prefers-color-scheme (the OS) — a mismatch with a manual panel toggle. pdn appends
+            // the panel's active theme as ?theme=dark|light on the slot iframe src (an X-Pdn-Theme
+            // header is also honoured). We persist it via a same-origin first-party cookie (the
+            // embed iframe is same-origin under the gateway) so it survives in-iframe navigation
+            // WITHOUT having to thread the param through every link/form. Resolution order each
+            // request: query ?? cookie; when the query supplied it we (re)write the cookie so a
+            // panel toggle (which reloads the iframe with a new ?theme=) updates the stored value.
+            context.Items[ThemeKey] = ResolveTheme(context);
+
+            // Server-rendered, per-user, dynamic content (mail + the inline CSS) must never be cached
+            // by the browser: a cached iframe page shows stale mail AND stale styling (an app update
+            // wouldn't render until a hard refresh). no-store keeps the slot iframe always current.
+            context.Response.Headers.CacheControl = "no-store";
+
             await next().ConfigureAwait(false);
         });
 
         app.MapGet("/", (HttpContext ctx, int? page) => WithCallsign(ctx, options,
-            (prefix, call) => Inbox(options, prefix, call, page ?? 1, Embed(ctx))));
+            (prefix, call) => Inbox(options, prefix, call, page ?? 1, Embed(ctx), Theme(ctx))));
 
         app.MapGet("/bulletins", (HttpContext ctx, int? page) => WithCallsign(ctx, options,
-            (prefix, call) => Bulletins(options, prefix, call, page ?? 1, Embed(ctx))));
+            (prefix, call) => Bulletins(options, prefix, call, page ?? 1, Embed(ctx), Theme(ctx))));
 
         app.MapGet("/messages/{number:long}", (HttpContext ctx, long number) => WithCallsign(ctx, options,
-            (prefix, call) => ReadMessage(options, prefix, call, number, Embed(ctx))));
+            (prefix, call) => ReadMessage(options, prefix, call, number, Embed(ctx), Theme(ctx))));
 
         app.MapGet("/messages/{number:long}/attachments/{name}", (HttpContext ctx, long number, string name) =>
             WithCallsign(ctx, options, (_, call) => DownloadAttachment(options, call, number, name)));
 
         app.MapGet("/compose", (HttpContext ctx, string? to, string? type) => WithCallsign(ctx, options,
-            (prefix, call) => ComposeForm(options, prefix, call, to, type, Embed(ctx))));
+            (prefix, call) => ComposeForm(options, prefix, call, to, type, Embed(ctx), Theme(ctx))));
 
         app.MapPost("/compose", async (HttpContext ctx) =>
         {
@@ -142,7 +158,7 @@ public static class Webmail
             // the gateway/app-package wiring (pdn carries zero BBS-specific code). We cap the upload
             // ourselves below (WebmailOptions.MaxUploadBytes) rather than relying on a gateway limit.
             IFormCollection form = await ctx.Request.ReadFormAsync().ConfigureAwait(false);
-            return Compose(options, prefix, call, form, form.Files.GetFile("file"), Embed(ctx));
+            return Compose(options, prefix, call, form, form.Files.GetFile("file"), Embed(ctx), Theme(ctx));
         });
 
         app.MapPost("/messages/{number:long}/kill", (HttpContext ctx, long number) => WithCallsign(ctx, options,
@@ -152,11 +168,11 @@ public static class Webmail
         {
             string user = PdnUser(ctx);
             IFormCollection form = await ctx.Request.ReadFormAsync().ConfigureAwait(false);
-            return Claim(options, Prefix(ctx), user, form["callsign"].ToString(), Embed(ctx));
+            return Claim(options, Prefix(ctx), user, form["callsign"].ToString(), Embed(ctx), Theme(ctx));
         });
 
         app.MapGet("/settings", (HttpContext ctx) => WithCallsign(ctx, options,
-            (prefix, call) => SettingsPage(options, prefix, call, Embed(ctx))));
+            (prefix, call) => SettingsPage(options, prefix, call, Embed(ctx), theme: Theme(ctx))));
 
         app.MapPost("/settings", async (HttpContext ctx) =>
         {
@@ -169,7 +185,7 @@ public static class Webmail
             }
 
             IFormCollection form = await ctx.Request.ReadFormAsync().ConfigureAwait(false);
-            return SaveSettings(options, prefix, call, form["interface"].ToString(), embed);
+            return SaveSettings(options, prefix, call, form["interface"].ToString(), embed, Theme(ctx));
         });
 
         app.MapPost("/settings/mailpw", async (HttpContext ctx) =>
@@ -183,16 +199,20 @@ public static class Webmail
             }
 
             IFormCollection form = await ctx.Request.ReadFormAsync().ConfigureAwait(false);
-            return SaveMailPassword(options, prefix, call, form["new"].ToString(), form["confirm"].ToString(), embed);
+            return SaveMailPassword(options, prefix, call, form["new"].ToString(), form["confirm"].ToString(), embed, Theme(ctx));
         });
 
         app.MapPost("/settings/mailpw/clear", (HttpContext ctx) => WithCallsign(ctx, options,
-            (prefix, call) => ClearMailPassword(options, prefix, call, Embed(ctx))));
+            (prefix, call) => ClearMailPassword(options, prefix, call, Embed(ctx), Theme(ctx))));
     }
 
     private const string PdnUserKey = "pdnUser";
     private const string PrefixKey = "pdnPrefix";
     private const string EmbedKey = "pdnEmbed";
+    private const string ThemeKey = "pdnTheme";
+
+    /// <summary>The same-origin first-party cookie that persists the panel's theme across in-iframe navigation.</summary>
+    private const string ThemeCookie = "pdn_theme";
 
     private static string PdnUser(HttpContext ctx) => (string)ctx.Items[PdnUserKey]!;
 
@@ -200,6 +220,54 @@ public static class Webmail
 
     /// <summary>Whether this request renders chrome-less inside the pdn panel (slot mode).</summary>
     private static bool Embed(HttpContext ctx) => (bool)ctx.Items[EmbedKey]!;
+
+    /// <summary>
+    /// The resolved theme for this request — <c>"dark"</c>, <c>"light"</c>, or <c>null</c> (no
+    /// explicit theme → keep the prefers-color-scheme default; standalone rendering is unchanged).
+    /// </summary>
+    private static string? Theme(HttpContext ctx) => ctx.Items[ThemeKey] as string;
+
+    /// <summary>
+    /// Resolves the explicit theme for this request — query <c>?theme=</c> first, then the persisted
+    /// <see cref="ThemeCookie"/> — and, when it came from the query, (re)writes the cookie so it
+    /// survives in-iframe navigation (the panel reloads the iframe with a fresh <c>?theme=</c> on a
+    /// toggle, updating the stored value). Returns <c>null</c> when neither is present, leaving the
+    /// page to fall back to <c>prefers-color-scheme</c> (so direct/standalone rendering is unchanged).
+    /// The header <c>X-Pdn-Theme</c> is honoured alongside the query for the slot embed.
+    /// </summary>
+    private static string? ResolveTheme(HttpContext context)
+    {
+        string fromRequest = Normalize(context.Request.Query["theme"].ToString());
+        if (fromRequest.Length == 0)
+        {
+            fromRequest = Normalize(context.Request.Headers["X-Pdn-Theme"].ToString());
+        }
+
+        if (fromRequest.Length > 0)
+        {
+            // Persist so subsequent in-iframe navigations (no query) stay themed; scope to the mount
+            // prefix (or "/") so it's a first-party cookie under the gateway path.
+            string path = Prefix(context);
+            context.Response.Cookies.Append(ThemeCookie, fromRequest, new CookieOptions
+            {
+                Path = path.Length == 0 ? "/" : path,
+                HttpOnly = false,
+                SameSite = SameSiteMode.Lax,
+            });
+            return fromRequest;
+        }
+
+        string fromCookie = Normalize(context.Request.Cookies[ThemeCookie] ?? "");
+        return fromCookie.Length == 0 ? null : fromCookie;
+    }
+
+    /// <summary>Accepts only the two known theme tokens (case-insensitive); anything else → empty.</summary>
+    private static string Normalize(string value) => value.Trim().ToLowerInvariant() switch
+    {
+        "dark" => "dark",
+        "light" => "light",
+        _ => "",
+    };
 
     /// <summary>
     /// Roots an absolute path under the gateway mount prefix ("" when direct), and — in slot/embed
@@ -240,12 +308,12 @@ public static class Webmail
         string user = PdnUser(ctx);
         string prefix = Prefix(ctx);
         string? call = FindCallsign(options.Store, user);
-        return call is null ? ClaimForm(prefix, user, error: null, embed: Embed(ctx)) : handler(prefix, call);
+        return call is null ? ClaimForm(prefix, user, error: null, embed: Embed(ctx), theme: Theme(ctx)) : handler(prefix, call);
     }
 
     // ---------------------------------------------------------------- pages
 
-    private static IResult Inbox(WebmailOptions o, string prefix, string call, int page, bool embed)
+    private static IResult Inbox(WebmailOptions o, string prefix, string call, int page, bool embed, string? theme)
     {
         IReadOnlyList<Message> mine = HideSevenPlusParts(o.Store, o.Store.ListMessages(new MessageQuery
         {
@@ -261,10 +329,10 @@ public static class Webmail
             <h2>Inbox — personal messages for {H(call)}</h2>
             {placeholders}
             {rows}
-            """));
+            """, theme));
     }
 
-    private static IResult Bulletins(WebmailOptions o, string prefix, string call, int page, bool embed)
+    private static IResult Bulletins(WebmailOptions o, string prefix, string call, int page, bool embed, string? theme)
     {
         IReadOnlyList<Message> bulls = HideSevenPlusParts(o.Store, o.Store.ListMessages(new MessageQuery { Type = MessageType.Bulletin }));
         // Bulletins are world-visible, so the bulletin placeholders are not recipient-scoped.
@@ -275,7 +343,7 @@ public static class Webmail
             <h2>Bulletins</h2>
             {placeholders}
             {rows}
-            """));
+            """, theme));
     }
 
     /// <summary>
@@ -340,7 +408,7 @@ public static class Webmail
         return sb.ToString();
     }
 
-    private static IResult ReadMessage(WebmailOptions o, string prefix, string call, long number, bool embed)
+    private static IResult ReadMessage(WebmailOptions o, string prefix, string call, long number, bool embed, string? theme)
     {
         Message? message = o.Store.GetMessage(number);
         bool isSysop = IsSysop(o, call);
@@ -373,7 +441,7 @@ public static class Webmail
             <pre>{H(message.GetBodyText())}</pre>
             {attachments}
             {killForm}
-            """));
+            """, theme));
     }
 
     /// <summary>
@@ -418,7 +486,7 @@ public static class Webmail
 
     private static IResult ComposeForm(
         WebmailOptions o, string prefix, string call, string? to, string? type, bool embed,
-        string? error = null, int status = StatusCodes.Status200OK)
+        string? error = null, int status = StatusCodes.Status200OK, string? theme = null)
     {
         bool bulletin = string.Equals(type, "B", StringComparison.OrdinalIgnoreCase);
         string err = error is null ? "" : $"""<p class="err">{H(error)}</p>""";
@@ -450,10 +518,10 @@ public static class Webmail
             </fieldset>
             <p><button type="submit">Send</button></p>
             </form>
-            """), status);
+            """, theme), status);
     }
 
-    private static IResult Compose(WebmailOptions o, string prefix, string call, IFormCollection form, IFormFile? file, bool embed)
+    private static IResult Compose(WebmailOptions o, string prefix, string call, IFormCollection form, IFormFile? file, bool embed, string? theme)
     {
         string typeField = form["type"].ToString().Trim().ToUpperInvariant();
         MessageType type = typeField == "B" ? MessageType.Bulletin : MessageType.Personal;
@@ -464,7 +532,7 @@ public static class Webmail
 
         if (to.Length == 0 || subject.Length == 0)
         {
-            return ComposeForm(o, prefix, call, to, typeField, embed, "TO and Subject are required.", StatusCodes.Status400BadRequest);
+            return ComposeForm(o, prefix, call, to, typeField, embed, "TO and Subject are required.", StatusCodes.Status400BadRequest, theme);
         }
 
         // `call@route` in the TO box works like the console's S-line grammar (§1.5).
@@ -478,7 +546,7 @@ public static class Webmail
         string[] recipients = to.Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
         if (recipients.Length == 0)
         {
-            return ComposeForm(o, prefix, call, to, typeField, embed, "TO is required.", StatusCodes.Status400BadRequest);
+            return ComposeForm(o, prefix, call, to, typeField, embed, "TO is required.", StatusCodes.Status400BadRequest, theme);
         }
 
         // CR line discipline, like the console's body loop stores it (§1.5 step 6).
@@ -499,7 +567,7 @@ public static class Webmail
             {
                 return ComposeForm(o, prefix, call, to, typeField, embed,
                     Inv($"That file is too large ({file.Length} bytes); the limit is {o.MaxUploadBytes} bytes."),
-                    StatusCodes.Status400BadRequest);
+                    StatusCodes.Status400BadRequest, theme);
             }
 
             // Path components are stripped so the stored/encoded name is a bare filename.
@@ -583,19 +651,19 @@ public static class Webmail
         return Results.Redirect(U(prefix, "/", embed));
     }
 
-    private static IResult Claim(WebmailOptions o, string prefix, string pdnUser, string callsignInput, bool embed)
+    private static IResult Claim(WebmailOptions o, string prefix, string pdnUser, string callsignInput, bool embed, string? theme)
     {
         string call = Callsigns.NormalizeAddressee(callsignInput);
         if (call.Length < 3 || !call.All(char.IsAsciiLetterOrDigit) || !call.Any(char.IsAsciiDigit))
         {
-            return ClaimForm(prefix, pdnUser, "That doesn't look like a callsign.", embed, StatusCodes.Status400BadRequest);
+            return ClaimForm(prefix, pdnUser, "That doesn't look like a callsign.", embed, StatusCodes.Status400BadRequest, theme);
         }
 
         User? existing = o.Store.GetUser(call);
         if (existing?.PdnUsername is { Length: > 0 } owner
             && !string.Equals(owner, pdnUser, StringComparison.OrdinalIgnoreCase))
         {
-            return ClaimForm(prefix, pdnUser, Inv($"{call} is already linked to another pdn account."), embed, StatusCodes.Status409Conflict);
+            return ClaimForm(prefix, pdnUser, Inv($"{call} is already linked to another pdn account."), embed, StatusCodes.Status409Conflict, theme);
         }
 
         User user = (existing ?? new User { Callsign = call }) with { PdnUsername = pdnUser };
@@ -603,7 +671,7 @@ public static class Webmail
         return Results.Redirect(U(prefix, "/", embed));
     }
 
-    private static IResult ClaimForm(string prefix, string pdnUser, string? error, bool embed, int status = StatusCodes.Status200OK)
+    private static IResult ClaimForm(string prefix, string pdnUser, string? error, bool embed, int status = StatusCodes.Status200OK, string? theme = null)
     {
         string err = error is null ? "" : $"""<p class="err">{H(error)}</p>""";
         // Embedded: drop our own <h1> identity bar (the panel shows the app name) and trim the top
@@ -612,7 +680,7 @@ public static class Webmail
         string mainClass = embed ? """ class="embed" style="padding-top:.5rem" """.TrimEnd() : "";
         return Html($$"""
             <!doctype html>
-            <html><head><meta charset="utf-8"><title>pdn-bbs — claim your callsign</title>{{Style}}</head>
+            <html{{HtmlThemeClass(theme)}}><head><meta charset="utf-8"><title>pdn-bbs — claim your callsign</title>{{Style}}</head>
             <body><main{{mainClass}}>
             {{heading}}
             <p>Hello <b>{{H(pdnUser)}}</b>. This pdn account isn't linked to a callsign yet.</p>
@@ -636,7 +704,7 @@ public static class Webmail
     /// optional <paramref name="notice"/> banner confirms (or, with <paramref name="noticeError"/>,
     /// reports a problem with) a just-applied change.
     /// </summary>
-    private static IResult SettingsPage(WebmailOptions o, string prefix, string call, bool embed, string? notice = null, bool noticeError = false)
+    private static IResult SettingsPage(WebmailOptions o, string prefix, string call, bool embed, string? notice = null, bool noticeError = false, string? theme = null)
     {
         // Null InterfaceMode means "never chosen" → the plain default per the mandate.
         InterfaceMode mode = o.Settings.Load(call).InterfaceMode ?? InterfaceMode.Plain;
@@ -686,7 +754,7 @@ public static class Webmail
             </fieldset>
             </form>
             {removeForm}
-            """));
+            """, theme));
     }
 
     /// <summary>
@@ -695,14 +763,14 @@ public static class Webmail
     /// new surface), then re-renders the page with a confirmation. An unrecognised value falls back
     /// to plain (the mandate's default) rather than erroring.
     /// </summary>
-    private static IResult SaveSettings(WebmailOptions o, string prefix, string call, string interfaceValue, bool embed)
+    private static IResult SaveSettings(WebmailOptions o, string prefix, string call, string interfaceValue, bool embed, string? theme)
     {
         InterfaceMode mode = string.Equals(interfaceValue.Trim(), "classic", StringComparison.OrdinalIgnoreCase)
             ? InterfaceMode.Classic
             : InterfaceMode.Plain;
 
         o.Settings.Save(call, o.Settings.Load(call) with { InterfaceMode = mode });
-        return SettingsPage(o, prefix, call, embed, "Saved. Your choice applies to your next mailbox connection.");
+        return SettingsPage(o, prefix, call, embed, "Saved. Your choice applies to your next mailbox connection.", theme: theme);
     }
 
     /// <summary>
@@ -711,11 +779,11 @@ public static class Webmail
     /// <see cref="BbsStore.SetMailPassword"/> (whose <see cref="ArgumentException"/> message is shown
     /// verbatim). The plaintext is never logged or echoed back — only a pass/fail notice.
     /// </summary>
-    private static IResult SaveMailPassword(WebmailOptions o, string prefix, string call, string newPw, string confirm, bool embed)
+    private static IResult SaveMailPassword(WebmailOptions o, string prefix, string call, string newPw, string confirm, bool embed, string? theme)
     {
         if (!string.Equals(newPw, confirm, StringComparison.Ordinal))
         {
-            return SettingsPage(o, prefix, call, embed, "Those passwords didn't match. Nothing was changed.", noticeError: true);
+            return SettingsPage(o, prefix, call, embed, "Those passwords didn't match. Nothing was changed.", noticeError: true, theme: theme);
         }
 
         try
@@ -724,18 +792,18 @@ public static class Webmail
         }
         catch (ArgumentException ex)
         {
-            return SettingsPage(o, prefix, call, embed, ex.Message, noticeError: true);
+            return SettingsPage(o, prefix, call, embed, ex.Message, noticeError: true, theme: theme);
         }
 
-        return SettingsPage(o, prefix, call, embed, "Mail password updated. Use it with your callsign in your mail app.");
+        return SettingsPage(o, prefix, call, embed, "Mail password updated. Use it with your callsign in your mail app.", theme: theme);
     }
 
     /// <summary>Removes the caller's BBS mail-password (disabling IMAP login for them).</summary>
-    private static IResult ClearMailPassword(WebmailOptions o, string prefix, string call, bool embed)
+    private static IResult ClearMailPassword(WebmailOptions o, string prefix, string call, bool embed, string? theme)
     {
         bool removed = o.Store.ClearMailPassword(call);
         return SettingsPage(o, prefix, call, embed,
-            removed ? "Mail password removed. External mail apps can no longer sign in." : "No mail password was set.");
+            removed ? "Mail password removed. External mail apps can no longer sign in." : "No mail password was set.", theme: theme);
     }
 
     // ---------------------------------------------------------------- rendering
@@ -815,7 +883,7 @@ public static class Webmail
     /// complete valid HTML document because the iframe loads a full page. Non-embedded output is
     /// byte-for-byte the prior standalone rendering.
     /// </summary>
-    private static string Page(WebmailOptions o, string prefix, string call, string title, bool embed, string body)
+    private static string Page(WebmailOptions o, string prefix, string call, string title, bool embed, string body, string? theme = null)
     {
         string header = embed
             ? ""
@@ -825,7 +893,7 @@ public static class Webmail
         string mainClass = embed ? """ class="embed" style="padding-top:.5rem" """.TrimEnd() : "";
         return $$"""
             <!doctype html>
-            <html><head><meta charset="utf-8"><title>{{H(o.StationCallsign)}} — {{H(title)}}</title>{{Style}}</head>
+            <html{{HtmlThemeClass(theme)}}><head><meta charset="utf-8"><title>{{H(o.StationCallsign)}} — {{H(title)}}</title>{{Style}}</head>
             <body><main{{mainClass}}>
             {{header}}<nav><a href="{{U(prefix, "/", embed)}}">Inbox</a> · <a href="{{U(prefix, "/bulletins", embed)}}">Bulletins</a> · <a href="{{U(prefix, "/compose", embed)}}">Compose</a> · <a href="{{U(prefix, "/settings", embed)}}">Settings</a>
             <span class="dim">— de {{H(call)}}</span></nav>
@@ -986,4 +1054,12 @@ public static class Webmail
     private static string H(string text) => WebUtility.HtmlEncode(text);
 
     private static string Inv(FormattableString text) => FormattableString.Invariant(text);
+
+    /// <summary>
+    /// The <c>&lt;html&gt;</c> class attribute that pins an explicit theme — <c>" class=\"dark\""</c>
+    /// or <c>" class=\"light\""</c> — so the page overrides <c>prefers-color-scheme</c> (the existing
+    /// stylesheet honours <c>.dark</c> and <c>:root:not(.light)</c>). Empty when no theme is resolved,
+    /// leaving the plain <c>&lt;html&gt;</c> (prefers-color-scheme behaviour) for standalone rendering.
+    /// </summary>
+    private static string HtmlThemeClass(string? theme) => theme is "dark" or "light" ? $" class=\"{theme}\"" : "";
 }

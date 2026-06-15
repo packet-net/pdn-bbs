@@ -540,6 +540,120 @@ public sealed class WebmailTests : IAsyncDisposable
         Assert.DoesNotContain("<h1>GB7PDN-1 <span", page, StringComparison.Ordinal);
     }
 
+    // ------------------------------------------------ theme handoff (panel → app)
+    // An iframe is a separate document that can't see the panel's manual `.dark` class, so the BBS
+    // would otherwise fall back to prefers-color-scheme (the OS) — a mismatch with a manual panel
+    // toggle. pdn appends the panel's active theme as ?theme=dark|light on the slot iframe src; we
+    // emit <html class="dark"|"light"> (the stylesheet already honours .dark / :root:not(.light), so
+    // an explicit class overrides prefers-color-scheme) and persist it in a same-origin first-party
+    // cookie so it survives in-iframe navigation without threading the param through every link/form.
+    // Standalone rendering (no embed, no theme) is unchanged — plain <html>, prefers-color-scheme.
+
+    [Fact]
+    public async Task Embedded_ThemeDarkQuery_RendersDarkHtmlClass_AndSetsCookie()
+    {
+        ClaimCallsign("tom", "M0LTE");
+        using HttpClient client = await StartAsync();
+
+        HttpResponseMessage response = await client.GetAsync(new Uri("/?pdn_embed=1&theme=dark", UriKind.Relative));
+        response.EnsureSuccessStatusCode();
+        string page = await response.Content.ReadAsStringAsync();
+
+        // The explicit theme class on <html> overrides prefers-color-scheme.
+        Assert.Contains("<html class=\"dark\">", page, StringComparison.Ordinal);
+        Assert.DoesNotContain("<html class=\"light\">", page, StringComparison.Ordinal);
+
+        // The theme is persisted via a Set-Cookie so it survives in-iframe navigation.
+        Assert.Contains(response.Headers.GetValues("Set-Cookie"),
+            c => c.Contains("pdn_theme=dark", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task Embedded_ThemeLightQuery_RendersLightHtmlClass()
+    {
+        ClaimCallsign("tom", "M0LTE");
+        using HttpClient client = await StartAsync();
+
+        HttpResponseMessage response = await client.GetAsync(new Uri("/?pdn_embed=1&theme=light", UriKind.Relative));
+        response.EnsureSuccessStatusCode();
+        string page = await response.Content.ReadAsStringAsync();
+
+        Assert.Contains("<html class=\"light\">", page, StringComparison.Ordinal);
+        Assert.DoesNotContain("<html class=\"dark\">", page, StringComparison.Ordinal);
+        Assert.Contains(response.Headers.GetValues("Set-Cookie"),
+            c => c.Contains("pdn_theme=light", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task Embedded_ThemeCookieOnly_NoQuery_StillThemes()
+    {
+        // A follow-up in-iframe navigation carries only the persisted cookie (no ?theme=) — the page
+        // still themes from the cookie, so navigation stays themed without threading the param.
+        ClaimCallsign("tom", "M0LTE");
+        using HttpClient client = await StartAsync();
+        client.DefaultRequestHeaders.Add("Cookie", "pdn_theme=dark");
+
+        string page = await client.GetStringAsync(new Uri("/?pdn_embed=1", UriKind.Relative));
+        Assert.Contains("<html class=\"dark\">", page, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Embedded_ThemeViaHeader_AlsoThemes()
+    {
+        // The X-Pdn-Theme header is honoured alongside the query (defensive parity with X-Pdn-Embed).
+        ClaimCallsign("tom", "M0LTE");
+        using HttpClient client = await StartAsync();
+        client.DefaultRequestHeaders.Add("X-Pdn-Embed", "1");
+        client.DefaultRequestHeaders.Add("X-Pdn-Theme", "dark");
+
+        string page = await client.GetStringAsync(new Uri("/", UriKind.Relative));
+        Assert.Contains("<html class=\"dark\">", page, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ThemeCookie_ScopedToTheGatewayMountPrefix()
+    {
+        // Under the gateway mount the cookie Path is the mount prefix (a first-party cookie under the
+        // app's path), not the panel root.
+        ClaimCallsign("tom", "M0LTE");
+        using HttpClient client = await StartAsync(forwardedPrefix: "/apps/bbs");
+
+        HttpResponseMessage response = await client.GetAsync(new Uri("/?pdn_embed=1&theme=dark", UriKind.Relative));
+        response.EnsureSuccessStatusCode();
+        Assert.Contains(response.Headers.GetValues("Set-Cookie"),
+            c => c.Contains("pdn_theme=dark", StringComparison.Ordinal)
+                && c.Contains("path=/apps/bbs", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public async Task Standalone_NoEmbedNoTheme_RendersPlainHtml_Unchanged()
+    {
+        // No embed, no theme query, no cookie → the plain <html> (prefers-color-scheme behaviour) is
+        // kept; standalone rendering must not change.
+        ClaimCallsign("tom", "M0LTE");
+        using HttpClient client = await StartAsync();
+
+        string page = await client.GetStringAsync(new Uri("/", UriKind.Relative));
+        Assert.Contains("<html><head>", page, StringComparison.Ordinal);
+        Assert.DoesNotContain("<html class=", page, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task InvalidTheme_IsIgnored_NoClassNoCookie()
+    {
+        // A junk theme value is not one of the two known tokens → ignored (no class, no cookie),
+        // falling back to prefers-color-scheme rather than emitting an unknown class.
+        ClaimCallsign("tom", "M0LTE");
+        using HttpClient client = await StartAsync();
+
+        HttpResponseMessage response = await client.GetAsync(new Uri("/?pdn_embed=1&theme=neon", UriKind.Relative));
+        response.EnsureSuccessStatusCode();
+        string page = await response.Content.ReadAsStringAsync();
+
+        Assert.DoesNotContain("<html class=", page, StringComparison.Ordinal);
+        Assert.False(response.Headers.TryGetValues("Set-Cookie", out _));
+    }
+
     // ------------------------------------------------ X-Forwarded-Prefix (gateway mount)
     // Behind pdn's app gateway the app is mounted at /apps/bbs/ with the prefix stripped on
     // proxying; pdn injects X-Forwarded-Prefix and every absolute URL we render or redirect
