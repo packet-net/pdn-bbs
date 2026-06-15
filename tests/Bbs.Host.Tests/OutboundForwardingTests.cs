@@ -10,6 +10,42 @@ public class OutboundForwardingTests
     private const string PeerSid = "[BPQ-6.0.24.44-B1FHM$]";
 
     [Fact]
+    public async Task PartnerCreatedAtRuntime_GetsADialingLoop_AfterReconcile()
+    {
+        // Store-first: a partner added via the editor AFTER the scheduler is running must get a
+        // forwarding loop. The supervisor spins one on Reconcile() (the editor's signal); the fresh
+        // loop checks its queue immediately (nudge-on-spin) and dials — no restart, no interval wait.
+        await using var host = new HostHarness();
+        await host.StartLinkAsync();
+        host.StartScheduler(); // no partners at startup
+
+        host.Store.UpsertPartner(new Partner
+        {
+            Call = "GB7NEW",
+            AtCalls = ["*"],
+            ConnectScript = ["C GB7NEW-1"],
+            ForwardNewImmediately = true,
+        });
+        Message stored = host.Store.AddMessage(new MessageDraft
+        {
+            Type = MessageType.Personal,
+            From = "M0LTE",
+            Recipients = ["G8ABC"],
+            Subject = "runtime",
+            Body = Encoding.Latin1.GetBytes("x\r"),
+        });
+        host.Routing.RouteMessage(stored); // queues to GB7NEW (the immediate nudge is lost — no loop yet)
+        host.Scheduler!.Reconcile();       // the editor's signal → supervisor spins the loop → it dials
+
+        FakeRhpPeer peer = await host.Server.NextOpenAsync();
+        Assert.Equal("GB7NEW-1", peer.Remote);
+
+        // Let the cycle make progress so dispose unwinds cleanly rather than mid-connect.
+        await peer.SendLineAsync(PeerSid);
+        await peer.SendTextAsync("de GB7NEW>\r");
+    }
+
+    [Fact]
     public async Task FullOutboundCycle_OpensTargetTransfersAndMarksForwarded()
     {
         await using var host = new HostHarness();

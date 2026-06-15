@@ -201,11 +201,10 @@ public sealed class ConfigTests : IDisposable
     }
 
     [Fact]
-    public void SyncPartners_UpsertsConfiguredAndPrunesStale()
+    public void SyncPartners_SeedsAnEmptyStoreFromConfig()
     {
         var time = new FakeTimeProvider();
         using var store = BbsStore.Open(Path.Combine(_dir.FullName, "bbs.db"), "GB7PDN", time);
-        store.UpsertPartner(new Partner { Call = "GB7OLD" });
 
         var config = new BbsHostConfig
         {
@@ -217,13 +216,32 @@ public sealed class ConfigTests : IDisposable
         };
         HostStartup.SyncPartners(store, config);
 
-        Assert.Null(store.GetPartner("GB7OLD")); // config is the source of truth (v1)
         Partner? bpq = store.GetPartner("GB7BPQ");
         Assert.NotNull(bpq);
         Assert.Equal(15 * 60, bpq.ForwardIntervalSeconds);
         Partner? rdg = store.GetPartner("GB7RDG");
         Assert.NotNull(rdg);
         Assert.False(rdg.Enabled);
+    }
+
+    [Fact]
+    public void SyncPartners_LeavesAPopulatedStoreUntouched_StoreFirst()
+    {
+        // Store-first: a non-empty store is authoritative. bbs.yaml is a first-boot SEED only — it
+        // must NOT re-import or prune once the store has partners, so editor edits persist across
+        // restarts (a partner added in the editor survives; one removed in the editor stays gone).
+        var time = new FakeTimeProvider();
+        using var store = BbsStore.Open(Path.Combine(_dir.FullName, "bbs.db"), "GB7PDN", time);
+        store.UpsertPartner(new Partner { Call = "GB7EDIT" }); // added via the editor
+
+        var config = new BbsHostConfig
+        {
+            Partners = [new PartnerConfig { Call = "GB7SEED" }], // would-be seed
+        };
+        HostStartup.SyncPartners(store, config);
+
+        Assert.NotNull(store.GetPartner("GB7EDIT")); // kept — not pruned
+        Assert.Null(store.GetPartner("GB7SEED"));    // not seeded into a populated store
     }
 
     [Fact]

@@ -33,6 +33,14 @@ public sealed class ForwardingScheduler
     private readonly ILogger _logger;
     private readonly ConcurrentDictionary<string, Channel<bool>> _nudges = new(StringComparer.OrdinalIgnoreCase);
 
+    // Store-first: partners are created/edited/deleted at runtime via the forwarding editor, so the
+    // set of loops is dynamic. _loops tracks the running per-partner loops; the supervisor in
+    // RunAsync spins a loop for any enabled partner that lacks one, on a Reconcile() signal or a
+    // periodic re-sweep. A deleted/disabled partner's loop self-exits and reaps itself from _loops.
+    private readonly ConcurrentDictionary<string, Task> _loops = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Channel<bool> _reconcile = NewNudgeChannel();
+    private static readonly TimeSpan ReconcileTick = TimeSpan.FromSeconds(60);
+
     /// <summary>
     /// Creates the scheduler. Nudge channels are created eagerly for every enabled partner
     /// so a nudge fired before <see cref="RunAsync"/> (the startup backlog sweep) is kept.
@@ -77,16 +85,87 @@ public sealed class ForwardingScheduler
         }
     }
 
-    /// <summary>Runs every partner loop until cancelled.</summary>
+    /// <summary>
+    /// Supervises the per-partner forwarding loops until cancelled. One loop runs per enabled
+    /// partner; a deleted/disabled partner's loop self-exits (and reaps itself), and a partner
+    /// created/enabled at runtime via the editor gets a fresh loop on the next reconcile — signalled
+    /// by <see cref="Reconcile"/> (immediate) or a periodic re-sweep (a backstop). Store-first:
+    /// the partner set is no longer fixed at startup.
+    /// </summary>
     public async Task RunAsync(CancellationToken cancellationToken)
     {
-        var loops = new List<Task>();
-        foreach (string call in _nudges.Keys)
+        try
         {
-            loops.Add(RunPartnerLoopAsync(call, cancellationToken));
+            while (!cancellationToken.IsCancellationRequested)
+            {
+                StartLoopsForEnabledPartners(cancellationToken);
+
+                // Re-sweep on an explicit reconcile (a partner created/enabled in the editor) or a
+                // periodic tick (a backstop against a missed signal). DropWrite coalesces signals.
+                using var tick = new CancellationTokenSource(ReconcileTick, _time);
+                using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, tick.Token);
+                try
+                {
+                    await _reconcile.Reader.ReadAsync(linked.Token).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+                {
+                    // The periodic tick fired — fall through and re-sweep.
+                }
+            }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            // Shutting down.
         }
 
-        await Task.WhenAll(loops).ConfigureAwait(false);
+        await Task.WhenAll(_loops.Values).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Ask the supervisor to (re)scan for partners that need a loop — call after creating or
+    /// enabling a partner in the editor so it starts forwarding immediately rather than waiting for
+    /// the periodic re-sweep. Cheap, idempotent, and coalesces with other pending signals.
+    /// </summary>
+    public void Reconcile() => _reconcile.Writer.TryWrite(true);
+
+    /// <summary>Start a loop for every enabled partner that has no running loop. Called only from the
+    /// single supervisor loop, so the contains-then-add is race-free.</summary>
+    private void StartLoopsForEnabledPartners(CancellationToken cancellationToken)
+    {
+        foreach (Partner partner in _store.ListPartners())
+        {
+            if (!partner.Enabled)
+            {
+                continue;
+            }
+
+            string call = Callsigns.Normalize(partner.Call);
+            _nudges.TryAdd(call, NewNudgeChannel());
+            if (!_loops.ContainsKey(call))
+            {
+                _loops[call] = RunPartnerLoopThenReapAsync(call, cancellationToken);
+                // Wake the fresh loop so it checks its queue NOW rather than after a full interval —
+                // a partner created in the editor with mail already queued (its FWDNewImmediately
+                // nudge was lost, the channel/loop not existing yet), or a startup backlog. Harmless
+                // for an empty, non-collect queue: the loop checks, finds nothing, waits as usual.
+                _nudges[call].Writer.TryWrite(true);
+            }
+        }
+    }
+
+    /// <summary>Runs a partner loop, then reaps it from the running set so a later re-enable re-spins
+    /// it (the loop self-exits when its partner is deleted or disabled).</summary>
+    private async Task RunPartnerLoopThenReapAsync(string call, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await RunPartnerLoopAsync(call, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            _loops.TryRemove(call, out _);
+        }
     }
 
     private async Task RunPartnerLoopAsync(string call, CancellationToken cancellationToken)

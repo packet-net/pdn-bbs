@@ -6,33 +6,29 @@ namespace Bbs.Host;
 public static class HostStartup
 {
     /// <summary>
-    /// Makes the store's partner table match the config (config is the source of truth,
-    /// v1): every configured partner is upserted; store partners absent from the config
-    /// are deleted (their pending forward-queue rows persist until their messages purge —
-    /// <see cref="BbsStore.DeletePartner"/> semantics).
+    /// Seeds the store's partner table from <c>bbs.yaml</c> <c>partners:</c> — <b>store-first</b>:
+    /// the SQLite partners table is the source of truth, edited live via the forwarding editor (UI
+    /// or YAML). The config file is a first-boot SEED only: its partners are imported ONLY when the
+    /// store has no partners yet. Once seeded, this never re-imports or deletes — so editor changes
+    /// persist across restarts and a partner removed in the editor does not reappear from the file
+    /// (and a partner added in the editor is not clobbered by the file).
     /// </summary>
     public static void SyncPartners(BbsStore store, BbsHostConfig config)
     {
         ArgumentNullException.ThrowIfNull(store);
         ArgumentNullException.ThrowIfNull(config);
 
-        var configured = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        foreach (PartnerConfig partner in config.Partners)
+        // Store-first: only seed an empty store. A populated store is authoritative — leave it alone.
+        if (store.ListPartners().Count > 0)
         {
-            if (string.IsNullOrWhiteSpace(partner.Call))
-            {
-                continue;
-            }
-
-            store.UpsertPartner(partner.ToPartner());
-            configured.Add(Callsigns.Normalize(partner.Call));
+            return;
         }
 
-        foreach (Partner stale in store.ListPartners())
+        foreach (PartnerConfig partner in config.Partners)
         {
-            if (!configured.Contains(Callsigns.Normalize(stale.Call)))
+            if (!string.IsNullOrWhiteSpace(partner.Call))
             {
-                store.DeletePartner(stale.Call);
+                store.UpsertPartner(partner.ToPartner());
             }
         }
     }
