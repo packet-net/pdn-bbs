@@ -185,6 +185,9 @@ public static class Webmail
         app.MapPost("/messages/{number:long}/kill", (HttpContext ctx, long number) => WithCallsign(ctx, options,
             (prefix, call) => Kill(options, prefix, call, number, Embed(ctx))));
 
+        app.MapPost("/messages/{number:long}/unhold", (HttpContext ctx, long number) => WithCallsign(ctx, options,
+            (prefix, call) => Unhold(options, prefix, call, number, Embed(ctx))));
+
         app.MapPost("/claim", async (HttpContext ctx) =>
         {
             string user = PdnUser(ctx);
@@ -535,6 +538,16 @@ public static class Webmail
         string killForm = canKill && message.Status != MessageStatus.Killed
             ? $"""<form method="post" action="{U(prefix, Inv($"/messages/{message.Number}/kill"), embed)}">{EmbedField(embed)}<button type="submit">Kill message</button></form>"""
             : "";
+        // A held message (e.g. auto-held because it was oversize for a partner) can be released by
+        // the sysop to resume forwarding — shown with its hold reason so the sysop knows what they're
+        // releasing. Sysop-only (§2.2 held-invisible / sysop-managed).
+        string holdRow = message.Status == MessageStatus.Held && isSysop
+            ? $"""
+              <form method="post" action="{U(prefix, Inv($"/messages/{message.Number}/unhold"), embed)}">{EmbedField(embed)}
+              {(message.HoldReason is { Length: > 0 } hr ? $"""<p class="dim">Held — {H(hr)}</p>""" : "")}
+              <button type="submit">Release hold (resume forwarding)</button></form>
+              """
+            : "";
         string to = string.Join("; ", message.Recipients.Where(r => !r.Cc).Select(r => r.ToCall));
         string ccRow = RenderCcRow(message);
         string attachments = RenderAttachments(message, prefix, embed);
@@ -559,6 +572,7 @@ public static class Webmail
             </table>
             {RenderMessageBody(message)}
             {attachments}
+            {holdRow}
             {killForm}
             <p class="back"><a href="{U(prefix, backPath, embed)}">&laquo; Back to {backLabel}</a></p>
             """, theme));
@@ -769,6 +783,21 @@ public static class Webmail
 
         o.Store.Kill(number);
         return Results.Redirect(U(prefix, "/", embed));
+    }
+
+    private static IResult Unhold(WebmailOptions o, string prefix, string call, long number, bool embed)
+    {
+        // Releasing a held message is a sysop action (compat spec §2.2: a held message "can't be
+        // forwarded, read or killed except by sysop"). Unhold returns it to N/$ so it re-enters the
+        // forward queue. Land back on Sent, where the released message now shows its queue status.
+        Message? message = o.Store.GetMessage(number);
+        if (message is null || !IsSysop(o, call))
+        {
+            return Results.NotFound("No such message (or not yours to release).");
+        }
+
+        o.Store.Unhold(number);
+        return Results.Redirect(U(prefix, "/sent", embed));
     }
 
     private static IResult Claim(WebmailOptions o, string prefix, string pdnUser, string callsignInput, bool embed, string? theme)

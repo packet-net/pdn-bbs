@@ -19,7 +19,7 @@
 manifest: 1
 id: bbs                       # must equal the package directory name
 name: BBS
-version: "0.2.20"
+version: "0.2.21"
 description: Packet-radio mailbox — personal mail, bulletins and NTS traffic with FBB-compatible store-and-forward and webmail.
 icon: mail
 capabilities: [packet, web]  # binds its own callsign over RHPv2; serves its own web UI

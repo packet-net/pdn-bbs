@@ -378,6 +378,61 @@ public sealed class WebmailTests : IAsyncDisposable
     }
 
     [Fact]
+    public async Task MessageView_Sysop_CanReleaseHeldMessage_ResumingForwarding()
+    {
+        ClaimCallsign("tom", "G0SYS"); // the harness sysop
+        _store.UpsertPartner(new Partner { Call = "GB7RDG", AtCalls = ["*"] });
+        Message m = _store.AddMessage(new MessageDraft
+        {
+            Type = MessageType.Personal,
+            From = "G0SYS",
+            Recipients = ["M0LTE"],
+            At = "GB7RDG",
+            Subject = "held one",
+            Body = Encoding.Latin1.GetBytes("x\r"),
+        });
+        _store.EnqueueForwards(m.Number, ["GB7RDG"]);
+        _store.HoldMessage(m.Number, "too large for GB7RDG (209595 > 99999 bytes)");
+
+        using HttpClient client = await StartAsync();
+
+        // The message view offers Release, with the reason.
+        string view = await client.GetStringAsync(new Uri($"/messages/{m.Number}?from=sent", UriKind.Relative));
+        Assert.Contains("Release hold", view, StringComparison.Ordinal);
+        Assert.Contains("too large for GB7RDG", view, StringComparison.Ordinal);
+        Assert.Contains($"/messages/{m.Number}/unhold", view, StringComparison.Ordinal);
+
+        // Releasing resumes forwarding: status back to N (unread), message back in the partner queue.
+        HttpResponseMessage resp = await client.PostAsync(
+            new Uri($"/messages/{m.Number}/unhold", UriKind.Relative), content: null);
+        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);  // the 302 → /sent is auto-followed
+        Assert.Equal(MessageStatus.Unread, _store.GetMessage(m.Number)!.Status);
+        Assert.Equal([m.Number], _store.GetForwardQueue("GB7RDG").Select(x => x.Number));
+    }
+
+    [Fact]
+    public async Task Unhold_ByNonSysop_IsRejected_AndLeavesMessageHeld()
+    {
+        ClaimCallsign("bob", "M0LTE"); // a normal user (the sysop is G0SYS)
+        Message m = _store.AddMessage(new MessageDraft
+        {
+            Type = MessageType.Personal,
+            From = "G8ABC",
+            Recipients = ["M0LTE"],
+            Subject = "held",
+            Body = Encoding.Latin1.GetBytes("x\r"),
+        });
+        _store.HoldMessage(m.Number, "manual hold");
+
+        using HttpClient client = await StartAsync(pdnUser: "bob", autoRedirect: false);
+        HttpResponseMessage resp = await client.PostAsync(
+            new Uri($"/messages/{m.Number}/unhold", UriKind.Relative), content: null);
+
+        Assert.Equal(HttpStatusCode.NotFound, resp.StatusCode);
+        Assert.Equal(MessageStatus.Held, _store.GetMessage(m.Number)!.Status); // still held
+    }
+
+    [Fact]
     public async Task Sent_MessageView_BackLinkReturnsToSent_NotInbox()
     {
         ClaimCallsign("tom", "M0LTE");
