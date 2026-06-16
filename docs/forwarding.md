@@ -27,6 +27,18 @@ Everything BPQMail's forwarding configuration can express, ours must too. The in
 | Multi-partner topologies | any number of partners; deterministic tie-breaks | ✅ shipped |
 | WP-driven completion | WP consume (spec SHOULD) | F-3 |
 
+## GB7RDG replacement — additional BBS gaps (2026-06-16)
+
+Surfaced by the full GB7RDG-vs-PDN cutover audit (`gb7rdg-config/GAP-ANALYSIS.md`; canonical cross-repo roadmap in packet.net `docs/plan.md` §5.G). These are the **BBS-owned** items beyond the parity table above. All are **CONSIDER** — each needs its own design pass; none is approved to build by this note.
+
+- **Content filtering (`RejFrom` / `RejTo` / `RefuseBulls` / FBB content filters) — highest daily impact.** No sender/addressee/topic reject facility exists today (`InboundMessageReceiver` does size + dup-BID + non-B2-FC rejects only). GB7RDG fired **219 filter-rejects + 131 BID-rejects in 9 days**; PDN replicates only the BID half, so it would ingest the bulletins/senders GB7RDG drops. Needs a config-driven inbound-policy layer (reject patterns by from/to/topic + FBB-style filters).
+- **Housekeeping lifetime defaults + `MaxMsgno`/renumber.** The kill-by-age/type machinery exists (`Housekeeping.cs`) but defaults to 30 days for everything; GB7RDG keeps bulls ~7d / personals ~30d via a per-state matrix. Mostly defaults/tuning, plus message-number ceiling + renumber (absent).
+- **Connect-script INTERLOCK + `NC`.** `NC` is sent verbatim (not recognised); INTERLOCK (shared-HF-PA TX mutex) is recognised-but-ignored. Matters for GB7RDG's HF port-sharing partners (GB7CIP/GB7OXF/GB7BSK/GB7LOX), **not** the direct GB7RDG↔PDN net-sim link. (Per-partner `MaxFBBBlock` is already F-1 above.)
+- **Receiver-side restart granting (`FS !offset`).** Sender side honours an inbound `FS !n`; the receiver never persists a partial inbound transfer, so it can't grant `!n` itself (always `+`/full resend). RF-feed-only — doesn't bite the clean net-sim link. (= design.md W7 "resume granting".)
+- **Inbound FBB forwarding over internet-TCP (BPQ `FBBPORT`).** The FBB protocol is complete but inbound rides AX.25/RHP only — there's no raw-TCP forwarding listener for an internet partner to dial. Off the GB7RDG critical path (that link is over the net-sim RF port via the node).
+
+Already tracked above / elsewhere: `maxBlock` (F-1), separate `RevFWDInterval` (named deferral on the `collect` row), WP consume (F-3), per-`@home` fan-out (F-1), NTS T-routing (F-3).
+
 ## The warts, and what replaces them
 
 BPQ's forwarding *works* — the network runs on it — but operating it teaches you its failure modes the hard way. Each wart below names the BPQ behaviour, why it hurts, and our replacement.
