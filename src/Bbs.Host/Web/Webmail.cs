@@ -2001,11 +2001,16 @@ public static class Webmail
         /* The "Message sent — Undo" toast: a prominent bar pinned to the top of the viewport so the
            undo chance is unmissable. Solid success bar, white text, a high-contrast Undo pill. */
         .undo-toast{
-          position:fixed;top:0;left:0;right:0;z-index:1000;
+          position:fixed;top:.4rem;left:.4rem;right:.4rem;z-index:1000;
           display:flex;align-items:center;justify-content:center;gap:.6rem;flex-wrap:wrap;
           padding:.7rem 1rem;margin:0;
           background:hsl(var(--success));color:#fff;
           font-size:.95rem;font-weight:600;line-height:1.2;
+          /* A fully-rounded floating toast (top AND bottom corners). The top corners echo pdn's
+             slot iframe (rounded-lg = var(--radius)); a small inset from the edges lets the bottom
+             corners curve cleanly too and keeps the toast clear of the iframe's own rounded edge.
+             iOS WebKit doesn't clip iframe content to the element's border-radius, so we round here. */
+          border-radius:var(--radius);
           box-shadow:0 2px 14px hsl(0 0% 0%/.28);
         }
         .undo-toast form{margin:0}
