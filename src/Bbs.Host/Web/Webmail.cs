@@ -170,10 +170,11 @@ public static class Webmail
         app.MapGet("/messages/{number:long}/attachments/{name}", (HttpContext ctx, long number, string name) =>
             WithCallsign(ctx, options, (_, call) => DownloadAttachment(options, call, number, name)));
 
-        app.MapGet("/compose", (HttpContext ctx, string? to, string? type) => WithCallsign(ctx, options,
+        app.MapGet("/compose", (HttpContext ctx, string? to, string? type, long? draft) => WithCallsign(ctx, options,
             // theme: NAMED — it must land in `theme`, not the positional `error` slot (which would
             // render the theme string in a red error box AND drop the dark class → a light page).
-            (prefix, call) => ComposeForm(options, prefix, call, to, type, Embed(ctx), theme: Theme(ctx))));
+            // draft: an Undo-pulled-back message (see UndoSend) — reopen it pre-filled for edit/resend.
+            (prefix, call) => ComposeFromDraft(options, prefix, call, to, type, draft, Embed(ctx), Theme(ctx))));
 
         app.MapPost("/compose", async (HttpContext ctx) =>
         {
@@ -786,9 +787,33 @@ public static class Webmail
         return sb.Length == 0 ? "attachment" : sb.ToString();
     }
 
+    /// <summary>
+    /// Renders the compose form, optionally pre-filled from a <paramref name="draft"/> message — the
+    /// message an Undo pulled back out of the send queue (see <see cref="UndoSend"/>). Reconstructs the
+    /// To / @route / Subject / Body / Type from the stored message so the sender can edit and resend it
+    /// rather than losing it. Only the sender (or a sysop) may reopen it; an unknown/foreign number
+    /// falls through to a blank form. With no draft it behaves exactly as the plain new-compose form.
+    /// </summary>
+    private static IResult ComposeFromDraft(
+        WebmailOptions o, string prefix, string call, string? to, string? type, long? draft, bool embed, string? theme)
+    {
+        if (draft is { } number
+            && o.Store.GetMessage(number) is { } m
+            && (Callsigns.BaseEquals(m.From, call) || IsSysop(o, call)))
+        {
+            string recipients = string.Join("; ", m.Recipients.Where(r => !r.Cc).Select(r => r.ToCall));
+            string draftType = m.Type == MessageType.Bulletin ? "B" : "P";
+            return ComposeForm(o, prefix, call, recipients, draftType, embed,
+                theme: theme, at: m.At, subject: m.Subject, body: m.GetBodyText());
+        }
+
+        return ComposeForm(o, prefix, call, to, type, embed, theme: theme);
+    }
+
     private static IResult ComposeForm(
         WebmailOptions o, string prefix, string call, string? to, string? type, bool embed,
-        string? error = null, int status = StatusCodes.Status200OK, string? theme = null)
+        string? error = null, int status = StatusCodes.Status200OK, string? theme = null,
+        string? at = null, string? subject = null, string? body = null)
     {
         bool bulletin = string.Equals(type, "B", StringComparison.OrdinalIgnoreCase);
         string err = error is null ? "" : $"""<p class="err">{H(error)}</p>""";
@@ -810,9 +835,9 @@ public static class Webmail
             <option value="B"{(bulletin ? " selected" : "")}>Bulletin</option>
             </select></label></p>
             <p><label>To <input name="to" value="{H(to ?? "")}" placeholder="callsign or topic" required></label>
-            <label>@ <input name="at" placeholder="route, e.g. GB7AAA.#23.GBR.EURO or EURO"></label></p>
-            <p><label>Subject <input name="subject" size="60" maxlength="60" required></label></p>
-            <p><textarea name="body" rows="12" cols="72"></textarea></p>
+            <label>@ <input name="at" value="{H(at ?? "")}" placeholder="route, e.g. GB7AAA.#23.GBR.EURO or EURO"></label></p>
+            <p><label>Subject <input name="subject" size="60" maxlength="60" value="{H(subject ?? "")}" required></label></p>
+            <p><textarea name="body" rows="12" cols="72">{H(body ?? "")}</textarea></p>
             <fieldset><legend>Attach a file <span class="dim">(optional)</span></legend>
             <p><input type="file" name="file"></p>
             <p><label><input type="radio" name="fileMode" value="7plus" checked> 7plus-encode it <span class="dim">— universal: the encoded text rides in the message body and reaches any partner (and a TNC2 user)</span></label></p>
@@ -955,7 +980,11 @@ public static class Webmail
         // future), so the Undo link works without JS during the window even if the JS countdown lied.
         if (stillPending && mine && o.Store.CancelDeferredSend(number))
         {
-            return Results.Redirect(U(prefix, "/", embed) + Notice(embed, "Send cancelled."));
+            // Don't just drop it — reopen the message in the compose editor (To/@/Subject/Body/Type
+            // pre-filled from the now-cancelled copy) so the sender can fix and resend, the point of
+            // an "undo send". The cancelled message stays in the store (status K), so the content is
+            // preserved, not destroyed.
+            return Results.Redirect(U(prefix, Inv($"/compose?draft={number}"), embed));
         }
 
         return Results.Redirect(U(prefix, "/", embed) + Notice(embed, "Already sent."));

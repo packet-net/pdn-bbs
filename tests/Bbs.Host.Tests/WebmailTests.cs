@@ -273,11 +273,12 @@ public sealed class WebmailTests : IAsyncDisposable
 
         using HttpClient client = await StartAsync(autoRedirect: false);
 
-        // Within the window: Undo cancels it (status → K).
+        // Within the window: Undo cancels it (status → K) and reopens it in the compose editor
+        // (?draft=<n>) so the sender can edit/resend rather than lose it.
         HttpResponseMessage cancel = await client.PostAsync(
             new Uri($"/messages/{m.Number}/undo-send", UriKind.Relative), content: null);
         Assert.Equal(HttpStatusCode.Found, cancel.StatusCode);
-        Assert.Contains("Send%20cancelled.", cancel.Headers.Location!.OriginalString, StringComparison.Ordinal);
+        Assert.Contains($"/compose?draft={m.Number}", cancel.Headers.Location!.OriginalString, StringComparison.Ordinal);
         Assert.Equal(MessageStatus.Killed, _store.GetMessage(m.Number)!.Status);
 
         // A second message, released past its window: Undo is a no-op ("Already sent.").
@@ -298,6 +299,55 @@ public sealed class WebmailTests : IAsyncDisposable
         Assert.Equal(HttpStatusCode.Found, late.StatusCode);
         Assert.Contains("Already%20sent.", late.Headers.Location!.OriginalString, StringComparison.Ordinal);
         Assert.NotEqual(MessageStatus.Killed, _store.GetMessage(other.Number)!.Status);
+    }
+
+    [Fact]
+    public async Task UndoSend_ReopensTheMessageInComposePreFilled()
+    {
+        // The point of "undo send": the pulled-back message comes back into the editor with its
+        // fields intact, not silently dropped. Undo → /compose?draft=<n> → the form is pre-filled.
+        ClaimCallsign("tom", "M0LTE");
+        Message m = _store.AddMessage(new MessageDraft
+        {
+            Type = MessageType.Personal,
+            From = "M0LTE",
+            Recipients = ["G8ABC"],
+            At = "GB7XYZ",
+            Subject = "lunch plans",
+            Body = Encoding.Latin1.GetBytes("running late, start without me\r"),
+        });
+        _store.DeferSend(m.Number, windowSeconds: 5);
+
+        using HttpClient client = await StartAsync(autoRedirect: false);
+        HttpResponseMessage cancel = await client.PostAsync(
+            new Uri($"/messages/{m.Number}/undo-send", UriKind.Relative), content: null);
+        Assert.Equal($"/compose?draft={m.Number}", cancel.Headers.Location!.OriginalString);
+
+        string form = await client.GetStringAsync(new Uri($"/compose?draft={m.Number}", UriKind.Relative));
+        Assert.Contains("value=\"G8ABC\"", form, StringComparison.Ordinal);            // To
+        Assert.Contains("value=\"GB7XYZ\"", form, StringComparison.Ordinal);           // @ route
+        Assert.Contains("value=\"lunch plans\"", form, StringComparison.Ordinal);      // Subject
+        Assert.Contains("running late, start without me", form, StringComparison.Ordinal); // Body
+    }
+
+    [Fact]
+    public async Task ComposeDraft_ByNonOwner_FallsThroughToABlankForm()
+    {
+        // A foreign draft number must not leak another user's message into the compose form.
+        ClaimCallsign("bob", "2E0BOB");
+        Message m = _store.AddMessage(new MessageDraft
+        {
+            Type = MessageType.Personal,
+            From = "M0LTE",
+            Recipients = ["G8ABC"],
+            Subject = "secret subject",
+            Body = Encoding.Latin1.GetBytes("private body\r"),
+        });
+
+        using HttpClient client = await StartAsync(pdnUser: "bob");
+        string form = await client.GetStringAsync(new Uri($"/compose?draft={m.Number}", UriKind.Relative));
+        Assert.DoesNotContain("secret subject", form, StringComparison.Ordinal);
+        Assert.DoesNotContain("private body", form, StringComparison.Ordinal);
     }
 
     [Fact]
