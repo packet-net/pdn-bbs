@@ -71,9 +71,9 @@ public sealed record WebmailOptions
     /// The Gmail-style "undo send" window in seconds: a composed message is deferred (held + hidden,
     /// not routed) for this long, during which the sender can Undo it; a background worker
     /// (<see cref="Bbs.Host.PendingSendReleaser"/>) releases + routes it when the window lapses.
-    /// 0 disables the feature — compose routes immediately as it always did. Default 5 seconds.
+    /// 0 disables the feature — compose routes immediately as it always did. Default 10 seconds.
     /// </summary>
-    public int UndoSendSeconds { get; init; } = 5;
+    public int UndoSendSeconds { get; init; } = 10;
 }
 
 /// <summary>
@@ -520,32 +520,38 @@ public static class Webmail
             return """<p class="saved">Message sent.</p>""";
         }
 
-        string formId = Inv($"undo-{number}");
+        string boxId = Inv($"undo-{number}");
         string countId = Inv($"undo-count-{number}");
         string action = U(prefix, Inv($"/messages/{number}/undo-send"), embed);
         // The inline countdown script. Built with placeholders + Replace (not interpolation) so its JS
-        // braces don't need escaping; it only ticks the displayed second down and, at 0, swaps the Undo
-        // form for the plain "sent" text. The Undo itself works server-side without JS for the whole
-        // window (the store enforces send_release_utc), so this is presentation only.
+        // braces don't need escaping; it ticks the displayed second down and, at 0, hides the whole
+        // toast (the window has lapsed — the message is sent). The Undo itself works server-side
+        // without JS for the whole window (the store enforces send_release_utc), so this is
+        // presentation only.
         string script = JsCountdown
             .Replace("REMAINING", Inv($"{remaining}"), StringComparison.Ordinal)
             .Replace("COUNTID", countId, StringComparison.Ordinal)
-            .Replace("FORMID", formId, StringComparison.Ordinal);
+            .Replace("BOXID", boxId, StringComparison.Ordinal);
 
-        // The Undo form (works without JS for the whole window) + a countdown span. data-remaining seeds it.
+        // A prominent toast pinned to the top of the viewport (position:fixed in .undo-toast), so the
+        // undo chance is unmissable rather than a quiet inline line. The Undo form works without JS for
+        // the whole window; the countdown + auto-hide-at-0 are presentation only. Inside the pdn slot
+        // iframe this anchors to the top of the BBS panel (all a same-origin embedded page can reach).
         return Inv($"""
-            <p class="saved" id="{formId}">Message sent — <form method="post" action="{action}" style="display:inline">{EmbedField(embed)}<button type="submit" class="link plain">Undo</button></form> <span class="dim">(<span id="{countId}" data-remaining="{remaining}">{remaining}</span>s)</span></p>
-            <p class="saved" id="{formId}-done" style="display:none">Message sent.</p>
+            <div class="undo-toast" id="{boxId}" role="status">
+              <span>Message sent</span>
+              <form method="post" action="{action}">{EmbedField(embed)}<button type="submit" class="undo-btn">Undo</button></form>
+              <span class="undo-count">(<span id="{countId}" data-remaining="{remaining}">{remaining}</span>s)</span>
+            </div>
             {script}
             """);
     }
 
-    /// <summary>The undo-window countdown script (placeholders REMAINING/COUNTID/FORMID, see <see cref="SentBanner"/>).</summary>
+    /// <summary>The undo-window countdown script (placeholders REMAINING/COUNTID/BOXID, see <see cref="SentBanner"/>).</summary>
     private const string JsCountdown =
-        "<script>(function(){var n=REMAINING,c=document.getElementById('COUNTID');" +
+        "<script>(function(){var n=REMAINING,c=document.getElementById('COUNTID'),x=document.getElementById('BOXID');" +
         "var t=setInterval(function(){n--;if(c)c.textContent=n;if(n<=0){clearInterval(t);" +
-        "var a=document.getElementById('FORMID'),b=document.getElementById('FORMID-done');" +
-        "if(a)a.style.display='none';if(b)b.style.display='';}},1000);})();</script>";
+        "if(x)x.style.display='none';}},1000);})();</script>";
 
     private static string BuildForwardingHealth(WebmailOptions o, IReadOnlyList<Partner> partners)
     {
@@ -1992,6 +1998,24 @@ public static class Webmail
           color:hsl(var(--success));background:hsl(var(--success)/.12);
           border-radius:calc(var(--radius) - 2px);padding:.5rem .75rem;margin:.75rem 0;font-size:.875rem;
         }
+        /* The "Message sent — Undo" toast: a prominent bar pinned to the top of the viewport so the
+           undo chance is unmissable. Solid success bar, white text, a high-contrast Undo pill. */
+        .undo-toast{
+          position:fixed;top:0;left:0;right:0;z-index:1000;
+          display:flex;align-items:center;justify-content:center;gap:.6rem;flex-wrap:wrap;
+          padding:.7rem 1rem;margin:0;
+          background:hsl(var(--success));color:#fff;
+          font-size:.95rem;font-weight:600;line-height:1.2;
+          box-shadow:0 2px 14px hsl(0 0% 0%/.28);
+        }
+        .undo-toast form{margin:0}
+        .undo-toast .undo-count{font-weight:500;opacity:.85}
+        .undo-toast .undo-btn{
+          background:#fff;color:hsl(var(--success));
+          border:none;border-radius:9999px;padding:.2rem .9rem;
+          font:inherit;font-weight:700;cursor:pointer;
+        }
+        .undo-toast .undo-btn:hover{background:#fff;opacity:.92}
         p.dim{margin:.5rem 0}
         .pager{margin-top:1rem;font-size:.875rem;display:flex;gap:1rem}
         form{margin:0 0 1rem}

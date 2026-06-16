@@ -173,7 +173,7 @@ public sealed class WebmailTests : IAsyncDisposable
     public async Task Compose_WithUndoDisabled_StoresRoutes_AndRedirectsHomeWithConfirmation()
     {
         // The immediate-route path (UndoSendSeconds=0): compose routes at once and confirms, the
-        // pre-undo-send behaviour. (With the default 5 s window it defers instead — see the next test.)
+        // pre-undo-send behaviour. (With the default 10 s window it defers instead — see the next test.)
         ClaimCallsign("tom", "M0LTE");
         _store.UpsertPartner(new Partner { Call = "GB7BPQ", AtCalls = ["*"] });
         using HttpClient client = await StartAsync(undoSendSeconds: 0);
@@ -209,7 +209,7 @@ public sealed class WebmailTests : IAsyncDisposable
     [Fact]
     public async Task Compose_DefersTheSend_HeldWithMarker_NotRouted_AndRedirectsToSentBanner()
     {
-        // The default undo-send window (5 s): compose stores the message, defers it (held + a
+        // The default undo-send window (10 s): compose stores the message, defers it (held + a
         // send_release_utc marker, NOT routed), and redirects to /?sent=<n> — the home banner with Undo.
         ClaimCallsign("tom", "M0LTE");
         _store.UpsertPartner(new Partner { Call = "GB7BPQ", AtCalls = ["*"] });
@@ -1162,7 +1162,7 @@ public sealed class WebmailTests : IAsyncDisposable
                 new KeyValuePair<string, string>("body", "x"),
             ]));
         Assert.Equal(HttpStatusCode.Found, response.StatusCode);
-        // Compose defers (default 5 s window) and redirects to the prefixed home undo banner (?sent=<n>).
+        // Compose defers (default 10 s window) and redirects to the prefixed home undo banner (?sent=<n>).
         Message stored = Assert.Single(_store.ListMessages(new MessageQuery { IncludeHeld = true }));
         Assert.Equal($"/apps/bbs/?sent={stored.Number}", response.Headers.Location!.OriginalString);
     }
