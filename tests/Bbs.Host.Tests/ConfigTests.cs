@@ -337,6 +337,80 @@ public sealed class ConfigTests : IDisposable
         Assert.False(config.Smtp.Enabled);
     }
 
+    // ----- Node-owned-callsign contract: PDN_APP_CALLSIGN is bound verbatim, ahead of all else. -----
+
+    [Fact]
+    public void ResolveCallsign_PdnAppCallsign_BindsVerbatim_NoProbe()
+    {
+        // The node injects the exact callsign — bind it as-is, no derivation, no probe.
+        var config = new BbsHostConfig { Callsign = BbsHostConfig.PlaceholderCallsign };
+        BbsHostConfigFile.ResolvedCallsign r = BbsHostConfigFile.ResolveCallsign(
+            config, key => key == BbsHostConfigFile.PdnAppCallsignEnv ? "GB7XYZ-9" : null);
+
+        Assert.Equal("GB7XYZ-9", r.Callsign);
+        Assert.False(r.Probe);
+        Assert.Null(r.NodeCallsign);
+    }
+
+    [Fact]
+    public void ResolveCallsign_PdnAppCallsign_IsNormalised()
+    {
+        // Lower-case / whitespace from the env is normalised the same as any other callsign source.
+        var config = new BbsHostConfig { Callsign = BbsHostConfig.PlaceholderCallsign };
+        BbsHostConfigFile.ResolvedCallsign r = BbsHostConfigFile.ResolveCallsign(
+            config, key => key == BbsHostConfigFile.PdnAppCallsignEnv ? "  gb7xyz-9  " : null);
+
+        Assert.Equal("GB7XYZ-9", r.Callsign);
+        Assert.False(r.Probe);
+    }
+
+    [Fact]
+    public void ResolveCallsign_PdnAppCallsign_WinsOverExplicitConfigAndNodeEnv()
+    {
+        // The node is the authority: PDN_APP_CALLSIGN wins over an explicit bbs.yaml callsign AND
+        // over the PDN_NODE_CALLSIGN derivation path — no derivation, no probe.
+        var config = new BbsHostConfig { Callsign = "GB7ABC-5" };
+        BbsHostConfigFile.ResolvedCallsign r = BbsHostConfigFile.ResolveCallsign(config, key => key switch
+        {
+            BbsHostConfigFile.PdnAppCallsignEnv => "GB7XYZ-9",
+            BbsHostConfigFile.PdnNodeCallsignEnv => "M9YYY",
+            _ => null,
+        });
+
+        Assert.Equal("GB7XYZ-9", r.Callsign);
+        Assert.False(r.Probe);
+        Assert.Null(r.NodeCallsign);
+    }
+
+    [Fact]
+    public void ResolveCallsign_PdnAppCallsignEmpty_FallsBackToDerivation()
+    {
+        // An empty PDN_APP_CALLSIGN (older node / not set) falls back to the legacy derivation path.
+        var config = new BbsHostConfig { Callsign = BbsHostConfig.PlaceholderCallsign };
+        BbsHostConfigFile.ResolvedCallsign r = BbsHostConfigFile.ResolveCallsign(config, key => key switch
+        {
+            BbsHostConfigFile.PdnAppCallsignEnv => "",
+            BbsHostConfigFile.PdnNodeCallsignEnv => "M9YYY",
+            _ => null,
+        });
+
+        Assert.Equal("M9YYY-1", r.Callsign);
+        Assert.True(r.Probe);
+        Assert.Equal("M9YYY", r.NodeCallsign);
+    }
+
+    [Fact]
+    public void ResolveCallsign_PdnAppCallsignAbsent_FallsBackToExplicitConfig()
+    {
+        // No PDN_APP_CALLSIGN at all → the explicit bbs.yaml callsign still wins (fallback path).
+        var config = new BbsHostConfig { Callsign = "GB7ABC-5" };
+        BbsHostConfigFile.ResolvedCallsign r = BbsHostConfigFile.ResolveCallsign(config, NoEnv);
+
+        Assert.Equal("GB7ABC-5", r.Callsign);
+        Assert.False(r.Probe);
+        Assert.Null(r.NodeCallsign);
+    }
+
     // ----- Brief change #1: callsign derivation + the free-SSID probe (ResolveCallsign). -----
 
     [Fact]

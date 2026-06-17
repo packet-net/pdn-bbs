@@ -8,21 +8,32 @@
 #
 # FIRST-RUN CONFIG — read before enabling: on first start pdn-bbs writes a commented
 # default bbs.yaml into its state dir (/var/lib/packetnet/apps/bbs). UNDER PDN it does
-# NOT need a callsign edited in: with the placeholder it DERIVES its on-air callsign from
-# the node (<node-base>-1, probing for a free SSID if -1 is taken — like DAPPS/bpqchat),
-# and additionally binds the friendly service alias `BBS` so users can `C BBS`. Set
-# `callsign:` in bbs.yaml only to PIN a specific identity (it then wins over derivation).
-# You will still usually want `sysop:`, `hRoute:` and your forwarding `partners:` —
-# edit then disable/enable (or restart) the app. PDN_RHP_HOST/PDN_RHP_PORT and
-# PDN_NODE_CALLSIGN come from the supervisor environment; the message store (bbs.db)
-# lives in the same state dir. The webmail port below MUST match `web.port` in bbs.yaml.
+# NOT need a callsign edited in: the node is the callsign authority and injects
+# PDN_APP_CALLSIGN with the exact callsign this app must bind, which the BBS binds
+# verbatim (no self-derivation, no SSID probe). It additionally binds the friendly service
+# alias `BBS` so users can `C BBS`. (Fallback, for a standalone run or an older node that
+# does not inject PDN_APP_CALLSIGN: with the placeholder the BBS DERIVES <node-base>-1 from
+# PDN_NODE_CALLSIGN, probing for a free SSID if -1 is taken — like DAPPS/bpqchat.) Set
+# `callsign:` in bbs.yaml only to PIN an identity for a standalone run (PDN_APP_CALLSIGN
+# still wins under pdn). You will still usually want `sysop:`, `hRoute:` and your forwarding
+# `partners:` — edit then disable/enable (or restart) the app. PDN_APP_CALLSIGN,
+# PDN_RHP_HOST/PDN_RHP_PORT and PDN_NODE_CALLSIGN come from the supervisor environment; the
+# message store (bbs.db) lives in the same state dir. The webmail port below MUST match
+# `web.port` in bbs.yaml.
 manifest: 1
 id: bbs                       # must equal the package directory name
 name: BBS
-version: "0.2.32"
+version: "0.2.33"
 description: Packet-radio mailbox — personal mail, bulletins and NTS traffic with FBB-compatible store-and-forward and webmail.
 icon: mail
 capabilities: [packet, web]  # binds its own callsign over RHPv2; serves its own web UI
+
+# The verb the node prompt offers so users can reach this app from the node ("BBS").
+# The node owns the on-air callsign (it injects PDN_APP_CALLSIGN, which the BBS binds
+# verbatim) and lists this command at its prompt; the BBS still also binds the friendly
+# `serviceCallsign` (default BBS) so a direct `C BBS` reaches the same mailbox.
+packet:
+  command: BBS
 
 # The .NET daemon pdn supervises while the app is enabled. No `session:` block — the
 # BBS is not a console verb; users and partner BBSes connect to its bound callsign

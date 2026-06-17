@@ -364,8 +364,21 @@ public static class BbsHostConfigFile
     public const string PdnAppIdEnv = "PDN_APP_ID";
 
     /// <summary>
+    /// The supervisor environment variable pdn injects with the EXACT callsign this app must bind
+    /// on air. The node is the callsign authority: when this is set and non-empty the BBS binds it
+    /// VERBATIM — no self-derivation from the node callsign, no free-SSID probe-walk — because the
+    /// node already guarantees the callsign is free and unique. It wins over every other source
+    /// (including an explicit <c>callsign:</c> in <c>bbs.yaml</c>): the node owns the identity. When
+    /// it is absent/empty the BBS falls back to the legacy behaviour (an explicit <c>callsign:</c>,
+    /// else <c>&lt;node-base&gt;-1</c> derived from <see cref="PdnNodeCallsignEnv"/> with a probe),
+    /// so standalone runs and an older node host that does not inject it still work.
+    /// </summary>
+    public const string PdnAppCallsignEnv = "PDN_APP_CALLSIGN";
+
+    /// <summary>
     /// The supervisor environment variable pdn injects with the NODE's own callsign (e.g.
-    /// <c>M9YYY</c> or <c>M9YYY-2</c>) into every supervised app. When the configured
+    /// <c>M9YYY</c> or <c>M9YYY-2</c>) into every supervised app. Used only as the FALLBACK when
+    /// <see cref="PdnAppCallsignEnv"/> is absent: when the configured
     /// <see cref="BbsHostConfig.Callsign"/> is still the placeholder (or blank) and this is set,
     /// the BBS derives its on-air callsign as <c>&lt;node-base&gt;-&lt;ssid&gt;</c> (see
     /// <see cref="Callsigns.DeriveFromNode"/>) instead of binding <c>N0CALL</c> — matching the
@@ -462,19 +475,37 @@ public static class BbsHostConfigFile
     public readonly record struct ResolvedCallsign(string Callsign, bool Probe, string? NodeCallsign);
 
     /// <summary>
-    /// Resolves the primary bind callsign (brief change #1). Precedence:
+    /// Resolves the primary bind callsign. Precedence:
     /// <list type="number">
-    ///   <item>An explicit, non-placeholder <c>callsign:</c> wins verbatim — no derivation, no probe.</item>
-    ///   <item>Otherwise, when the callsign is the placeholder (or blank) AND <c>PDN_NODE_CALLSIGN</c>
-    ///         is set: derive <c>&lt;node-base&gt;-<see cref="BbsHostConfig.DerivedDefaultSsid"/>&gt;</c>
-    ///         and mark it to PROBE for a free SSID on a duplicate-socket refusal.</item>
-    ///   <item>Otherwise (standalone, no node env): keep the configured placeholder, no probe.</item>
+    ///   <item><c>PDN_APP_CALLSIGN</c> set and non-empty: bind it VERBATIM — no derivation, no probe.
+    ///         The node host is the callsign authority and has already guaranteed it is free/unique,
+    ///         so this wins over every other source (including an explicit <c>callsign:</c>).</item>
+    ///   <item>Otherwise (no <c>PDN_APP_CALLSIGN</c> — standalone, or an older node host that does not
+    ///         inject it) fall back to the legacy resolution:
+    ///     <list type="bullet">
+    ///       <item>An explicit, non-placeholder <c>callsign:</c> wins verbatim — no derivation, no probe.</item>
+    ///       <item>Otherwise, when the callsign is the placeholder (or blank) AND <c>PDN_NODE_CALLSIGN</c>
+    ///             is set: derive <c>&lt;node-base&gt;-<see cref="BbsHostConfig.DerivedDefaultSsid"/>&gt;</c>
+    ///             and mark it to PROBE for a free SSID on a duplicate-socket refusal.</item>
+    ///       <item>Otherwise (standalone, no node env): keep the configured placeholder, no probe.</item>
+    ///     </list>
+    ///   </item>
     /// </list>
     /// </summary>
     public static ResolvedCallsign ResolveCallsign(BbsHostConfig config, Func<string, string?> getEnv)
     {
         ArgumentNullException.ThrowIfNull(config);
         ArgumentNullException.ThrowIfNull(getEnv);
+
+        // The node host is the callsign authority: when it injects PDN_APP_CALLSIGN we bind that
+        // exact callsign, with NO self-derivation and NO free-SSID probe — the node already
+        // guarantees it is free and unique. This is ahead of every other source so an older node
+        // host (or a standalone run) that does not inject it falls through to the legacy logic.
+        if (getEnv(PdnAppCallsignEnv) is { Length: > 0 } appCallsign
+            && Callsigns.Normalize(appCallsign) is { Length: > 0 } resolvedApp)
+        {
+            return new ResolvedCallsign(resolvedApp, Probe: false, NodeCallsign: null);
+        }
 
         string configured = Callsigns.Normalize(config.Callsign ?? "");
         bool isPlaceholder = configured.Length == 0
