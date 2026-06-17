@@ -61,6 +61,14 @@ public sealed record BbsHostConfig
     public RhpConfig Rhp { get; init; } = new();
 
     /// <summary>
+    /// The inbound FBB-over-TCP forwarding listener (BPQ <c>FBBPORT</c> equivalent, issue #40).
+    /// Default OFF — an internet-facing listener is strictly opt-in. When enabled it accepts raw-TCP
+    /// forwarding sessions from internet partner BBSes, sharing the same FBB protocol engine as the
+    /// AX.25/RHP path.
+    /// </summary>
+    public FbbTcpConfig FbbTcp { get; init; } = new();
+
+    /// <summary>
     /// Housekeeping lifetime defaults + the MaxMsgno ceiling (issue #39). Every field is optional;
     /// an omitted field keeps the built-in default (bulletins ~7 days, personals/NTS ~30 days,
     /// renumbering disabled). The whole block may be absent — an upgraded node then behaves exactly
@@ -238,6 +246,45 @@ public sealed record RhpConfig
 
     /// <summary>RHP auth password.</summary>
     public string? Pass { get; init; }
+}
+
+/// <summary>
+/// The inbound FBB-over-TCP forwarding listener — BPQ's <c>FBBPORT</c> equivalent (issue #40). An
+/// internet partner BBS dials a raw-TCP socket, presents its callsign via the in-protocol FBB login
+/// handshake, and (if it matches an enabled forwarding partner) forwards mail in over the SAME FBB
+/// protocol engine the AX.25/RHP path uses — no protocol duplication.
+///
+/// <para><b>Security posture.</b> Default OFF — an internet-reachable listener is strictly opt-in.
+/// Authorization is by partner identity: the login callsign must match an <c>enabled</c> partner in
+/// <c>partners:</c> (matched on the base callsign, as the reverse-forward queue join is); an unknown
+/// or disabled caller is rejected before any forwarding session begins. A connection limit bounds
+/// concurrent sessions. TLS/transport hardening is left to the deployment edge — under pdn the
+/// tailnet sidecar fronts exposed ports (as it does for IMAP/SMTP); a bare-internet deployment
+/// should bind a private interface or front this with a TLS/SSH tunnel.</para>
+/// </summary>
+public sealed record FbbTcpConfig
+{
+    /// <summary>The conventional BPQ FBBPORT number (and our default when enabled).</summary>
+    public const int DefaultPort = 8011;
+
+    /// <summary>Start the listener at all. Default FALSE — the whole feature is opt-in.</summary>
+    public bool Enabled { get; init; }
+
+    /// <summary>
+    /// Bind address. <b>Loopback by default</b> (a deliberately conservative default for an
+    /// internet-facing feature). Set a LAN/public address — or rely on pdn's tailnet edge — to accept
+    /// remote partners.
+    /// </summary>
+    public string Bind { get; init; } = "127.0.0.1";
+
+    /// <summary>TCP port. Defaults to <see cref="DefaultPort"/> (BPQ's conventional FBBPORT).</summary>
+    public int Port { get; init; } = DefaultPort;
+
+    /// <summary>
+    /// Maximum concurrent inbound TCP forwarding sessions (a simple resource bound; further
+    /// connections are accepted and immediately closed). Default 8.
+    /// </summary>
+    public int MaxConnections { get; init; } = 8;
 }
 
 /// <summary>
@@ -760,6 +807,25 @@ public static class BbsHostConfigFile
           user: null
           pass: null
 
+        # fbbTcp: the inbound FBB-over-TCP forwarding listener (BPQ FBBPORT equivalent).
+        #         DEFAULT OFF — an internet-facing forwarding port is opt-in. When enabled, an
+        #         internet partner BBS dials this TCP port and forwards mail IN over the same FBB
+        #         protocol the AX.25/RHP path uses. The partner is identified by the callsign it
+        #         presents in the in-protocol FBB login (we prompt "Callsign :"); that callsign
+        #         must match an ENABLED entry in partners: below (matched on the base callsign) or
+        #         the connection is rejected before any forwarding session starts. Bind loopback
+        #         (the default) and front it with a tunnel, or — under pdn — let the tailnet sidecar
+        #         expose it, rather than binding a bare public interface.
+        #   enabled:        start the listener at all (default false)
+        #   bind:           bind address (default 127.0.0.1)
+        #   port:           TCP port (default 8011 — BPQ's conventional FBBPORT)
+        #   maxConnections: concurrent inbound TCP forwarding sessions (default 8)
+        fbbTcp:
+          enabled: false
+          bind: 127.0.0.1
+          port: 8011
+          maxConnections: 8
+
         # housekeeping: per-class message lifetimes + the message-number ceiling
         #               (the daily kill-by-age / renumber pass, compat spec §6).
         #   Every key below is OPTIONAL — an omitted key (or an absent housekeeping:
@@ -968,6 +1034,17 @@ public static class BbsHostConfigFile
           port: null
           user: null
           pass: null
+
+        # fbbTcp: the inbound FBB-over-TCP forwarding listener (BPQ FBBPORT equivalent). DEFAULT OFF
+        #         — opt in to accept raw-TCP forwarding from an internet partner; the partner is
+        #         identified by the callsign it presents in the in-protocol login and must match an
+        #         enabled partner below. Under pdn, expose it via the tailnet sidecar rather than a
+        #         public bind. See the standalone default's comments for the key reference.
+        fbbTcp:
+          enabled: false
+          bind: 127.0.0.1
+          port: 8011
+          maxConnections: 8
 
         # housekeeping: per-class message lifetimes + the MaxMsgno renumber ceiling
         #               (see the standalone default's comments for the full key

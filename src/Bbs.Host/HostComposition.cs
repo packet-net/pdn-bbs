@@ -195,6 +195,17 @@ public static class HostComposition
             });
         }
 
+        // The inbound FBB-over-TCP listener (BPQ FBBPORT, issue #40): registered only when the
+        // (default-off) feature is enabled, so a node that does not configure it constructs nothing
+        // and behaves exactly as before. It shares the FbbSessionRunner (and thus the FBB FSM) with
+        // the AX.25/RHP inbound path — no protocol duplication.
+        if (config.FbbTcp.Enabled)
+        {
+            builder.Services.AddSingleton(sp => new FbbTcpListener(
+                config.FbbTcp, store, sp.GetRequiredService<FbbSessionRunner>(), version, time,
+                sp.GetRequiredService<ILogger<FbbTcpListener>>()));
+        }
+
         // One ComponentService<T> per component: AddHostedService registers through
         // TryAddEnumerable, which de-duplicates by implementation type — with a single
         // non-generic ComponentService only the FIRST of these four registrations survived,
@@ -224,6 +235,14 @@ public static class HostComposition
         {
             builder.Services.AddHostedService(sp => new ComponentService<SmtpServer>("smtp",
                 sp.GetRequiredService<SmtpServer>(), static (server, ct) => server.RunAsync(ct)));
+        }
+
+        // The inbound FBB-over-TCP accept loop is hosted only when the (default-off) listener was
+        // registered above (issue #40).
+        if (config.FbbTcp.Enabled)
+        {
+            builder.Services.AddHostedService(sp => new ComponentService<FbbTcpListener>("fbb-tcp",
+                sp.GetRequiredService<FbbTcpListener>(), static (listener, ct) => listener.RunAsync(ct)));
         }
 
         WebApplication app = builder.Build();

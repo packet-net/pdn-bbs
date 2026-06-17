@@ -8,7 +8,7 @@ namespace Bbs.Host.Rhp;
 /// link's <c>recv</c> pushes; <see cref="ReceiveAsync"/> returns <see langword="null"/>
 /// once the stream is closed (server <c>close</c> push, link loss or local close).
 /// </summary>
-public sealed class RhpChildConnection
+public sealed class RhpChildConnection : IFbbConnection
 {
     private readonly RhpNodeLink _link;
     private readonly Channel<byte[]> _inbound = Channel.CreateUnbounded<byte[]>(

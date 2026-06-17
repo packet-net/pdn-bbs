@@ -601,4 +601,48 @@ public sealed class ConfigTests : IDisposable
             Assert.Equal(0, p.MaxMsgno);
         }
     }
+
+    // ----- issue #40: the inbound FBB-over-TCP listener (FBBPORT) config. -----
+
+    [Fact]
+    public void FbbTcp_DefaultsOff_WithSaneDefaults()
+    {
+        // Absent block → off by default, loopback bind, BPQ's conventional port.
+        FbbTcpConfig fbb = BbsHostConfigFile.Parse("callsign: GB7PDN").FbbTcp;
+        Assert.False(fbb.Enabled);
+        Assert.Equal("127.0.0.1", fbb.Bind);
+        Assert.Equal(FbbTcpConfig.DefaultPort, fbb.Port);
+        Assert.Equal(8011, fbb.Port);
+        Assert.Equal(8, fbb.MaxConnections);
+    }
+
+    [Fact]
+    public void FbbTcp_OptInRoundTrips()
+    {
+        FbbTcpConfig fbb = BbsHostConfigFile.Parse("""
+            callsign: GB7PDN
+            fbbTcp:
+              enabled: true
+              bind: 0.0.0.0
+              port: 9011
+              maxConnections: 16
+            """).FbbTcp;
+
+        Assert.True(fbb.Enabled);
+        Assert.Equal("0.0.0.0", fbb.Bind);
+        Assert.Equal(9011, fbb.Port);
+        Assert.Equal(16, fbb.MaxConnections);
+    }
+
+    [Fact]
+    public void FbbTcp_DefaultYaml_ParsesToDisabled()
+    {
+        // The commented default documents the listener but leaves it OFF in both flavours.
+        foreach (string yaml in new[] { BbsHostConfigFile.DefaultYaml, BbsHostConfigFile.PdnDefaultYaml })
+        {
+            FbbTcpConfig fbb = BbsHostConfigFile.Parse(yaml).FbbTcp;
+            Assert.False(fbb.Enabled);
+            Assert.Equal(8011, fbb.Port);
+        }
+    }
 }

@@ -26,8 +26,11 @@ pdn-bbs.sln
   src/Bbs.Host       composition: RHPv2 client (rhp2lib-net if consumable, else a minimal
                      in-repo client to the pinned wire) binding the BBS callsign —
                      inbound accept → Console session OR Fbb answerer (sniff the first
-                     line: a SID = forwarding partner); outbound forwarding scheduler
-                     (per-partner interval/immediate + connect scripts over RHP open);
+                     line: a SID = forwarding partner); an optional inbound FBB-over-TCP
+                     listener (BPQ FBBPORT, issue #40 — default off, shares the Fbb answerer
+                     via the IFbbConnection bearer abstraction; partner identity from the
+                     in-protocol callsign login); outbound forwarding scheduler (per-partner
+                     interval/immediate + connect scripts over RHP open);
                      ASP.NET loopback webmail (gateway identity headers, no second auth);
                      YAML config; pdn-app.yaml manifest (service + ui blocks).
   tests/             unit per project + golden vectors; tests/Bbs.Interop.Tests vs a

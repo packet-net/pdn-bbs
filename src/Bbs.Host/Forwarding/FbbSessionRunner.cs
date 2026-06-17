@@ -77,7 +77,7 @@ public sealed class FbbSessionRunner
     /// defaults (messages stored with its callsign as ReceivedFrom).
     /// </summary>
     public Task<FbbSessionResult> RunAnswererAsync(
-        RhpChildConnection child,
+        IFbbConnection child,
         byte[] initialData,
         CancellationToken cancellationToken)
     {
@@ -104,7 +104,7 @@ public sealed class FbbSessionRunner
     /// (the partner's SID line and tail when the script's SID-wait completed — spec §4.4).
     /// </summary>
     public Task<FbbSessionResult> RunCallerAsync(
-        RhpChildConnection child,
+        IFbbConnection child,
         Partner partner,
         IReadOnlyList<OutboundItem> outbound,
         CancellationToken cancellationToken,
@@ -118,7 +118,7 @@ public sealed class FbbSessionRunner
 
     private async Task<FbbSessionResult> RunAsync(
         FbbRole role,
-        RhpChildConnection child,
+        IFbbConnection child,
         Partner? partner,
         string partnerCall,
         IReadOnlyList<OutboundItem> outbound,
@@ -223,7 +223,7 @@ public sealed class FbbSessionRunner
     private async Task ApplyAsync(
         IReadOnlyList<FbbAction> actions,
         FbbSession session,
-        RhpChildConnection child,
+        IFbbConnection child,
         RunState state,
         CancellationToken cancellationToken)
     {
@@ -289,7 +289,7 @@ public sealed class FbbSessionRunner
     /// and propagates unchanged.
     /// </summary>
     private async Task SendToleratingCloseAsync(
-        RhpChildConnection child,
+        IFbbConnection child,
         FbbSession session,
         RunState state,
         ReadOnlyMemory<byte> data,
