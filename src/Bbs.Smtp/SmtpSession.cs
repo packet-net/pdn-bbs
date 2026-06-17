@@ -79,7 +79,8 @@ public sealed partial class SmtpSession
 
     private string? _callsign;
     private bool _mailFromSet;
-    private readonly List<string> _recipients = [];
+    private string? _dsnEnvId;
+    private readonly List<SmtpAcceptedRecipient> _recipients = [];
     private bool _quit;
 
     /// <summary>
@@ -247,6 +248,10 @@ public sealed partial class SmtpSession
         if (_secured)
         {
             sb.Append("250-AUTH PLAIN LOGIN\r\n");
+            // DSN (RFC 3461) only on a secure channel (mail is gated on it anyway). A DSN-aware client
+            // then sends NOTIFY=/RET=/ENVID=/ORCPT= which we honour: NOTIFY=SUCCESS on an accepted
+            // recipient yields a "relayed" delivery-status notification back to the submitter.
+            sb.Append("250-DSN\r\n");
         }
         else
         {
@@ -508,6 +513,12 @@ public sealed partial class SmtpSession
             return;
         }
 
+        // DSN (RFC 3461): the optional ENVID= rides through onto any DSN we emit (the original-envelope-id
+        // field), and RET= (FULL/HDRS) is accepted-and-ignored — we never carry the original message back
+        // in a DSN, only its headers-equivalent summary. The address is still ignored (the stored From is
+        // the auth callsign), so we only mine the params here.
+        _dsnEnvId = SmtpDsn.ExtractEnvId(rest["FROM:".Length..]);
+
         _mailFromSet = true;
         _recipients.Clear();
         await _connection.WriteAsync("250 2.1.0 Ok\r\n", cancellationToken).ConfigureAwait(false);
@@ -533,16 +544,27 @@ public sealed partial class SmtpSession
             return;
         }
 
-        string? addrSpec = ExtractAddrSpec(rest["TO:".Length..]);
+        string toArgs = rest["TO:".Length..];
+        string? addrSpec = ExtractAddrSpec(toArgs);
         if (addrSpec is null || !PacketAddressCodec.TryDecode(addrSpec, MailDomain, out string packet))
         {
             await _connection.WriteAsync("550 5.1.3 Bad recipient address\r\n", cancellationToken).ConfigureAwait(false);
             return;
         }
 
-        if (!_recipients.Contains(packet))
+        // DSN (RFC 3461): NOTIFY= says which dispositions the client wants notified (SUCCESS / FAILURE /
+        // DELAY, or NEVER), and ORCPT= is the original recipient to echo in the DSN. The default when no
+        // NOTIFY is given is FAILURE only (RFC 3461 §5.1) — and since this submission server accepts or
+        // rejects synchronously, a FAILURE is the 5xx the client already saw, so the DSN we actually emit
+        // is the SUCCESS ("relayed") one, only when the client opted into it.
+        SmtpDsnNotify notify = SmtpDsn.ParseNotify(toArgs);
+        string orcpt = SmtpDsn.ExtractOrcpt(toArgs) ?? addrSpec;
+
+        // Dedup on the decoded packet address (the same recipient via two RCPTs is one delivery); keep the
+        // first RCPT's DSN parameters for it.
+        if (!_recipients.Any(r => string.Equals(r.Packet, packet, StringComparison.Ordinal)))
         {
-            _recipients.Add(packet);
+            _recipients.Add(new SmtpAcceptedRecipient(packet, orcpt, notify));
         }
 
         await _connection.WriteAsync("250 2.1.5 Ok\r\n", cancellationToken).ConfigureAwait(false);
@@ -621,7 +643,7 @@ public sealed partial class SmtpSession
         // is message-level) AND different kinds — a callsign-shaped recipient is a Personal, a non-callsign
         // token (ALL, NEWS, …) is a Bulletin to that category. A submission addressed to both kinds yields
         // one Personal draft plus one Bulletin draft; the common case — one recipient — is one draft.
-        foreach (SmtpRecipientGroup group in SmtpRecipientGrouping.Group(_recipients))
+        foreach (SmtpRecipientGroup group in SmtpRecipientGrouping.Group(_recipients.Select(r => r.Packet)))
         {
             var draft = new MessageDraft
             {
@@ -645,9 +667,57 @@ public sealed partial class SmtpSession
             return;
         }
 
+        // DSN (RFC 3461/3464): each accepted recipient that asked for SUCCESS notification gets a
+        // "relayed" delivery-status notification stored back to the submitter (one DSN per submission,
+        // reporting every such recipient). The submission was accepted synchronously, so SUCCESS == the
+        // BBS relayed the message onward; FAILURE/DELAY have no async case here (a rejection was already a
+        // 5xx at RCPT/DATA time). The DSN is LocalOnly — it lands in the submitter's own mailbox and must
+        // never itself forward off-BBS.
+        MaybeStoreSuccessDsn(subject);
+
         LogQueued(_logger, _callsign!, _recipients.Count, stored);
         ResetTransaction();
         await _connection.WriteAsync("250 2.0.0 Ok: queued\r\n", cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Generates a "relayed" delivery-status notification (RFC 3464) back to the submitter for every
+    /// accepted recipient that requested <c>NOTIFY=SUCCESS</c>, and stores it as a LocalOnly Personal in
+    /// the submitter's own mailbox (so the submitter reads it over IMAP/webmail; it never forwards off the
+    /// BBS). No SUCCESS-requesting recipient ⇒ no DSN (the default NOTIFY is FAILURE-only, and a failure
+    /// here was already a synchronous 5xx, so there is nothing async to report). The submitter address is
+    /// the authenticated callsign — SSID-less, per the §1.5 mail-namespace rule the store enforces anyway.
+    /// </summary>
+    private void MaybeStoreSuccessDsn(string originalSubject)
+    {
+        IReadOnlyList<SmtpAcceptedRecipient> wantSuccess =
+            [.. _recipients.Where(r => r.Notify.HasFlag(SmtpDsnNotify.Success))];
+        if (wantSuccess.Count == 0)
+        {
+            return;
+        }
+
+        string reportingCall = Callsigns.StripSsid(Callsigns.Normalize(_callsign!));
+        string reportBody = SmtpDsn.BuildRelayedReport(
+            reportingMta: $"{MailDomain} (pdn-bbs SMTP submission)",
+            originalSubject: originalSubject,
+            envId: _dsnEnvId,
+            recipients: wantSuccess.Select(r => r.Orcpt),
+            now: _store.Now);
+
+        var dsn = new MessageDraft
+        {
+            Type = MessageType.Personal,
+            From = SmtpDsn.ReportFrom,
+            Recipients = [reportingCall],
+            Subject = SmtpDsn.RelayedSubject,
+            Body = PacketText.EncodeBody(reportBody),
+            LocalOnly = true, // a local notification — never forwards, excluded from the BID dedup store
+        };
+
+        Message message = _store.AddMessage(dsn);
+        _onStored(message);
+        LogDsnStored(_logger, reportingCall, wantSuccess.Count);
     }
 
     // ------------------------------------------------------------------ helpers
@@ -715,6 +785,7 @@ public sealed partial class SmtpSession
     private void ResetTransaction()
     {
         _mailFromSet = false;
+        _dsnEnvId = null;
         _recipients.Clear();
     }
 
@@ -759,6 +830,9 @@ public sealed partial class SmtpSession
 
     [LoggerMessage(Level = LogLevel.Information, Message = "SMTP: {Callsign} submitted a message to {Recipients} recipient(s), stored as {Messages} message(s)")]
     private static partial void LogQueued(ILogger logger, string callsign, int recipients, int messages);
+
+    [LoggerMessage(Level = LogLevel.Information, Message = "SMTP: stored a relayed DSN for {Callsign} covering {Recipients} SUCCESS-notify recipient(s)")]
+    private static partial void LogDsnStored(ILogger logger, string callsign, int recipients);
 
     [LoggerMessage(Level = LogLevel.Warning, Message = "SMTP: failed to parse a submitted message")]
     private static partial void LogParseFailed(ILogger logger, Exception ex);
