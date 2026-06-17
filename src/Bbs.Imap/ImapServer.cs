@@ -175,8 +175,8 @@ public sealed record ImapServerOptions
     /// <summary>Bind address (default loopback).</summary>
     public string Bind { get; init; } = "127.0.0.1";
 
-    /// <summary>TCP port; 0 binds an OS-assigned ephemeral port (used by tests).</summary>
-    public int Port { get; init; } = 1143;
+    /// <summary>TCP port; 0 binds an OS-assigned ephemeral port (used by tests). 993 = standard implicit-TLS IMAP.</summary>
+    public int Port { get; init; } = 993;
 
     /// <summary>Whether each accepted socket is wrapped in implicit TLS.</summary>
     public bool TlsEnabled { get; init; }
