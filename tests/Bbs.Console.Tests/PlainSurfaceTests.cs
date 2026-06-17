@@ -225,6 +225,51 @@ public sealed class PlainSurfaceTests : IDisposable
         Assert.Contains("FT-817 for sale", t.Output, StringComparison.Ordinal);
     }
 
+    // ------------------------------------------------ #49: bare `b` is BYE, not bulletins
+    // Every classic BBS (and this BBS's own classic surface) treats `B` as the sign-off reflex.
+    // The plain surface used to map `b` to bulletins, so an operator reaching for disconnect opened
+    // the bulletin list instead. `b` now signs off (same as quit/bye); bulletins keep `bu`/`bul`.
+
+    [Fact]
+    public async Task Shortcut_b_SignsOff_DoesNotOpenBulletins()
+    {
+        // A bulletin is present so a mistaken open would be obvious in the output.
+        _h.Store.AddMessage(Drafts.Bulletin(from: "G4ABC", to: "SALE", subject: "should-not-appear"));
+        (BbsSessionEndReason end, ScriptedTerminal t) = await RunAsync("b");
+        Assert.Equal(BbsSessionEndReason.Bye, end);
+        Assert.Contains("73 - thanks for calling GB7PDN", t.Output, StringComparison.Ordinal);
+        // The bulletin list never rendered.
+        Assert.DoesNotContain("There is 1 bulletin:", t.Output, StringComparison.Ordinal);
+        Assert.DoesNotContain("should-not-appear", t.Output, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Word_bye_SignsOff_LikeQuit()
+    {
+        (BbsSessionEndReason end, ScriptedTerminal t) = await RunAsync("bye");
+        Assert.Equal(BbsSessionEndReason.Bye, end);
+        Assert.Contains("73 - thanks for calling GB7PDN", t.Output, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Prefix_bu_StillOpensBulletins()
+    {
+        // Bulletins keep an obvious, slightly longer prefix; only "bulletins" starts with "bu",
+        // so the natural unambiguous-prefix rule resolves it (no shortcut needed).
+        _h.Store.AddMessage(Drafts.Bulletin(from: "G4ABC", to: "SALE", subject: "FT-817 for sale"));
+        (_, ScriptedTerminal t) = await RunAsync("bu", "quit");
+        Assert.Contains("There is 1 bulletin:", t.Output, StringComparison.Ordinal);
+        Assert.Contains("FT-817 for sale", t.Output, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Help_ListsBye_AndNotesBIsTheShortcut()
+    {
+        (_, ScriptedTerminal t) = await RunAsync("help", "quit");
+        Assert.Contains("bye - sign off and disconnect", t.Output, StringComparison.Ordinal);
+        Assert.Contains("b is the shortcut", t.Output, StringComparison.Ordinal);
+    }
+
     [Fact]
     public async Task Topics_ShowsCategoriesWithCounts()
     {

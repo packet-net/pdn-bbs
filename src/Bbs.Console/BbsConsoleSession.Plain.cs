@@ -41,6 +41,7 @@ public sealed partial class BbsConsoleSession
         Classic,
         Plain,
         Quit,
+        Bye,
         Node,
 
         // Sysop-only read-only diagnostics (forwarding.md F-2 ops layer, built jargon-free from
@@ -88,6 +89,7 @@ public sealed partial class BbsConsoleSession
         new(PlainCommand.Classic, "classic", "classic - switch to the old-style terse command surface."),
         new(PlainCommand.Plain, "plain", "plain - stay on this plain-language surface (you are here)."),
         new(PlainCommand.Quit, "quit", "quit - sign off and disconnect."),
+        new(PlainCommand.Bye, "bye", "bye - sign off and disconnect (same as quit; b is the shortcut)."),
         new(PlainCommand.Node, "node", "node - leave the mailbox and go back to the node."),
 
         // Sysop-only diagnostics (only listed in help for a sysop; see HandlePlainHelpAsync).
@@ -216,6 +218,7 @@ public sealed partial class BbsConsoleSession
                 return SessionAction.Continue;
 
             case PlainCommand.Quit:
+            case PlainCommand.Bye:
                 await WritePlainSignOffAsync().ConfigureAwait(false);
                 return SessionAction.Bye;
 
@@ -251,6 +254,13 @@ public sealed partial class BbsConsoleSession
     /// <c>q</c> is quit (not quit/qth), <c>h</c> is help (not help/home), <c>re</c> is reply — to
     /// the command a packet op's fingers expect. They are checked before prefix matching; any
     /// other prefix (or a longer, naturally-unambiguous one) falls through to the general rule.
+    ///
+    /// <para><b>Bare <c>b</c> is BYE, not bulletins (#49).</b> On every classic BBS — and in this
+    /// BBS's own classic surface — <c>B</c> is the sign-off reflex. The plain surface used to map
+    /// <c>b</c> to bulletins, so an operator reaching for disconnect instead opened the bulletin
+    /// list. We honour the 40-year convention: <c>b</c> signs off (same as <c>quit</c>/<c>bye</c>).
+    /// Bulletins keep an obvious, slightly longer prefix — <c>bu</c>/<c>bul</c>/<c>bulletins</c> —
+    /// which the natural unambiguous-prefix rule resolves (only "bulletins" starts with "bu").</para>
     /// </summary>
     private static readonly Dictionary<string, PlainCommand> PlainShortcuts = new(StringComparer.Ordinal)
     {
@@ -261,7 +271,9 @@ public sealed partial class BbsConsoleSession
         ["q"] = PlainCommand.Quit,
         ["h"] = PlainCommand.Help,
         ["d"] = PlainCommand.Delete,
-        ["b"] = PlainCommand.Bulletins,
+        // #49: bare `b` is BYE (the universal sign-off reflex), NOT bulletins. Bulletins keep
+        // `bu`/`bul`/`bulletins` via the natural prefix rule (only "bulletins" starts with "bu").
+        ["b"] = PlainCommand.Bye,
         ["n"] = PlainCommand.Name,
     };
 
