@@ -8,15 +8,20 @@ namespace Bbs.SevenPlus.Tests;
 /// </summary>
 public class RoundTripTests
 {
-    public static TheoryData<int> Sizes =>
-    [
+    // Explicit `new TheoryData<int> { … }` rather than a collection expression: one of the
+    // self-hosted CI runners ships an analyzer build that misfires CA1825 ("zero-length array")
+    // on a TheoryData collection-expression member, which fails the Release build
+    // (TreatWarningsAsErrors). The constructor + collection-initializer form is equivalent and
+    // is not misclassified, so the build is green on both runners.
+    public static TheoryData<int> Sizes => new()
+    {
         1, 2, 31, 61, 62, 63, 124, 125,
         8555, 8556, 8557,        // around the default single-line-block boundary
         138 * 62,                // exactly one default part
         (138 * 62) + 1,          // one byte into a second part
         2 * 138 * 62,            // exactly two parts
         159293, 159294, 159295,  // the reference's multi-part edge sizes
-    ];
+    };
 
     [Theory]
     [MemberData(nameof(Sizes))]
