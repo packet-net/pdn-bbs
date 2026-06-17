@@ -67,4 +67,44 @@ public static class PacketText
         ArgumentNullException.ThrowIfNull(text);
         return Encoding.UTF8.GetBytes(text);
     }
+
+    /// <summary>
+    /// Decodes a stored message BODY for DISPLAY: UTF-8 when the bytes are valid UTF-8 (the common
+    /// ASCII / UTF-8 case — gateways, Winlink, copy-pasted smart quotes, an SMTP-submitted Unicode
+    /// body), otherwise Latin-1 (genuine 8-bit packet content, e.g. an inline 7plus block whose
+    /// high-byte alphabet is not well-formed UTF-8). Bodies are stored byte-transparent (Latin-1
+    /// round-trips for forwarding fidelity — see <see cref="Message.GetBodyText"/>); this render-only
+    /// helper recovers the intended text. The same strict-UTF-8-then-Latin-1 discrimination as
+    /// <see cref="DecodeHeader"/>, just over the body span.
+    /// </summary>
+    public static string DecodeBody(ReadOnlySpan<byte> bytes) => DecodeHeader(bytes);
+
+    /// <summary>
+    /// Encodes a body string for storage without losing any character. ASCII / Latin-1 text encodes as
+    /// Latin-1 — byte-transparent, byte-identical on the packet wire, exactly the historical path
+    /// (no interop change, the forwarding round-trip is preserved). Text carrying a character outside
+    /// Latin-1 (a code point above U+00FF — €, emoji, CJK, …) encodes as UTF-8 instead, so it survives
+    /// storage losslessly; <see cref="DecodeBody"/> recovers it (the bytes are well-formed UTF-8, so the
+    /// strict-UTF-8 display decode picks them up). The historical <c>Encoding.Latin1.GetBytes</c> silently
+    /// mapped such characters to '?', which this replaces.
+    /// </summary>
+    /// <remarks>
+    /// A body that already carries raw 8-bit binary (an inline 7plus block) must stay Latin-1 so the
+    /// blob round-trips byte-exact; such a body is pure Latin-1 by construction (the 7plus alphabet is
+    /// &lt;= 0xFC and the prose is the user's text), so it takes the Latin-1 branch — a body carrying a
+    /// 7plus blob never holds a character above U+00FF, so this method never wrongly UTF-8-encodes one.
+    /// </remarks>
+    public static byte[] EncodeBody(string text)
+    {
+        ArgumentNullException.ThrowIfNull(text);
+        foreach (char c in text)
+        {
+            if (c > 'ÿ')
+            {
+                return Encoding.UTF8.GetBytes(text);
+            }
+        }
+
+        return Encoding.Latin1.GetBytes(text);
+    }
 }

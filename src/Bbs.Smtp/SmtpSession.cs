@@ -600,8 +600,13 @@ public sealed partial class SmtpSession
             // CRLF separators are NOT run through any CR line discipline, because a 7plus code line can
             // legitimately contain byte 0x85 which string.ReplaceLineEndings would treat as the Unicode
             // line break U+0085 NEL and rewrite — corrupting the line and breaking reassembly. The body is
-            // shared by every recipient group, then Latin1-encoded for MessageDraft.Body.
-            body = Encoding.Latin1.GetBytes(BuildBody(text, parsed));
+            // shared by every recipient group, then encoded for MessageDraft.Body via PacketText.EncodeBody:
+            // ASCII / Latin-1 stays byte-transparent (unchanged on the wire, and the only branch a body
+            // carrying a 7plus blob can take — its alphabet is <= 0xFC), while a body whose prose carries a
+            // character above U+00FF (€, emoji, CJK) is stored as UTF-8 so it survives losslessly instead of
+            // being mapped to '?' (the prior Encoding.Latin1.GetBytes was lossy). The display path
+            // (PacketText.DecodeBody / webmail) reads it back UTF-8-or-Latin-1.
+            body = PacketText.EncodeBody(BuildBody(text, parsed));
         }
         catch (Exception ex) when (ex is FormatException or System.IO.IOException)
         {

@@ -80,4 +80,56 @@ public sealed class PacketTextTests
         Assert.Equal("£", decoded);
         Assert.Equal([0xC2, 0xA3], PacketText.EncodeHeader(decoded));
     }
+
+    // ---------------------------------------------------------------- EncodeBody / DecodeBody
+
+    [Fact]
+    public void EncodeBody_AsciiText_StaysByteTransparentLatin1()
+    {
+        // The common path must be byte-identical to the historical Encoding.Latin1.GetBytes — no
+        // interop change, the packet wire and the forwarding round-trip are untouched.
+        const string body = "Hello\rWorld\r";
+        Assert.Equal(Encoding.Latin1.GetBytes(body), PacketText.EncodeBody(body));
+    }
+
+    [Fact]
+    public void EncodeBody_Latin1HighBytes_StayLatin1()
+    {
+        // £ (U+00A3) and é (U+00E9) are inside Latin-1, so the body stays a single byte each — exactly
+        // the prior behaviour (BbsStore round-trips "£é\rA" as Latin-1). Every character here is <= U+00FF
+        // (an ASCII hyphen, not an em-dash, which would be above the range).
+        const string body = "Cost £5 - cafeé";
+        Assert.True(body.All(c => c <= 'ÿ'));
+        Assert.Equal(Encoding.Latin1.GetBytes(body), PacketText.EncodeBody(body));
+    }
+
+    [Fact]
+    public void EncodeBody_NonLatin1_EncodesAsUtf8_LosslessRoundTrip()
+    {
+        // The fix: a character above U+00FF (€ U+20AC, an emoji, CJK) is NOT representable in Latin-1.
+        // The old Encoding.Latin1.GetBytes mapped it to '?'; EncodeBody stores UTF-8 instead so it
+        // survives, and DecodeBody recovers it exactly.
+        const string body = "Price: 5€ — 日本語 😀";
+
+        byte[] encoded = PacketText.EncodeBody(body);
+        Assert.Equal(Encoding.UTF8.GetBytes(body), encoded);
+
+        // Lossy proof: the old path would have destroyed it.
+        Assert.NotEqual(body, Encoding.Latin1.GetString(Encoding.Latin1.GetBytes(body)));
+
+        // The new path round-trips byte-for-byte through the display decode.
+        Assert.Equal(body, PacketText.DecodeBody(encoded));
+    }
+
+    [Fact]
+    public void DecodeBody_InlineSevenPlusHighBytes_DecodesAsLatin1()
+    {
+        // A 7plus block carries raw 8-bit bytes (alphabet up to 0xFC) that are NOT well-formed UTF-8, so
+        // a body containing one decodes byte-transparent as Latin-1 — never mojibaked, never altered.
+        byte[] body = [(byte)'7', (byte)'+', (byte)'\r', 0x85, 0xFC, 0x92, (byte)'\r'];
+        string decoded = PacketText.DecodeBody(body);
+
+        Assert.Equal(Encoding.Latin1.GetString(body), decoded);
+        Assert.Equal(body.Length, decoded.Length); // one char per byte — no multi-byte folding
+    }
 }

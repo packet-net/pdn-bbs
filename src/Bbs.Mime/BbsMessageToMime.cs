@@ -137,10 +137,12 @@ public static class BbsMessageToMime
     /// </summary>
     private static TextPart BuildTextPart(Message message, bool reflowText, string? bodyText)
     {
-        // The body is stored as raw bytes (Latin-1-transparent — see Message.GetBodyText); render it
-        // the same way webmail does so the user sees identical text. A caller-supplied bodyText wins
-        // (e.g. the inline-7plus-stripped body).
-        string body = bodyText ?? message.GetBodyText();
+        // The body is stored byte-transparent; render it the same way webmail does (UTF-8 when the bytes
+        // are valid UTF-8 — an SMTP-submitted Unicode body, a gateway's smart quotes — else Latin-1) so
+        // the reader sees the intended text rather than mojibake. A caller-supplied bodyText wins (e.g.
+        // the inline-7plus-stripped body — already a decoded string). MimeKit picks the charset and a
+        // safe transfer-encoding for whatever the resulting string needs.
+        string body = bodyText ?? PacketText.DecodeBody(message.Body.Span);
         if (!reflowText)
         {
             return new TextPart(TextFormat.Plain) { Text = body };
