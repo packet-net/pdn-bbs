@@ -37,7 +37,7 @@ public sealed class HousekeepingRunner
             try
             {
                 HousekeepingSummary summary = Housekeeping.Run(_store, _policy);
-                LogRun(_logger, summary.KilledMessagesPurged, summary.MessagesKilledByAge, summary.BidsPurged, summary.MessagesRenumbered, null);
+                LogRun(_logger, summary.KilledMessagesPurged, summary.MessagesKilledByAge, summary.BidsPurged, summary.MessagesRenumbered, summary.WhitePagesPruned, null);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
@@ -55,9 +55,9 @@ public sealed class HousekeepingRunner
         }
     }
 
-    private static readonly Action<ILogger, int, int, int, int, Exception?> LogRun =
-        LoggerMessage.Define<int, int, int, int>(LogLevel.Information, new EventId(1, "HousekeepingRun"),
-            "Housekeeping: purged {Purged} killed, killed {Killed} by age, dropped {Bids} expired BIDs, renumbered {Renumbered} messages");
+    private static readonly Action<ILogger, int, int, int, int, int, Exception?> LogRun =
+        LoggerMessage.Define<int, int, int, int, int>(LogLevel.Information, new EventId(1, "HousekeepingRun"),
+            "Housekeeping: purged {Purged} killed, killed {Killed} by age, dropped {Bids} expired BIDs, renumbered {Renumbered} messages, pruned {WhitePages} stale directory entries");
 
     private static readonly Action<ILogger, Exception?> LogFailed =
         LoggerMessage.Define(LogLevel.Error, new EventId(2, "HousekeepingFailed"),

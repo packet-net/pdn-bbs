@@ -60,6 +60,18 @@ public sealed record HousekeepingPolicy
     public int BidLifetimeDays { get; init; } = 60;
 
     /// <summary>
+    /// The conventional lifetime for White Pages directory entries, days (issue #36). WP entries go
+    /// stale as stations move/retire, but a station that is active re-freshens its entry each
+    /// forwarding cycle, so the default is long enough to survive seasonal gaps yet short enough to
+    /// drop dead stations (BPQ re-announces only records changed within the last few days). A WP entry
+    /// whose <c>record_date</c> is strictly older than this is pruned by the sweep.
+    /// </summary>
+    public const int DefaultWhitePagesDays = 180;
+
+    /// <summary>White Pages directory-entry lifetime, days (issue #36). Defaults to <see cref="DefaultWhitePagesDays"/>.</summary>
+    public int WhitePagesDays { get; init; } = DefaultWhitePagesDays;
+
+    /// <summary>
     /// Grace between a kill and physical deletion, days. 0 purges at the next run — LinBPQ's
     /// behaviour ("remains on disk until housekeeping removes it", compat spec §2.2/§6).
     /// </summary>
@@ -88,7 +100,8 @@ public sealed record HousekeepingPolicy
 /// <param name="MessagesKilledByAge">Messages moved to K by the age matrix.</param>
 /// <param name="BidsPurged">BID dedup records dropped by lifetime.</param>
 /// <param name="MessagesRenumbered">Live messages remapped to a new dense number by the MaxMsgno renumber pass (0 when the ceiling did not fire).</param>
-public sealed record HousekeepingSummary(int KilledMessagesPurged, int MessagesKilledByAge, int BidsPurged, int MessagesRenumbered = 0);
+/// <param name="WhitePagesPruned">White Pages directory entries dropped by the WP-lifetime sweep (issue #36).</param>
+public sealed record HousekeepingSummary(int KilledMessagesPurged, int MessagesKilledByAge, int BidsPurged, int MessagesRenumbered = 0, int WhitePagesPruned = 0);
 
 /// <summary>
 /// The housekeeping pass (compat spec §6), invoked by the Host on a timer (daily at
@@ -144,7 +157,14 @@ public static class Housekeeping
             renumbered = store.RenumberMessages();
         }
 
-        return new HousekeepingSummary(purgedKilled, killedByAge, purgedBids, renumbered);
+        // 5. White Pages directory aging (issue #36). Prune entries we have not SEEN within the WP
+        // lifetime — stations that have moved/retired and stopped re-announcing (the sweep keys on
+        // last_seen_utc, not record_date, so a long-stable but still-active station is kept). Independent
+        // of the mail store: it touches only the whitepages table.
+        int whitePagesPruned = store.SweepWhitePages(
+            DateTimeOffset.FromUnixTimeSeconds(Cutoff(now, policy.WhitePagesDays)));
+
+        return new HousekeepingSummary(purgedKilled, killedByAge, purgedBids, renumbered, whitePagesPruned);
     }
 
     private static long Cutoff(long now, int days) => now - (days * SecondsPerDay);

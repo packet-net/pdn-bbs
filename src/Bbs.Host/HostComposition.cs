@@ -120,9 +120,12 @@ public static class HostComposition
             new RoutingService(store, engine, sp.GetRequiredService<ILogger<RoutingService>>()));
         builder.Services.AddSingleton(sp => new SevenPlusAssembler(
             store, sp.GetRequiredService<ILogger<SevenPlusAssembler>>()));
+        builder.Services.AddSingleton(sp => new WhitePagesConsumer(
+            store, sp.GetRequiredService<ILogger<WhitePagesConsumer>>()));
         builder.Services.AddSingleton(sp => new InboundMessageReceiver(
             store, sp.GetRequiredService<RoutingService>(), engine,
-            sp.GetRequiredService<SevenPlusAssembler>(), baseCallsign, time,
+            sp.GetRequiredService<SevenPlusAssembler>(), sp.GetRequiredService<WhitePagesConsumer>(),
+            baseCallsign, time,
             sp.GetRequiredService<ILogger<InboundMessageReceiver>>()));
         // Durable scratch area for receiver-side restart granting (issue #38). Sweep abandoned
         // partials at startup so the area cannot grow unbounded across restarts.

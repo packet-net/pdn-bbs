@@ -366,4 +366,52 @@ public sealed class HousekeepingTests : IDisposable
         Message e = reopened.AddMessage(Drafts.Personal(subject: "e"));
         Assert.Equal(4, e.Number);
     }
+
+    // ----- issue #36: White Pages directory aging sweep -----
+
+    [Fact]
+    public void WhitePages_NotSeenWithinLifetime_Pruned_RecentlySeenKept()
+    {
+        // The sweep keys on last-seen, not record content. AA1AA is ingested then NOT seen for >90 days;
+        // BB2BB is ingested just before the run. With a 90-day lifetime the unseen one is pruned.
+        _ts.Store.UpsertWhitePages(new WhitePagesRecord(
+            "AA1AA", WhitePagesType.Guessed, new DateOnly(2025, 1, 1), "AA1AA.EURO", "Alice", "Place", null));
+        _ts.Time.Advance(TimeSpan.FromDays(120));
+        _ts.Store.UpsertWhitePages(new WhitePagesRecord(
+            "BB2BB", WhitePagesType.Guessed, new DateOnly(2026, 6, 1), "BB2BB.EURO", "Bob", "Burgh", null));
+
+        var policy = new HousekeepingPolicy { WhitePagesDays = 90 };
+        HousekeepingSummary summary = Housekeeping.Run(_ts.Store, policy);
+
+        Assert.Equal(1, summary.WhitePagesPruned);
+        Assert.Null(_ts.Store.GetWhitePages("AA1AA"));    // unseen for >90 days → pruned
+        Assert.NotNull(_ts.Store.GetWhitePages("BB2BB")); // just seen → kept
+    }
+
+    [Fact]
+    public void WhitePages_ActiveStation_OldRecordButRecentlyReseen_IsKept()
+    {
+        // An active station re-announces each cycle. Its record content (record_date) stays old, but the
+        // re-sighting bumps last_seen, so the sweep keeps it even past the lifetime measured from the date.
+        _ts.Store.UpsertWhitePages(new WhitePagesRecord(
+            "AA1AA", WhitePagesType.Guessed, new DateOnly(2025, 1, 1), "AA1AA.EURO", "Alice", "Place", null));
+        _ts.Time.Advance(TimeSpan.FromDays(120));
+        _ts.Store.UpsertWhitePages(new WhitePagesRecord( // re-seen (stale no-op upsert still bumps last_seen)
+            "AA1AA", WhitePagesType.Guessed, new DateOnly(2025, 1, 1), "AA1AA.EURO", "Alice", "Place", null));
+
+        var policy = new HousekeepingPolicy { WhitePagesDays = 90 };
+        Assert.Equal(0, Housekeeping.Run(_ts.Store, policy).WhitePagesPruned);
+        Assert.NotNull(_ts.Store.GetWhitePages("AA1AA"));
+    }
+
+    [Fact]
+    public void WhitePages_DefaultLifetime_KeepsRecentlySeenEntries()
+    {
+        // The 180-day default keeps a station seen now.
+        _ts.Store.UpsertWhitePages(new WhitePagesRecord(
+            "AA1AA", WhitePagesType.Guessed, new DateOnly(2026, 6, 1), "AA1AA.EURO", "Alice", "Place", null));
+
+        Assert.Equal(0, Housekeeping.Run(_ts.Store, Defaults).WhitePagesPruned);
+        Assert.NotNull(_ts.Store.GetWhitePages("AA1AA"));
+    }
 }

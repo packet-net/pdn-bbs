@@ -517,6 +517,7 @@ public sealed class ConfigTests : IDisposable
         Assert.Equal(60, policy.BidLifetimeDays);
         Assert.Equal(0, policy.KilledPurgeGraceDays);
         Assert.Equal(0, policy.MaxMsgno); // renumbering off by default
+        Assert.Equal(HousekeepingPolicy.DefaultWhitePagesDays, policy.WhitePagesDays); // issue #36
     }
 
     [Fact]
@@ -556,6 +557,7 @@ public sealed class ConfigTests : IDisposable
               ntsForwardedDays: 22
               ntsUnforwardedDays: 23
               bidLifetimeDays: 90
+              whitePagesDays: 120
               killedPurgeGraceDays: 2
               maxMsgno: 50000
             """);
@@ -571,6 +573,7 @@ public sealed class ConfigTests : IDisposable
         Assert.Equal(22, p.NtsForwardedDays);
         Assert.Equal(23, p.NtsUnforwardedDays);
         Assert.Equal(90, p.BidLifetimeDays);
+        Assert.Equal(120, p.WhitePagesDays);
         Assert.Equal(2, p.KilledPurgeGraceDays);
         Assert.Equal(50_000, p.MaxMsgno);
     }

@@ -17,7 +17,7 @@ namespace Bbs.Core;
 public sealed class BbsStore : IDisposable
 {
     /// <summary>The schema version this build writes and expects.</summary>
-    public const int CurrentSchemaVersion = 11;
+    public const int CurrentSchemaVersion = 12;
 
     private readonly SqliteConnection _connection;
     private readonly TimeProvider _time;
@@ -950,6 +950,170 @@ public sealed class BbsStore : IDisposable
             return BidDisposition.Accept;
         }
     }
+
+    // ---------------------------------------------------------------- White Pages directory (schema v12)
+
+    /// <summary>
+    /// Date-wins upsert of one parsed White Pages record into the directory (issue #36). Kept entirely
+    /// out of the mail store. Semantics (BPQ <c>WPRoutines.c</c> <c>DoWPUpdate</c>):
+    /// <list type="bullet">
+    /// <item>A callsign not seen before is INSERTED.</item>
+    /// <item>An authoritative record (<see cref="WhitePagesType.User"/>, the <c>/U</c> wire type)
+    /// OVERWRITES the stored row unconditionally — regardless of staleness.</item>
+    /// <item>Otherwise the incoming record only freshens fields when its
+    /// <see cref="WhitePagesRecord.RecordDate"/> is at-or-after the stored <c>record_date</c>; a stale
+    /// record is dropped. A null incoming optional field (<c>?</c>/unknown) NEVER overwrites a known
+    /// stored value — only a non-null incoming field replaces.</item>
+    /// </list>
+    /// <c>last_seen_utc</c> is bumped to ingest time on every accepted-or-deduped sighting. The upsert
+    /// is naturally idempotent: re-ingesting the same record (same date) leaves the row unchanged
+    /// except <c>last_seen_utc</c>. Returns true when any directory FIELD changed (a new row, a
+    /// freshened field, or an authoritative overwrite), false when nothing but <c>last_seen_utc</c>
+    /// moved (a stale or identical re-ingest).
+    /// </summary>
+    public bool UpsertWhitePages(WhitePagesRecord record, string source = "wp")
+    {
+        ArgumentNullException.ThrowIfNull(record);
+        ArgumentException.ThrowIfNullOrWhiteSpace(source);
+
+        string call = Callsigns.StripSsid(Callsigns.Normalize(record.Callsign));
+        long incomingDate = ToEpochSeconds(record.RecordDate);
+        long now = NowSeconds();
+
+        lock (_gate)
+        {
+            using SqliteTransaction tx = _connection.BeginTransaction();
+            WhitePagesEntry? existing = GetWhitePagesCore(tx, call);
+
+            bool authoritative = record.Type == WhitePagesType.User;
+            if (existing is not null && !authoritative && incomingDate < ToEpochSeconds(existing.RecordDate))
+            {
+                // Stale, non-authoritative: keep stored data; only record that we saw it.
+                using SqliteCommand touch = Command(tx,
+                    "UPDATE whitepages SET last_seen_utc=$now WHERE callsign=$call;");
+                touch.Parameters.AddWithValue("$now", now);
+                touch.Parameters.AddWithValue("$call", call);
+                touch.ExecuteNonQuery();
+                tx.Commit();
+                return false;
+            }
+
+            // Field-merge: an incoming non-null field replaces; an incoming null keeps the stored value
+            // (an authoritative record still never erases known data with an unknown). A brand-new row
+            // starts from the incoming record (nulls and all).
+            string? homeBbs = record.HomeBbs ?? existing?.HomeBbs;
+            string? name = record.Name ?? existing?.Name;
+            string? qth = record.Qth ?? existing?.Qth;
+            string? zip = record.Zip ?? existing?.Zip;
+
+            // The freshness key never rolls BACKWARD: an authoritative /U record may carry an older date
+            // than what we hold (it overwrites CONTENT unconditionally), but storing its older date would
+            // then let a later non-authoritative update predating the /U slip past the staleness guard.
+            // Keep the newer of the two dates. For the non-authoritative path the incoming date is always
+            // >= stored (the stale case returned above), so the max is a no-op there.
+            long storedDate = existing is null ? incomingDate : Math.Max(incomingDate, ToEpochSeconds(existing.RecordDate));
+            DateOnly storedRecordDate = FromEpochSeconds(storedDate);
+
+            using SqliteCommand cmd = Command(tx, """
+                INSERT INTO whitepages(callsign,type,home_bbs,name,qth,zip,record_date,last_seen_utc,source)
+                VALUES($call,$type,$home,$name,$qth,$zip,$date,$now,$source)
+                ON CONFLICT(callsign) DO UPDATE SET
+                    type=$type, home_bbs=$home, name=$name, qth=$qth, zip=$zip,
+                    record_date=$date, last_seen_utc=$now, source=$source;
+                """);
+            cmd.Parameters.AddWithValue("$call", call);
+            cmd.Parameters.AddWithValue("$type", record.Type.ToCode().ToString());
+            cmd.Parameters.AddWithValue("$home", (object?)homeBbs ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("$name", (object?)name ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("$qth", (object?)qth ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("$zip", (object?)zip ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("$date", storedDate);
+            cmd.Parameters.AddWithValue("$now", now);
+            cmd.Parameters.AddWithValue("$source", source);
+            cmd.ExecuteNonQuery();
+            tx.Commit();
+
+            // A field changed unless this was an identical re-ingest of the existing row.
+            return existing is null
+                || existing.Type != record.Type
+                || existing.RecordDate != storedRecordDate
+                || existing.HomeBbs != homeBbs
+                || existing.Name != name
+                || existing.Qth != qth
+                || existing.Zip != zip;
+        }
+    }
+
+    /// <summary>Looks up one directory entry by (base) callsign, case-insensitively. Null when unknown.</summary>
+    public WhitePagesEntry? GetWhitePages(string callsign)
+    {
+        ArgumentNullException.ThrowIfNull(callsign);
+        string call = Callsigns.StripSsid(Callsigns.Normalize(callsign));
+        lock (_gate)
+        {
+            return GetWhitePagesCore(null, call);
+        }
+    }
+
+    /// <summary>The number of entries in the directory.</summary>
+    public int CountWhitePages()
+    {
+        lock (_gate)
+        {
+            using SqliteCommand cmd = Command(null, "SELECT COUNT(*) FROM whitepages;");
+            return Convert.ToInt32(cmd.ExecuteScalar(), CultureInfo.InvariantCulture);
+        }
+    }
+
+    /// <summary>
+    /// Prunes directory entries we have NOT SEEN since <paramref name="cutoffUtc"/> — the housekeeping
+    /// aging sweep for stale stations that have moved or retired (issue #36). Keys on
+    /// <c>last_seen_utc</c>, NOT <c>record_date</c>: an active station re-announces every forwarding
+    /// cycle and so is re-seen (its <c>last_seen_utc</c> is bumped on every sighting, even an unchanged
+    /// one), but BPQ re-announces only records whose CONTENT changed, so a long-stable station keeps an
+    /// old <c>record_date</c> while staying live — pruning on <c>record_date</c> would wrongly drop it.
+    /// Returns the number of rows removed.
+    /// </summary>
+    public int SweepWhitePages(DateTimeOffset cutoffUtc)
+    {
+        long cutoffSeconds = cutoffUtc.ToUnixTimeSeconds();
+        lock (_gate)
+        {
+            using SqliteCommand cmd = Command(null, "DELETE FROM whitepages WHERE last_seen_utc < $cutoff;");
+            cmd.Parameters.AddWithValue("$cutoff", cutoffSeconds);
+            return cmd.ExecuteNonQuery();
+        }
+    }
+
+    private WhitePagesEntry? GetWhitePagesCore(SqliteTransaction? tx, string baseCall)
+    {
+        using SqliteCommand cmd = Command(tx,
+            "SELECT callsign,type,home_bbs,name,qth,zip,record_date,last_seen_utc,source FROM whitepages WHERE callsign=$call;");
+        cmd.Parameters.AddWithValue("$call", baseCall);
+        using SqliteDataReader reader = cmd.ExecuteReader();
+        if (!reader.Read())
+        {
+            return null;
+        }
+
+        return new WhitePagesEntry(
+            reader.GetString(0),
+            WhitePagesTypeExtensions.FromCode(reader.GetString(1)[0]),
+            reader.IsDBNull(2) ? null : reader.GetString(2),
+            reader.IsDBNull(3) ? null : reader.GetString(3),
+            reader.IsDBNull(4) ? null : reader.GetString(4),
+            reader.IsDBNull(5) ? null : reader.GetString(5),
+            FromEpochSeconds(reader.GetInt64(6)),
+            DateTimeOffset.FromUnixTimeSeconds(reader.GetInt64(7)),
+            reader.GetString(8));
+    }
+
+    /// <summary>The Unix-epoch seconds at midnight UTC of a <see cref="DateOnly"/> (the directory date key).</summary>
+    private static long ToEpochSeconds(DateOnly date) =>
+        new DateTimeOffset(date.ToDateTime(TimeOnly.MinValue, DateTimeKind.Utc)).ToUnixTimeSeconds();
+
+    private static DateOnly FromEpochSeconds(long seconds) =>
+        DateOnly.FromDateTime(DateTimeOffset.FromUnixTimeSeconds(seconds).UtcDateTime);
 
     // ---------------------------------------------------------------- 7plus part tracking (schema v3)
 
@@ -2188,6 +2352,32 @@ public sealed class BbsStore : IDisposable
             version = 11;
         }
 
+        // v12 — the White Pages network directory (issue #36). PURELY ADDITIVE: a new `whitepages`
+        // table, kept ENTIRELY OUT of the mail store (messages/recipients) — WP directory state is
+        // never a message row. One row per base callsign (the directory key), upserted date-wins on
+        // each consumed WP update. No existing column/row is touched; safe to apply to the live lab
+        // bbs.db. CREATE TABLE IF NOT EXISTS makes re-applying v12 a clean no-op.
+        if (version < 12)
+        {
+            using SqliteTransaction tx = connection.BeginTransaction();
+            using (var ddl = connection.CreateCommand())
+            {
+                ddl.Transaction = tx;
+                ddl.CommandText = SchemaV12;
+                ddl.ExecuteNonQuery();
+            }
+
+            using (var stamp = connection.CreateCommand())
+            {
+                stamp.Transaction = tx;
+                stamp.CommandText = "UPDATE meta SET value='12' WHERE key='schema_version';";
+                stamp.ExecuteNonQuery();
+            }
+
+            tx.Commit();
+            version = 12;
+        }
+
         return version;
     }
 
@@ -2385,6 +2575,27 @@ public sealed class BbsStore : IDisposable
 
     private const string SchemaV11PeerSid = """
         ALTER TABLE forwarding_status ADD COLUMN last_peer_sid TEXT;
+        """;
+
+    // v12 — the White Pages network directory (issue #36). A single table, SEPARATE from the mail
+    // store: one row per base callsign, COLLATE NOCASE so the key matches regardless of case, no
+    // rowid (the callsign IS the identity). `type` is the provenance/confidence (I/G/U); the optional
+    // home_bbs/name/qth/zip are null when unknown. `record_date` (the On YYMMDD line date, stored as
+    // a Unix-epoch day-midnight) is the freshness key for the date-wins upsert; `last_seen_utc` is
+    // when we last ingested an entry for this call; `source` reserves the seam for future R:-line
+    // harvest ('rline') vs a WP message ('wp').
+    private const string SchemaV12 = """
+        CREATE TABLE IF NOT EXISTS whitepages(
+            callsign      TEXT NOT NULL COLLATE NOCASE PRIMARY KEY,
+            type          TEXT NOT NULL DEFAULT 'G',
+            home_bbs      TEXT,
+            name          TEXT,
+            qth           TEXT,
+            zip           TEXT,
+            record_date   INTEGER NOT NULL,
+            last_seen_utc INTEGER NOT NULL,
+            source        TEXT NOT NULL DEFAULT 'wp'
+        ) WITHOUT ROWID;
         """;
 
     private void InsertRecipient(SqliteTransaction tx, long number, string toCall, bool cc)

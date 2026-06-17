@@ -33,7 +33,8 @@ public sealed class FbbTcpListenerTests : IDisposable
         var engine = new RoutingEngine(OwnCall, "#23.GBR.EURO");
         var routing = new RoutingService(_store, engine, NullLogger<RoutingService>.Instance);
         var sevenPlus = new SevenPlusAssembler(_store, NullLogger<SevenPlusAssembler>.Instance);
-        var receiver = new InboundMessageReceiver(_store, routing, engine, sevenPlus, OwnCall, _time, NullLogger<InboundMessageReceiver>.Instance);
+        var whitePages = new WhitePagesConsumer(_store, NullLogger<WhitePagesConsumer>.Instance);
+        var receiver = new InboundMessageReceiver(_store, routing, engine, sevenPlus, whitePages, OwnCall, _time, NullLogger<InboundMessageReceiver>.Instance);
         _runner = new FbbSessionRunner(_store, receiver, identity, "0.1.0", _time, NullLogger<FbbSessionRunner>.Instance);
     }
 

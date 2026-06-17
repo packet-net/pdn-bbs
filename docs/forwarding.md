@@ -25,7 +25,7 @@ Everything BPQMail's forwarding configuration can express, ours must too. The in
 | `REROUTEMSGS` | **automatic** re-route on config apply (see wart 8) + explicit requeue surface | F-2 |
 | Per-recipient fan-out (BPQ copies per recipient) | B2: full multi-To/Cc + File: attachments stored, relayed & downloadable (✅ shipped — see "B2F negotiation"); per-*home* fan-out (split into per-`@home` copies) still deferred — the message forwards once on the primary route carrying the full To: list, FBB's next hop re-distributes | ✅ B2 multi-recipient/attachment / per-home split F-1 |
 | Multi-partner topologies | any number of partners; deterministic tie-breaks | ✅ shipped |
-| WP-driven completion | WP consume (spec SHOULD) | F-3 |
+| WP-driven completion | WP **consume** ✅ shipped (issue #36 — see "White Pages (the network directory)" below); WP **emit** (#47) + `@home` routing resolution still F-3 | ✅ consume / emit + routing F-3 |
 
 ## GB7RDG replacement — additional BBS gaps (2026-06-16)
 
@@ -121,6 +121,44 @@ One **named deferral remains** from the B2-completeness slice (visible, not sile
 Uploaded filenames are path-stripped (a `../`-shaped name resolves to a bare filename). The inbound `SevenPlusAssembler` is NOT run on compose-originated messages (it's inbound-only) — an outgoing 7plus message correctly stays as text in the sender's own Sent view. **Two named deferrals (this slice):** (1) splitting a large 7plus file into separate part-bulletins (one message per part) for size-capped broadcast paths — the MVP embeds all parts in one body (large bodies forward fine post the multi-frame-TX node fix); (2) pretty "Sent" rendering of an outgoing 7plus message as a file chip (it shows as composed). IMAP/SMTP send path is a separate roadmap item.
 
 **Oracle finding (what a real LinBPQ does with a multi-To/Cc/File B2 — `B2ForwardingInteropTests`):** outbound, the live oracle accepts our FC and stores the object but NORMALISES the recipient envelope on receipt — it strips its OWN call from the `To:` list (the implied-AT "already here"), DROPS the `Cc:` line, and FAITHFULLY PRESERVES the `File:` attachment (header, name, exact bytes). Inbound, the oracle's telnet user-entry surface cannot ORIGINATE a genuine multi-To (space-separated → "Invalid Format"; comma → one literal addressee token) nor a File: attachment (no upload step), so the inbound multi-To/Cc/File DECODE is pinned at the host level; the live inbound FC receive + store is oracle-proven for the single-recipient object. We assert what the oracle actually does, not what our codec emits — surfaced, not forced.
+
+## White Pages — the network directory (consume) ✅ shipped (issue #36)
+
+White Pages ("WP", in our plain vocabulary **the network directory**) is how the network learns who is homed where. A WP update is an ordinary FBB/B2F message addressed to the reserved pseudo-call `WP` whose body is one record per line. We now CONSUME inbound WP updates into a directory, populating "who lives where" so a future slice can resolve `send <call>` (no `@home`) — the plain-language mandate's "the system resolves where G4ABC lives via the network directory". This slice is consume-only; emission and the routing resolution are separate follow-ons (see below).
+
+**The wire format is not inferred — it is pinned from the peer's own source.** GB7RDG (our forwarding partner) runs LinBPQ/BPQMail; the emit/parse functions live in `m0lte/linbpq` (`WPRoutines.c`, `BBSUtilities.c`). FBB originated the format, BPQ reimplements it verbatim, and JNOS/TNOS target it for compatibility — so this is the whole interop surface, not a BPQ quirk. Each record line is, with single-space separators and a `\r\n` terminator:
+
+```
+On <YYMMDD> <CALL>/<TYPE> @ <HOME-HA> zip <ZIP> <NAME> <QTH...>
+```
+
+- **`On ` (3 bytes) is the line sentinel** — only lines beginning with it are records; everything else (the message's own routing trace, blank lines, free text) is skipped silently, not an error.
+- **`YYMMDD`** is the record date — the **freshness key** (a 2-digit year, 20xx).
+- **`CALL/TYPE`** — `TYPE` is provenance/confidence, not station kind: `U` = user-supplied and **authoritative** (overwrites unconditionally), `G` = guessed from a header (the default when `/TYPE` is absent or unrecognised), `I` = derived from a routing-trace (R:) line. The callsign must be 3–6 chars and callsign-shaped.
+- **`@`** is a literal marker (required).
+- **`HOME-HA`** is the hierarchical home-BBS address (e.g. `AA1AA.#42.GBR.EURO`), or a bare callsign.
+- **`zip`** is a literal KEYWORD token (the dual-field quirk): BPQ's emitter writes the word `zip`; its parser reads it into a throwaway token and the NEXT token is the real value. Don't mistake the keyword for data.
+- **`ZIP` / `NAME` / `QTH`** — `?` is the explicit unknown sentinel (⇒ null). QTH takes the rest of the line (may contain spaces). Length caps: HA≤40, ZIP≤8, NAME≤12, QTH≤30.
+
+**Graceful degradation.** A malformed or short record line is dropped and parsing continues with the remaining lines — we deliberately do NOT replicate BPQ's bug of `return`ing on a bad line (which truncates the rest of the body). An over-cap optional field is treated as unknown (null), not truncated. This is line-oriented text — the B1/B2 container already decompressed the body before we see it; there is no compression or binary framing inside a WP body, and the on-disk `WP.cfg` libconfig dump is a different artifact (not the wire format).
+
+**Recognition (the ingest discriminator).** A delivered message is a WP update iff its **recipient base-callsign (SSID-stripped, case-insensitive) equals `WP`** — `WP`, `WP@GB7RDG`, `WP@M9YYY`, `WP-1` all match; the `@<bbs>` part is routing, not identity. This is BPQ's exact discriminator (`strcmp(Msg->to,"WP")==0`). `WP` is a reserved 2-char pseudo-call that fails the 3–6-char callsign rule, so no human can be homed as `WP` and this can never eat real user mail. **Belt-and-braces guard:** after matching `To==WP` we also require the body to hold ≥1 parseable `On …` record before consuming — a genuine (if bizarre) message to a station literally called "WP" with no records falls through to normal mail storage. Recognition keys on the recipient only, never the subject.
+
+**Storage — separate from the mail store.** A single `whitepages` table (schema v12, additive migration), keyed by base callsign, kept entirely OUT of `messages`/`recipients`. Merge is **date-wins per field**: a newer `record_date` freshens fields; a `?`/null incoming field never overwrites a known stored value; a `/U` (authoritative) record overwrites unconditionally regardless of staleness. The upsert is naturally idempotent (same date ⇒ no change). The `source` column reserves the seam for future routing-trace (R:-line) harvest (`source='rline'`).
+
+**Pipeline placement + disposition.** The single seam is `InboundMessageReceiver.Deliver` (both the B1/FA and B2/FC paths). WP recognition + consume runs immediately after decode, **before `StoreAndRoute`** — and, when the content-filter lenses (the `RejFrom`/`RejTo`/topic facility) land, WP recognition must run BEFORE them: a directory sync is infrastructure, not user/bulletin content, and must not be subject to subscription/policy lenses. Disposition follows BPQ:
+
+- A **personal** WP whose AT resolves to **us** is **consumed** — its records are harvested, its network-id (BID) is recorded for dedup (so a re-send is deduped even though we keep no message row), and the message itself is NOT stored or forwarded. No WP clutter accumulates in mailboxes.
+- A **bulletin** WP, or a personal WP routed **via another BBS** (transit traffic), is harvested AND kept + forwarded onward through the normal store/route path.
+
+**Idempotency across forwarding cycles.** A bulletin WP that is kept records a live message row, so the existing network-id dedup rejects an identical re-send at proposal time. A consumed personal WP keeps no message row, so the personal-mail dedup (which keys on a live copy) cannot reject it at proposal time — but the date-wins upsert makes re-ingest a harmless no-op (no duplicate rows, identical data). Idempotency is guaranteed at the data layer regardless.
+
+**Aging.** A housekeeping sweep prunes directory entries whose record date is older than a configurable WP lifetime (`housekeeping.whitePagesDays` in `bbs.yaml`, default **180 days** — long enough to survive seasonal gaps, short enough to drop dead stations; an active station re-freshens its entry each cycle). The sweep runs alongside the existing kill-by-age pass and touches only the `whitepages` table.
+
+**Future scope (NOT built here — flagged, not silent):**
+- **WP → `@home` routing resolution.** The payoff: once we hold a directory, `send AA1AA` (no `@bbs`) can resolve AA1AA's home-BBS from `whitepages.home_bbs` and route accordingly. A follow-up: `RoutingEngine` consults the directory as a fallback when a personal has no AT and the TO isn't a local user.
+- **Routing-trace (R:-line) harvest** — BPQ also infers a station's home-BBS from the first R: line of any inbound message (`source='rline'`, type `G`). Cheap passive enrichment; the `source` column reserves the seam.
+- **WP emission** (announcing our homed users outbound — design.md home-BBS requirement rule #3) is tracked separately in **#47**. The emit format is symmetric to the parse above.
 
 ## Configuration shape (the end state)
 

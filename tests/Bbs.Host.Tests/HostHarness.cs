@@ -43,7 +43,8 @@ internal sealed class HostHarness : IAsyncDisposable
         Engine = new RoutingEngine(OwnCall, HRoute);
         Routing = new RoutingService(Store, Engine, NullLogger<RoutingService>.Instance);
         SevenPlus = new SevenPlusAssembler(Store, NullLogger<SevenPlusAssembler>.Instance);
-        Receiver = new InboundMessageReceiver(Store, Routing, Engine, SevenPlus, OwnCall, Time, NullLogger<InboundMessageReceiver>.Instance);
+        WhitePages = new WhitePagesConsumer(Store, NullLogger<WhitePagesConsumer>.Instance);
+        Receiver = new InboundMessageReceiver(Store, Routing, Engine, SevenPlus, WhitePages, OwnCall, Time, NullLogger<InboundMessageReceiver>.Instance);
         Runner = new FbbSessionRunner(Store, Receiver, Identity, Version, Time, runnerLogger ?? NullLogger<FbbSessionRunner>.Instance);
         Link = new RhpNodeLink(
             new RhpLinkOptions
@@ -93,6 +94,8 @@ internal sealed class HostHarness : IAsyncDisposable
     public RoutingService Routing { get; }
 
     public SevenPlusAssembler SevenPlus { get; }
+
+    public WhitePagesConsumer WhitePages { get; }
 
     public InboundMessageReceiver Receiver { get; }
 

@@ -36,8 +36,9 @@ internal sealed class InteropBbsHost : IDisposable
         var engine = new RoutingEngine(OwnCall, HRoute);
         Routing = new RoutingService(Store, engine, NullLogger<RoutingService>.Instance);
         var sevenPlus = new SevenPlusAssembler(Store, NullLogger<SevenPlusAssembler>.Instance);
+        var whitePages = new WhitePagesConsumer(Store, NullLogger<WhitePagesConsumer>.Instance);
         Receiver = new InboundMessageReceiver(
-            Store, Routing, engine, sevenPlus, OwnCall, TimeProvider.System, NullLogger<InboundMessageReceiver>.Instance);
+            Store, Routing, engine, sevenPlus, whitePages, OwnCall, TimeProvider.System, NullLogger<InboundMessageReceiver>.Instance);
         Runner = new Ax25FbbSessionRunner(Store, Receiver, Identity, Version, TimeProvider.System);
     }
 

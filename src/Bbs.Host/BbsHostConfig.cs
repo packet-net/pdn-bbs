@@ -327,6 +327,12 @@ public sealed record HousekeepingConfig
     /// <summary>BID dedup-record lifetime, days; null → built-in default (60).</summary>
     public int? BidLifetimeDays { get; init; }
 
+    /// <summary>
+    /// White Pages directory-entry lifetime, days; null → built-in default (180). A directory entry
+    /// whose record date is older than this is pruned by the housekeeping sweep (issue #36).
+    /// </summary>
+    public int? WhitePagesDays { get; init; }
+
     /// <summary>Grace between kill and physical delete, days; null → built-in default (0 = next run).</summary>
     public int? KilledPurgeGraceDays { get; init; }
 
@@ -357,6 +363,7 @@ public sealed record HousekeepingConfig
             NtsForwardedDays = NonNegativeOr(NtsForwardedDays, defaults.NtsForwardedDays),
             NtsUnforwardedDays = NonNegativeOr(NtsUnforwardedDays, defaults.NtsUnforwardedDays),
             BidLifetimeDays = NonNegativeOr(BidLifetimeDays, defaults.BidLifetimeDays),
+            WhitePagesDays = NonNegativeOr(WhitePagesDays, defaults.WhitePagesDays),
             KilledPurgeGraceDays = NonNegativeOr(KilledPurgeGraceDays, defaults.KilledPurgeGraceDays),
             MaxMsgno = MaxMsgno is { } ceiling && ceiling > 0 ? ceiling : defaults.MaxMsgno,
         };

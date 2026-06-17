@@ -18,6 +18,7 @@ public sealed class InboundMessageReceiver
     private readonly RoutingService _routing;
     private readonly RoutingEngine _engine;
     private readonly SevenPlusAssembler _sevenPlus;
+    private readonly WhitePagesConsumer _whitePages;
     private readonly string _ownBaseCall;
     private readonly TimeProvider _time;
     private readonly ILogger _logger;
@@ -31,6 +32,7 @@ public sealed class InboundMessageReceiver
         RoutingService routing,
         RoutingEngine engine,
         SevenPlusAssembler sevenPlus,
+        WhitePagesConsumer whitePages,
         string ownCallsign,
         TimeProvider time,
         ILogger<InboundMessageReceiver> logger)
@@ -39,6 +41,7 @@ public sealed class InboundMessageReceiver
         ArgumentNullException.ThrowIfNull(routing);
         ArgumentNullException.ThrowIfNull(engine);
         ArgumentNullException.ThrowIfNull(sevenPlus);
+        ArgumentNullException.ThrowIfNull(whitePages);
         ArgumentException.ThrowIfNullOrWhiteSpace(ownCallsign);
         ArgumentNullException.ThrowIfNull(time);
         ArgumentNullException.ThrowIfNull(logger);
@@ -46,6 +49,7 @@ public sealed class InboundMessageReceiver
         _routing = routing;
         _engine = engine;
         _sevenPlus = sevenPlus;
+        _whitePages = whitePages;
         _ownBaseCall = Callsigns.StripSsid(Callsigns.Normalize(ownCallsign));
         _time = time;
         _logger = logger;
@@ -162,9 +166,18 @@ public sealed class InboundMessageReceiver
         return null;
     }
 
-    private Message DeliverFa(FaProposal fa, FbbMessageDelivered delivered, string fromPartnerCall)
+    private Message? DeliverFa(FaProposal fa, FbbMessageDelivered delivered, string fromPartnerCall)
     {
         MessageType type = MessageTypeExtensions.MessageTypeFromCode(fa.MessageType);
+
+        // White Pages recognition + consume (issue #36) — runs BEFORE StoreAndRoute (and, when #37
+        // lands, before its content-filter lenses): a WP update is infrastructure, not user/bulletin
+        // content. A B1 (FA) WP body is the verbatim decoded text.
+        if (TryConsumeWhitePages(type, fa.To, fa.AtBbs, fa.Bid, delivered.Body, fromPartnerCall))
+        {
+            return null; // personal WP addressed to us — consumed, not stored (BPQ status='K')
+        }
+
         Message stored = StoreAndRoute(
             type, fa.From, [fa.To], fa.AtBbs, fa.Bid, delivered.Title, delivered.Body, fromPartnerCall,
             ccRecipients: [], attachments: []);
@@ -207,9 +220,22 @@ public sealed class InboundMessageReceiver
             return null;
         }
 
+        MessageType type = b2.Type switch
+        {
+            B2MessageType.Bulletin => MessageType.Bulletin,
+            _ => MessageType.Personal, // BPQ stores all B2 arrivals as P; we keep B → Bulletin, rest → Personal
+        };
+
         // The primary recipient (first To:) drives At/routing/auto-create; the rest are stored
         // alongside (F-1 per-home fan-out deferred — see the method summary).
         (string primaryTo, string? primaryAt) = SplitToAt(b2.To.Count > 0 ? b2.To[0] : "");
+
+        // White Pages recognition + consume (issue #36) — the B2 records live in the decoded body.
+        if (TryConsumeWhitePages(type, primaryTo, primaryAt ?? "", b2.Mid, b2.Body, fromPartnerCall))
+        {
+            return null; // personal WP addressed to us — consumed, not stored
+        }
+
         var toRecipients = new List<string>(b2.To.Count == 0 ? 1 : b2.To.Count) { primaryTo };
         for (int i = 1; i < b2.To.Count; i++)
         {
@@ -227,12 +253,6 @@ public sealed class InboundMessageReceiver
         {
             attachments.Add(new MessageAttachment(file.Name, file.Content));
         }
-
-        MessageType type = b2.Type switch
-        {
-            B2MessageType.Bulletin => MessageType.Bulletin,
-            _ => MessageType.Personal, // BPQ stores all B2 arrivals as P; we keep B → Bulletin, rest → Personal
-        };
 
         Message stored = StoreAndRoute(
             type,
@@ -356,6 +376,70 @@ public sealed class InboundMessageReceiver
         }
     }
 
+    /// <summary>
+    /// White Pages recognition + consume + disposition (issue #36). Returns true when the message was
+    /// fully CONSUMED here (so the caller skips <c>StoreAndRoute</c>); false when it should fall
+    /// through to normal mail storage — either because it is not a WP update, or because it is transit
+    /// WP that must still be kept + forwarded onward (its records are harvested either way).
+    ///
+    /// <para><b>Recognition</b> (the discriminator): the primary recipient's base callsign equals the
+    /// reserved pseudo-call <c>WP</c> (<see cref="WhitePagesParser.IsDirectoryRecipient(string?)"/>),
+    /// AND — belt-and-braces — the body holds at least one parseable <c>On …</c> record. A genuine
+    /// human message to a station literally called "WP" has no records → false → stored as normal mail
+    /// (never silently eaten). Recognition keys on the RECIPIENT only, never the subject.</para>
+    ///
+    /// <para><b>Disposition</b> (BPQ <c>BBSUtilities.c</c>): a PERSONAL WP addressed to us is CONSUMED
+    /// — harvested, its BID recorded for dedup (when it has one), and NOT stored/forwarded. "Addressed
+    /// to us" means the AT resolves to us (our call / under our HA) OR there is NO explicit AT: a bare
+    /// <c>To: WP</c> is the most common real shape — BPQ forwards a directory update to a
+    /// directly-connected partner with the AT IMPLIED to be the receiving station (its "already here"
+    /// implied-AT), so an empty AT means us, not transit. A BULLETIN WP, or a personal WP carrying an
+    /// EXPLICIT REMOTE AT (routed via another BBS — genuine transit), is harvested AND kept + forwarded
+    /// onward (return false → the normal store/route path runs); without this, a bare-WP personal would
+    /// be stored + forwarded as mail to the pseudo-call "WP", the very clutter consume exists to avoid.
+    /// Idempotency: a kept bulletin WP records a live message row so proposal-time dedup rejects a
+    /// re-send; a consumed personal keeps no row, but the date-wins directory upsert makes re-ingest a
+    /// harmless no-op regardless.</para>
+    /// </summary>
+    private bool TryConsumeWhitePages(
+        MessageType type, string to, string atBbs, string bid, ReadOnlyMemory<byte> body, string fromPartnerCall)
+    {
+        if (!WhitePagesParser.IsDirectoryRecipient(to))
+        {
+            return false; // not addressed to the directory
+        }
+
+        string text = Encoding.Latin1.GetString(body.Span);
+        int parsed = _whitePages.Ingest(text);
+        if (parsed == 0)
+        {
+            // Addressed to "WP" but no parseable records — the false-positive guard. Fall through to
+            // normal mail storage rather than silently consuming a genuine message.
+            return false;
+        }
+
+        // Disposition: consume a personal WP addressed to us (AT-is-us OR the implied-AT empty-AT case);
+        // keep + forward a bulletin WP or a personal WP with an explicit remote AT (genuine transit).
+        bool addressedToUs = string.IsNullOrWhiteSpace(atBbs) || _engine.AtResolvesToLocal(atBbs);
+        bool consumeToUs = type == MessageType.Personal && addressedToUs;
+        if (!consumeToUs)
+        {
+            LogWhitePagesTransit(_logger, bid, fromPartnerCall, parsed, null);
+            return false; // harvested, but still store + route onward
+        }
+
+        // Consume: record the BID so a re-send is deduped even though we keep no message row. A WP can
+        // arrive without a BID — RecordBid throws on an empty BID, so guard it (the normal store path
+        // tolerates an empty BID; the consume path must too).
+        if (!string.IsNullOrWhiteSpace(bid))
+        {
+            _store.RecordBid(bid, fromPartnerCall);
+        }
+
+        LogWhitePagesConsumed(_logger, bid, fromPartnerCall, parsed, null);
+        return true;
+    }
+
     /// <summary>The §3.14 R:-chain checks: own-call loop, future-dated/expired/corrupt oldest hop.</summary>
     private string? CheckRChain(ReadOnlyMemory<byte> body)
     {
@@ -412,4 +496,12 @@ public sealed class InboundMessageReceiver
     private static readonly Action<ILogger, string, string, Exception?> LogAutoCreatedUser =
         LoggerMessage.Define<string, string>(LogLevel.Information, new EventId(7, "AutoCreatedUser"),
             "Auto-created skeletal user {Call} on first inbound personal homed here (BID {Bid})");
+
+    private static readonly Action<ILogger, string, string, int, Exception?> LogWhitePagesConsumed =
+        LoggerMessage.Define<string, string, int>(LogLevel.Information, new EventId(9, "WhitePagesConsumed"),
+            "Consumed White Pages update {Bid} from {Partner} ({Records} records) — not stored");
+
+    private static readonly Action<ILogger, string, string, int, Exception?> LogWhitePagesTransit =
+        LoggerMessage.Define<string, string, int>(LogLevel.Information, new EventId(10, "WhitePagesTransit"),
+            "Harvested transit White Pages update {Bid} from {Partner} ({Records} records) — kept + forwarded");
 }
