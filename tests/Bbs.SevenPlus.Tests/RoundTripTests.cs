@@ -85,7 +85,7 @@ public class RoundTripTests
     [Fact]
     public void Encode_ZeroLength_Throws()
     {
-        Assert.Throws<ArgumentException>(() => SevenPlusEncoder.Encode([], "empty.bin"));
+        Assert.Throws<ArgumentException>(() => SevenPlusEncoder.Encode(Array.Empty<byte>(), "empty.bin"));
     }
 
     [Theory]
