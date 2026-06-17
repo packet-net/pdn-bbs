@@ -434,7 +434,7 @@ public static class Webmail
         // Personal placeholders are scoped to this user's incoming files only (never leak another
         // user's private incoming-file name into this inbox).
         string placeholders = SevenPlusPlaceholders(o.Store, MessageType.Personal, call);
-        string rows = MessageRows(mine, page, o.PageSize, call, prefix, "/inbox", embed);
+        string rows = MessageRows(mine, page, o.PageSize, call, prefix, "/inbox", embed, emptyLabel: "Your inbox is empty.");
         return Html(Page(o, prefix, call, "Inbox", embed,
             $"""
             <h2>Inbox — personal messages for {H(call)}</h2>
@@ -515,10 +515,14 @@ public static class Webmail
             ? (int)Math.Ceiling((release - o.Store.Now).TotalSeconds)
             : 0;
 
-        // No longer pending (released, cancelled, or unknown) → just the plain confirmation.
+        // No longer pending (released, cancelled, or unknown) → just the plain confirmation. Echo the
+        // subject (#49) so the sender sees WHAT went, not just that something did; a killed/unknown
+        // message has no subject to show, so fall back to the bare line.
         if (remaining <= 0)
         {
-            return """<p class="saved">Message sent.</p>""";
+            return message?.Subject is { Length: > 0 } sentSubject
+                ? Inv($"""<p class="saved">Message sent: {H(sentSubject)}</p>""")
+                : """<p class="saved">Message sent.</p>""";
         }
 
         string boxId = Inv($"undo-{number}");
@@ -540,7 +544,7 @@ public static class Webmail
         // iframe this anchors to the top of the BBS panel (all a same-origin embedded page can reach).
         return Inv($"""
             <div class="undo-toast" id="{boxId}" role="status">
-              <span>Message sent</span>
+              <span>Message sent: {H(message?.Subject ?? "")}</span>
               <form method="post" action="{action}">{EmbedField(embed)}<button type="submit" class="undo-btn">Undo</button></form>
               <span class="undo-count">(<span id="{countId}" data-remaining="{remaining}">{remaining}</span>s)</span>
             </div>
@@ -598,7 +602,7 @@ public static class Webmail
         IReadOnlyList<Message> bulls = HideSevenPlusParts(o.Store, o.Store.ListMessages(new MessageQuery { Type = MessageType.Bulletin }));
         // Bulletins are world-visible, so the bulletin placeholders are not recipient-scoped.
         string placeholders = SevenPlusPlaceholders(o.Store, MessageType.Bulletin, recipientCall: null);
-        string rows = MessageRows(bulls, page, o.PageSize, call, prefix, "/bulletins", embed);
+        string rows = MessageRows(bulls, page, o.PageSize, call, prefix, "/bulletins", embed, emptyLabel: "No bulletins yet.");
         return Html(Page(o, prefix, call, "Bulletins", embed,
             $"""
             <h2>Bulletins</h2>
@@ -1770,13 +1774,15 @@ public static class Webmail
         _ => status.ToString(),
     };
 
-    private static string MessageRows(IReadOnlyList<Message> messages, int page, int pageSize, string call, string prefix, string basePath, bool embed)
+    private static string MessageRows(IReadOnlyList<Message> messages, int page, int pageSize, string call, string prefix, string basePath, bool embed, string emptyLabel = "No messages.")
     {
         page = Math.Max(1, page);
         var slice = messages.Skip((page - 1) * pageSize).Take(pageSize).ToList();
         if (slice.Count == 0 && page == 1)
         {
-            return "<p>No messages.</p>";
+            // A caller-supplied, tab-specific empty-state (this helper serves both Inbox and Bulletins),
+            // styled dim for visual parity with the other quiet notes (#49 polish).
+            return Inv($"""<p class="dim">{H(emptyLabel)}</p>""");
         }
 
         var sb = new StringBuilder();
@@ -1792,7 +1798,7 @@ public static class Webmail
             string subject = Inv($"""<a href="{U(prefix, Inv($"/messages/{m.Number}"), embed)}">{H(m.Subject.Length == 0 ? "(no subject)" : m.Subject)}</a>""");
             sb.Append(Inv($"<tr{(unreadByMe ? " class=\"unread\"" : "")}><td>{m.Number}</td>"))
               .Append(Inv($"<td class=\"read-col\">{readDot}</td><td>{H(m.From)}</td>"))
-              .Append(Inv($"<td>{H(string.Join(";", m.Recipients.Where(r => !r.Cc).Select(r => r.ToCall)))}{(m.At is null ? "" : "@" + H(m.At))}</td>"))
+              .Append(Inv($"<td>{H(string.Join("; ", m.Recipients.Where(r => !r.Cc).Select(r => r.ToCall)))}{(m.At is null ? "" : " @ " + H(m.At))}</td>"))
               .Append(Inv($"<td class=\"nowrap\">{H(m.CreatedAt.ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture))}</td><td>{subject}</td></tr>"));
         }
 
@@ -1822,15 +1828,15 @@ public static class Webmail
         var slice = messages.Skip((page - 1) * pageSize).Take(pageSize).ToList();
         if (slice.Count == 0 && page == 1)
         {
-            return "<p>Nothing sent yet.</p>";
+            return """<p class="dim">Nothing sent yet.</p>""";
         }
 
         var sb = new StringBuilder();
         sb.Append("<table><tr><th>#</th><th>To</th><th>Date (UTC)</th><th>Subject</th><th>Status</th></tr>");
         foreach (Message m in slice)
         {
-            string to = H(string.Join(";", m.Recipients.Where(r => !r.Cc).Select(r => r.ToCall)))
-                + (m.At is null ? "" : "@" + H(m.At));
+            string to = H(string.Join("; ", m.Recipients.Where(r => !r.Cc).Select(r => r.ToCall)))
+                + (m.At is null ? "" : " @ " + H(m.At));
             string subject = Inv($"""<a href="{U(prefix, Inv($"/messages/{m.Number}?from=sent"), embed)}">{H(m.Subject.Length == 0 ? "(no subject)" : m.Subject)}</a>""");
             sb.Append(Inv($"<tr><td>{m.Number}</td><td>{to}</td>"))
               .Append(Inv($"<td class=\"nowrap\">{H(m.CreatedAt.ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture))}</td>"))

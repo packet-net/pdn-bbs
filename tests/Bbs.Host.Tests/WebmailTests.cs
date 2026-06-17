@@ -1977,6 +1977,126 @@ public sealed class WebmailTests : IAsyncDisposable
         Assert.DoesNotContain("de M0LTE", page, StringComparison.Ordinal);
     }
 
+    // ------------------------------------------------ #49 webmail polish: sent-subject echo, empty-states, trace escaping
+
+    [Fact]
+    public async Task SentBanner_Pending_EchoesTheSubject_NotJustMessageSent()
+    {
+        // The undo toast now names WHAT was sent so the sender gets a real confirmation, not a bare line.
+        ClaimCallsign("tom", "M0LTE");
+        Message m = _store.AddMessage(new MessageDraft
+        {
+            Type = MessageType.Personal,
+            From = "M0LTE",
+            Recipients = ["G8ABC"],
+            Subject = "Antenna party Saturday",
+            Body = Encoding.Latin1.GetBytes("x\r"),
+        });
+        _store.DeferSend(m.Number, windowSeconds: 5);
+
+        using HttpClient client = await StartAsync();
+        string home = await client.GetStringAsync(new Uri($"/?sent={m.Number}", UriKind.Relative));
+
+        Assert.Contains("Message sent: Antenna party Saturday", home, StringComparison.Ordinal);
+        Assert.Contains(">Undo</button>", home, StringComparison.Ordinal); // still the pending toast
+    }
+
+    [Fact]
+    public async Task SentBanner_Released_EchoesTheSubject()
+    {
+        // A message past its window (no SendReleaseUtc → released path) confirms with the subject too.
+        ClaimCallsign("tom", "M0LTE");
+        Message m = _store.AddMessage(new MessageDraft
+        {
+            Type = MessageType.Personal,
+            From = "M0LTE",
+            Recipients = ["G8ABC"],
+            Subject = "Net tonight",
+            Body = Encoding.Latin1.GetBytes("x\r"),
+        });
+
+        using HttpClient client = await StartAsync();
+        string home = await client.GetStringAsync(new Uri($"/?sent={m.Number}", UriKind.Relative));
+
+        Assert.Contains("Message sent: Net tonight", home, StringComparison.Ordinal);
+        Assert.DoesNotContain(">Undo</button>", home, StringComparison.Ordinal); // not pending
+    }
+
+    [Fact]
+    public async Task SentBanner_SubjectIsHtmlEscaped()
+    {
+        // The subject is user-controlled; the echo must escape it (no markup injection in the toast).
+        ClaimCallsign("tom", "M0LTE");
+        Message m = _store.AddMessage(new MessageDraft
+        {
+            Type = MessageType.Personal,
+            From = "M0LTE",
+            Recipients = ["G8ABC"],
+            Subject = "<b>boom</b>",
+            Body = Encoding.Latin1.GetBytes("x\r"),
+        });
+
+        using HttpClient client = await StartAsync();
+        string home = await client.GetStringAsync(new Uri($"/?sent={m.Number}", UriKind.Relative));
+
+        Assert.Contains("Message sent: &lt;b&gt;boom&lt;/b&gt;", home, StringComparison.Ordinal);
+        Assert.DoesNotContain("<b>boom</b>", home, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task EmptyInbox_ShowsADistinctDimEmptyState()
+    {
+        ClaimCallsign("tom", "M0LTE");
+        using HttpClient client = await StartAsync();
+
+        string inbox = await client.GetStringAsync(new Uri("/inbox", UriKind.Relative));
+        Assert.Contains("<p class=\"dim\">Your inbox is empty.</p>", inbox, StringComparison.Ordinal);
+        Assert.DoesNotContain("<p>No messages.</p>", inbox, StringComparison.Ordinal); // no bare generic line
+    }
+
+    [Fact]
+    public async Task EmptyBulletins_ShowsADistinctDimEmptyState()
+    {
+        // The Inbox and Bulletins share MessageRows; each gets its own labelled empty-state.
+        ClaimCallsign("tom", "M0LTE");
+        using HttpClient client = await StartAsync();
+
+        string bulletins = await client.GetStringAsync(new Uri("/bulletins", UriKind.Relative));
+        Assert.Contains("<p class=\"dim\">No bulletins yet.</p>", bulletins, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task EmptySent_ShowsADimEmptyState()
+    {
+        ClaimCallsign("tom", "M0LTE");
+        using HttpClient client = await StartAsync();
+
+        string sent = await client.GetStringAsync(new Uri("/sent", UriKind.Relative));
+        Assert.Contains("<p class=\"dim\">Nothing sent yet.</p>", sent, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ReadMessage_TraceHops_AreHtmlEscaped_PeerControlledRoutingData()
+    {
+        // The R: routing trace arrives over RF from remote BBSes (peer-controlled). A hop token carrying
+        // markup must render escaped — locks the RF trust boundary in the friendly "Relayed:" summary.
+        ClaimCallsign("tom", "M0LTE");
+        byte[] body = Encoding.Latin1.GetBytes(
+            "R:260614/1246Z 1207@<script>.GBR.EURO LinBPQ6.0.25\r" +
+            "\r" +
+            "Body text.\r");
+        Message stored = _store.AddMessage(new MessageDraft
+        {
+            Type = MessageType.Bulletin, From = "G8ABC", Recipients = ["PACKET"], Subject = "traced", Body = body,
+        });
+        using HttpClient client = await StartAsync();
+
+        string page = await client.GetStringAsync(new Uri($"/messages/{stored.Number}", UriKind.Relative));
+        Assert.Contains("Body text.", page, StringComparison.Ordinal);
+        Assert.DoesNotContain("<script>", page, StringComparison.Ordinal);   // never raw markup from the trace
+        Assert.Contains("&lt;script&gt;", page, StringComparison.Ordinal);   // escaped instead
+    }
+
     // ------------------------------------------------ forwarding view (sysop, read-only)
     // A sysop-only, read-only picture of how mail leaves this BBS: one panel per configured partner
     // with its dial config, the LIVE forward-queue depth, and the routing rules translated out of FBB
