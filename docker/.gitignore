@@ -1,2 +1,5 @@
 # LinBPQ writes its runtime state here (root-owned, wiped by smoke.sh).
 oracle/state/
+
+# LinFBB (F6FBB) oracle writes its var tree (message store, logs) here.
+f6fbb/state/

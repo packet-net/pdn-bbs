@@ -1,0 +1,20 @@
+; init.srv — LinFBB (F6FBB) server identity for the pdn-bbs interop oracle.
+;
+; ⚠ VALIDATE-IN-CI: the exact init.srv directive set varies between LinFBB
+; builds. This file seeds the identity the interop tests assume; after the
+; first CI run, reconcile it against the `make installconf` default that ships
+; with the pinned SVN revision (docker/f6fbb/README.md has the loop).
+;
+; The oracle BBS callsign + hierarchical address the tests expect:
+;   F6FBB  with HA  F6FBB.FFPC.FRA.EU   (matches the transcript-suite dialect)
+;
+BBS  F6FBB
+SYSOP F6FBB
+HID  F6FBB.FFPC.FRA.EU
+QRA  La Rochelle
+; Home BBS hierarchical address components (continent/country/region used in R: lines).
+TZ   0
+; Mail/data and config trees (must match the Dockerfile PREFIX and the fixture MailDir).
+PATH /opt/fbb/var/ax25/fbb
+; Accept compressed (B1/FBB) forwarding — the whole point of the interop lane.
+COMP 1

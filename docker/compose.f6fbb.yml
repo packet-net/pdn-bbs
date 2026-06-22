@@ -1,0 +1,61 @@
+# LinFBB (F6FBB) oracle for pdn-bbs's F6FBB interop lane.
+#
+# Stands up Jean-Paul Roubelat F6FBB's own BBS software (LinFBB, built from SVN —
+# there is no maintained image) configured to forward over TCP/telnet, the
+# transport chosen for this lane. The oracle BBS is reachable as:
+#
+#   - TCP/telnet FBB forward+login on host 127.0.0.1:8311 (port.sys interface 9
+#     type T). The outbound interop test dials this and forwards a message that
+#     must land in F6FBB's on-disk store (asserted via docker exec).
+#
+# Patterned on docker/compose.oracle.yml (the LinBPQ oracle): distinct project
+# name / container name / subnet / host ports so this stack can run ALONGSIDE the
+# LinBPQ one. /data-equivalent (the FBB var tree) is a HOST BIND MOUNT
+# (f6fbb/state/, gitignored) so the tests can assert on the message store.
+#
+# ⚠ VALIDATE-IN-CI: this builds and configures real LinFBB but could not be run
+# in the authoring environment (no docker daemon). The Dockerfile/config will
+# likely need a CI round-trip to finalise — see docker/f6fbb/README.md.
+
+name: pdnbbs-f6fbb
+
+services:
+
+  f6fbb:
+    build:
+      context: ./f6fbb
+      # Pin a revision for reproducibility once the build is proven in CI:
+      # args: { SOURCE_REV: "618" }
+    container_name: pdnbbs-f6fbb
+    restart: unless-stopped
+    environment:
+      # Where the pdn-bbs FbbTcpListener is, as seen from this container, for the
+      # inbound-direction lane (the oracle dials us). host-gateway is mapped below.
+      FBB_FWD_TARGET: "host.docker.internal 8312"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      # Host-inspectable FBB var tree (message store, logs). Gitignored.
+      - ./f6fbb/state:/opt/fbb/var/ax25/fbb
+    ports:
+      - "127.0.0.1:8311:6300"   # TCP/telnet FBB forward + login
+    healthcheck:
+      # debian images ship bash; probe the forward port with bash's /dev/tcp
+      # builtin (same style as the LinBPQ oracle's HTTP probe).
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/6300 && exec 3<&-"]
+      interval: 5s
+      timeout: 3s
+      retries: 24
+      start_period: 60s
+    networks:
+      f6fbbnet:
+        ipv4_address: 172.32.0.10
+
+networks:
+  f6fbbnet:
+    driver: bridge
+    ipam:
+      config:
+        # 172.30.0.0/24 = packet.net interop, 172.31.0.0/24 = LinBPQ oracle —
+        # this stack takes 172.32.0.0/24 so all three coexist on one box.
+        - subnet: 172.32.0.0/24

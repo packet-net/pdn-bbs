@@ -1,0 +1,10 @@
+# passwd.sys — LinFBB (F6FBB) forwarding passwords for the pdn-bbs interop oracle.
+#
+# ⚠ VALIDATE-IN-CI: the password-file format/role differs between FBB builds
+# (some use a per-partner line "CALL password", others a numbered challenge
+# table). Reconcile against the installconf default after the first CI run
+# (docker/f6fbb/README.md). The value below MUST equal F6fbbOracleFixture
+# .PartnerPassword so the outbound login dialogue authenticates.
+#
+# <partner-callsign> <forwarding-password>
+PDNBBS PDNBBSFWD

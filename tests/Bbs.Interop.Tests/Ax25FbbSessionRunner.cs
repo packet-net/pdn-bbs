@@ -29,7 +29,8 @@ internal sealed record InteropFbbResult(
     IReadOnlyList<Proposal> InboundProposals);
 
 /// <summary>
-/// Drives a sans-IO <see cref="FbbSession"/> over an <see cref="Ax25ByteSession"/>, both
+/// Drives a sans-IO <see cref="FbbSession"/> over any <see cref="IByteLink"/> bearer (AX.25 via
+/// net-sim for the LinBPQ oracle, or raw TCP/telnet for the LinFBB / F6FBB oracle), both
 /// roles. This is a transcription of the W5 runner
 /// (src/Bbs.Host/Forwarding/FbbSessionRunner.cs) — that runner is RHP-child-shaped (it
 /// takes the sealed RhpChildConnection), so the interop lane carries the same action pump
@@ -70,7 +71,7 @@ internal sealed class Ax25FbbSessionRunner
     /// a LinBPQ caller waits for OUR SID before it sends anything (the W5 handoff note).
     /// A configured partner contributes its queue for reverse forwarding (spec §3.11).
     /// </summary>
-    public Task<InteropFbbResult> RunAnswererAsync(Ax25ByteSession link, CancellationToken cancellationToken)
+    public Task<InteropFbbResult> RunAnswererAsync(IByteLink link, CancellationToken cancellationToken)
     {
         string partnerCall = Callsigns.Normalize(link.RemoteCallsign);
         Partner? partner = _store.GetPartner(partnerCall);
@@ -84,7 +85,7 @@ internal sealed class Ax25FbbSessionRunner
 
     /// <summary>Runs the caller side of an outbound forwarding cycle.</summary>
     public Task<InteropFbbResult> RunCallerAsync(
-        Ax25ByteSession link,
+        IByteLink link,
         Partner partner,
         IReadOnlyList<OutboundItem> outbound,
         CancellationToken cancellationToken) =>
@@ -92,7 +93,7 @@ internal sealed class Ax25FbbSessionRunner
 
     private async Task<InteropFbbResult> RunAsync(
         FbbRole role,
-        Ax25ByteSession link,
+        IByteLink link,
         Partner? partner,
         string partnerCall,
         IReadOnlyList<OutboundItem> outbound,
@@ -164,7 +165,7 @@ internal sealed class Ax25FbbSessionRunner
     private async Task ApplyAsync(
         IReadOnlyList<FbbAction> actions,
         FbbSession session,
-        Ax25ByteSession link,
+        IByteLink link,
         RunState state,
         CancellationToken cancellationToken)
     {

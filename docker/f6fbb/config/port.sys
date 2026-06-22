@@ -1,0 +1,23 @@
+# port.sys — LinFBB (F6FBB) port table for the pdn-bbs interop oracle.
+#
+# ⚠ VALIDATE-IN-CI: port.sys is column-oriented and its exact layout varies by
+# LinFBB build. This defines a SINGLE Linux TCP/telnet port (interface 9, host
+# mode type T — "Ethernet/TCP-IP/Telnet" on Linux). After the first CI run,
+# reconcile the column order against the installconf default for the pinned
+# revision (docker/f6fbb/README.md). The interop lane uses ONLY this TCP port —
+# no TNC / AX.25 RF port (F6FBB's RF path needs the kernel AX.25 stack, which we
+# deliberately avoid; the user chose TCP/telnet transport).
+#
+# Number of COM ports / interfaces:
+1
+#
+# Per-port columns (interface 9 = Linux):
+#  Com  Interface  TNC  NbCh  MxBloc  MaxFrame  NbFwd  M/P-Fwd  Mode/Type   Comment
+#  The TYPE flags field includes:
+#    B = BBS mode, U = user mode, T = TCP/IP-telnet host mode, W = gateway,
+#    Y = YAPP. "TB" = a telnet port that also answers BBS/forward sessions.
+#  The telnet listening port (6300) is given in the port's address/parameter
+#  slot; xfbbd binds it on all interfaces inside the container.
+#
+# Com Itf TNC NbCh MxB  MxFr NbFwd MP    Flags  Port
+  1   9   1   8    250  1    4     40/59 TBU    6300

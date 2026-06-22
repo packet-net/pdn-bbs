@@ -1,0 +1,28 @@
+# forward.sys — LinFBB (F6FBB) forwarding table for the pdn-bbs interop oracle.
+#
+# ⚠ VALIDATE-IN-CI: reconcile against the installconf default for the pinned
+# revision after the first CI run (docker/f6fbb/README.md).
+#
+# One partner: PDNBBS (our BBS), reachable over TCP/telnet. The connect script
+# uses the documented LinFBB telnet-forward syntax:
+#
+#     C C <callsign> <ip-address> [port]
+#
+# where the ip-address is the host the pdn-bbs FbbTcpListener is bound on as seen
+# from this container (the docker bridge gateway / host.docker.internal) and the
+# port is its listener port. This entry is what makes the oracle DIAL US for the
+# inbound-direction lane; the outbound-direction test dials the oracle's own TCP
+# port (port.sys above) and needs no entry here.
+#
+# Header: forward block (start hour, interval) — every hour here.
+#
+PDNBBS
+# Hierarchical address of the partner (used to route bulletins/personals to it).
+PDNBBS.#23.GBR.EURO
+# Connect script: telnet to the pdn-bbs listener. PDNBBS_FWD_TARGET is rewritten
+# by the entrypoint from the FBB_FWD_TARGET env (default host.docker.internal 8312).
+C C PDNBBS PDNBBS_FWD_TARGET
+# Message-type / area selectors for what to forward to this partner (T = all).
+T
+# End of partner block.
+*

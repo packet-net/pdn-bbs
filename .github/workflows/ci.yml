@@ -35,7 +35,9 @@ jobs:
       - name: Build (Release)
         run: dotnet build -c Release
       - name: Test
-        run: dotnet test -c Release --no-build --filter "Category!=Interop"
+        # Both oracle lanes are excluded here (each has its own stack-bearing job):
+        # LinBPQ = Category=Interop, LinFBB/F6FBB = Category=InteropF6fbb.
+        run: dotnet test -c Release --no-build --filter "Category!=Interop&Category!=InteropF6fbb"
 
       # Version is the single source of truth in pdn-app.yaml (`version:`) — the same field the .deb
       # stamps and pdn shows in its UI. Bump it in the PR you want released; merge → release. Don't
@@ -117,6 +119,49 @@ jobs:
           docker run --rm --entrypoint /bin/sh \
             -v "$PWD/docker/oracle/state:/data" \
             m0lte/linbpq@sha256:872343ffb76a52316b1ae42a42d3c0893f545ccd577301ebc7c4455b292a8025 \
+            -c 'rm -rf /data/* /data/.[!.]* /data/..?* 2>/dev/null; true' || true
+
+  interop-f6fbb:
+    # The F6FBB lane: real forwarding against a live LinFBB (F6FBB's own BBS, built
+    # from SVN) over TCP/telnet (docker/compose.f6fbb.yml, docker/f6fbb/README.md).
+    # NOT a release gate (see the release job's `needs:`) — it is a newly added lane
+    # whose oracle build/config still needs to be proven in CI; keep it green, then
+    # promote it into the release gate.
+    runs-on: [self-hosted, Linux, X64]
+    concurrency:
+      group: pdnbbs-f6fbb-stack
+      cancel-in-progress: false
+    steps:
+      - name: Pre-checkout — clear container-owned f6fbb state (self-heal interrupted runs)
+        run: |
+          state="$GITHUB_WORKSPACE/docker/f6fbb/state"
+          if [ -d "$state" ]; then
+            docker run --rm --entrypoint /bin/sh -v "$state:/data" debian:bookworm-slim \
+              -c 'rm -rf /data/* /data/.[!.]* /data/..?* 2>/dev/null; true' || true
+          fi
+      - uses: actions/checkout@v4
+      - name: F6FBB clean slate (down -v + state wipe)
+        run: |
+          docker compose -f docker/compose.f6fbb.yml down -v --remove-orphans || true
+          mkdir -p docker/f6fbb/state
+          docker run --rm --entrypoint /bin/sh -v "$PWD/docker/f6fbb/state:/data" debian:bookworm-slim \
+            -c 'rm -rf /data/* /data/.[!.]* /data/..?* 2>/dev/null; true'
+      - name: F6FBB up (build + healthcheck-gated)
+        run: docker compose -f docker/compose.f6fbb.yml up -d --build --wait
+      - name: Build (Release)
+        run: dotnet build -c Release
+      - name: F6FBB interop tests
+        run: dotnet test -c Release --no-build --filter "Category=InteropF6fbb"
+      - name: F6FBB logs on failure
+        if: failure()
+        run: |
+          docker compose -f docker/compose.f6fbb.yml ps || true
+          docker compose -f docker/compose.f6fbb.yml logs --tail 150 || true
+      - name: F6FBB down (down -v + state wipe)
+        if: always()
+        run: |
+          docker compose -f docker/compose.f6fbb.yml down -v --remove-orphans || true
+          docker run --rm --entrypoint /bin/sh -v "$PWD/docker/f6fbb/state:/data" debian:bookworm-slim \
             -c 'rm -rf /data/* /data/.[!.]* /data/..?* 2>/dev/null; true' || true
 
   # Auto-release on a version bump landing on main (the dapps model: version is the single source of

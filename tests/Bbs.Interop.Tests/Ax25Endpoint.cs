@@ -197,7 +197,7 @@ internal sealed class Ax25Endpoint : IAsyncDisposable
 /// <c>CloseAsync</c>, <c>RemoteCallsign</c>) so the FBB session pump is a direct
 /// transcription of FbbSessionRunner.
 /// </summary>
-internal sealed class Ax25ByteSession
+internal sealed class Ax25ByteSession : IByteLink
 {
     private readonly Ax25Endpoint _endpoint;
     private readonly Ax25Session _session;
