@@ -160,7 +160,49 @@ public class F6fbbOutboundCoverageTests
         Assert.Equal(MessageStatus.Forwarded, host.Store.GetMessage(m.Number)!.Status);
     }
 
+    /// <summary>OUT-02: re-forwarding the SAME BID. Real xfbbd remembers the BID (WFBID.SYS) and
+    /// refuses the duplicate on the second cycle; pdn's AlreadyHave verdict must still clear the
+    /// queue cleanly — the '-'/'N' refuse path the happy case never exercises.</summary>
+    [Fact]
+    public async Task DuplicateBid_RefusedByXfbbd_PdnStillClearsQueue()
+    {
+        using var deadline = new CancellationTokenSource(TimeSpan.FromMinutes(2));
+        CancellationToken ct = deadline.Token;
+        using var host = new InteropBbsHost("Q0PDN", "#42.GBR.EURO");
+        var partner = new Partner { Call = "Q0FBB", AtCalls = ["Q0FBB"] };
+        host.Store.UpsertPartner(partner);
+
+        long secs = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+        Message m = host.Store.AddMessage(new MessageDraft
+        {
+            Type = MessageType.Personal, From = "M0LTE", Recipients = ["Q0FBB"], At = "Q0FBB",
+            Bid = string.Create(CultureInfo.InvariantCulture, $"{secs % 100000:D5}_Q0PDN"),
+            Subject = $"dedup {secs}", Body = Encoding.Latin1.GetBytes($"dedup body {secs}\r"),
+        });
+        host.Routing.RouteMessage(m);
+        IReadOnlyList<OutboundItem> outbound = BuildOutbound(host, partner);
+        Assert.Single(outbound);
+
+        // Session 1: fresh BID -> xfbbd accepts + stores; pdn marks Forwarded.
+        (FbbSessionResult r1, List<string> wire1) = await ForwardOnceAsync(host, partner, outbound, ct);
+        Assert.True(r1.Completed && r1.Graceful, "first forward was not clean");
+        Assert.Equal(MessageStatus.Forwarded, host.Store.GetMessage(m.Number)!.Status);
+        Assert.Contains(wire1, l => IsRx(l) && Content(l).StartsWith("FS Y", StringComparison.Ordinal));
+
+        // Session 2: re-propose the SAME OutboundItem (same BID). xfbbd refuses the duplicate;
+        // pdn's AlreadyHave verdict still clears the queue without erroring.
+        (FbbSessionResult r2, List<string> wire2) = await ForwardOnceAsync(host, partner, outbound, ct);
+        string fs2 = wire2.FirstOrDefault(l => IsRx(l) && Content(l).StartsWith("FS", StringComparison.Ordinal)) ?? "(none)";
+        Assert.True(r2.Completed && r2.Graceful, $"dedup session was not clean; second FS = {fs2}");
+        // The duplicate was NOT accepted as a fresh send — xfbbd's second FS is a refusal, not 'Y'.
+        Assert.DoesNotContain(wire2, l => IsRx(l) && Content(l).StartsWith("FS Y", StringComparison.Ordinal));
+        Assert.Empty(host.Store.GetForwardQueue("Q0FBB"));
+        Assert.Equal(MessageStatus.Forwarded, host.Store.GetMessage(m.Number)!.Status);
+    }
+
     private static bool IsTx(string line) => line.StartsWith("TX", StringComparison.Ordinal);
+
+    private static bool IsRx(string line) => line.StartsWith("RX", StringComparison.Ordinal);
 
     // The readable frame content after the "TX/RX [len] " prefix. A real protocol line (FA/FC/F>)
     // is flushed as its own SendAsync, so its content STARTS with the token; LZHUF transfer blocks

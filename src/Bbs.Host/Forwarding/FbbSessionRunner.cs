@@ -178,6 +178,11 @@ public sealed class FbbSessionRunner
         LogNegotiatedOnce(session, state);
         if (initialData is { Length: > 0 })
         {
+            if (_logger.IsEnabled(LogLevel.Debug))
+            {
+                LogWireRx(_logger, partnerCall, Readable(initialData, RxLogCap), null);
+            }
+
             await ApplyAsync(session.Advance(new FbbPeerData(initialData)), session, child, state, cancellationToken)
                 .ConfigureAwait(false);
             LogNegotiatedOnce(session, state);
@@ -204,6 +209,11 @@ public sealed class FbbSessionRunner
             {
                 LogDropped(_logger, partnerCall, null);
                 return new FbbSessionResult(Completed: false, Graceful: false);
+            }
+
+            if (_logger.IsEnabled(LogLevel.Debug))
+            {
+                LogWireRx(_logger, partnerCall, Readable(data, RxLogCap), null);
             }
 
             await ApplyAsync(session.Advance(new FbbPeerData(data)), session, child, state, cancellationToken)
@@ -247,12 +257,14 @@ public sealed class FbbSessionRunner
             {
                 case FbbSendLine line:
                     // "the transport MUST append CRLF" (FbbSendLine contract, spec §3.13.2).
+                    LogWireTx(_logger, state.PartnerCall, line.Line, null);
                     await SendToleratingCloseAsync(
                         child, session, state, Encoding.Latin1.GetBytes(line.Line + "\r\n"), cancellationToken)
                         .ConfigureAwait(false);
                     break;
 
                 case FbbSendBytes bytes:
+                    LogWireTxBin(_logger, state.PartnerCall, bytes.Data.Length, null);
                     await SendToleratingCloseAsync(child, session, state, bytes.Data, cancellationToken)
                         .ConfigureAwait(false);
                     break;
@@ -391,4 +403,59 @@ public sealed class FbbSessionRunner
     private static readonly Action<ILogger, string, string, string, Exception?> LogNegotiated =
         LoggerMessage.Define<string, string, string>(LogLevel.Information, new EventId(7, "FbbNegotiated"),
             "Forwarding session with {Partner} negotiated {Mode} (peer SID {PeerSid})");
+
+    // --- Debug-level wire observability (gated by Debug; zero-cost when not enabled) ---
+    // Renders the live B1F/B2F conversation: every protocol line out, every inbound chunk, and
+    // transfer-block sizes. Turn on Bbs.Host.Forwarding at Debug to watch a forwarding session.
+
+    /// <summary>Cap on the readable rendering of an inbound chunk so a binary transfer block does not
+    /// flood the log; protocol lines (FA/F&gt;/FS/FF/FQ/SID) are far shorter than this.</summary>
+    private const int RxLogCap = 200;
+
+    private static readonly Action<ILogger, string, string, Exception?> LogWireTx =
+        LoggerMessage.Define<string, string>(LogLevel.Debug, new EventId(8, "FbbWireTx"),
+            "FBB > {Partner}: {Line}");
+
+    private static readonly Action<ILogger, string, int, Exception?> LogWireTxBin =
+        LoggerMessage.Define<string, int>(LogLevel.Debug, new EventId(9, "FbbWireTxBin"),
+            "FBB > {Partner}: <{Bytes}-byte binary block>");
+
+    private static readonly Action<ILogger, string, string, Exception?> LogWireRx =
+        LoggerMessage.Define<string, string>(LogLevel.Debug, new EventId(10, "FbbWireRx"),
+            "FBB < {Partner}: {Data}");
+
+    /// <summary>Log-safe rendering of wire bytes: printable ASCII verbatim, CR/LF as \r/\n, any other
+    /// byte as &lt;HH&gt; hex; capped at <paramref name="cap"/> with a "+Nb" tail for the remainder.</summary>
+    private static string Readable(ReadOnlySpan<byte> bytes, int cap)
+    {
+        int n = Math.Min(bytes.Length, cap);
+        var sb = new StringBuilder(n + 12);
+        for (int i = 0; i < n; i++)
+        {
+            byte b = bytes[i];
+            if (b == 13)
+            {
+                sb.Append("\\r");
+            }
+            else if (b == 10)
+            {
+                sb.Append("\\n");
+            }
+            else if (b is >= 32 and < 127)
+            {
+                sb.Append((char)b);
+            }
+            else
+            {
+                sb.Append('<').Append(b.ToString("X2")).Append('>');
+            }
+        }
+
+        if (bytes.Length > cap)
+        {
+            sb.Append("…+").Append(bytes.Length - cap).Append('b');
+        }
+
+        return sb.ToString();
+    }
 }

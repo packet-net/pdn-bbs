@@ -41,6 +41,7 @@ public class F6fbbDebugTests
         host.Routing.RouteMessage(stored);
 
         var log = new List<string>();
+        var pdnWire = new List<string>(); // the production runner's OWN Debug wire logging
         string outcome;
         try
         {
@@ -51,7 +52,7 @@ public class F6fbbDebugTests
             var link = new LoggingFbbConnection(raw, log);
             var runner = new FbbSessionRunner(
                 host.Store, host.Receiver, host.Identity, InteropBbsHost.Version,
-                TimeProvider.System, NullLogger<FbbSessionRunner>.Instance);
+                TimeProvider.System, new CapturingLogger<FbbSessionRunner>(pdnWire));
             IReadOnlyList<OutboundItem> outbound = OutboundBuilder.Build(
                 host.Store.GetForwardQueue("Q0FBB"), partner, host.Identity, TimeProvider.System, NullLogger.Instance);
 
@@ -64,6 +65,9 @@ public class F6fbbDebugTests
         }
 
         log.Add("== " + outcome + " ==");
+        log.Add(string.Empty);
+        log.Add("== pdn-bbs PRODUCTION FbbSessionRunner Debug wire log (the new observability) ==");
+        log.AddRange(pdnWire);
         await File.WriteAllLinesAsync("/tmp/f6fbb-transcript.txt", log, CancellationToken.None);
         foreach (string l in log)
         {
