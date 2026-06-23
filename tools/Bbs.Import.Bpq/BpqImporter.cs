@@ -383,6 +383,49 @@ internal static class BpqImporter
         }
     }
 
+    /// <summary>
+    /// The forwarding-partner filter, shared by the write path (<see cref="ImportPartners"/>) and the
+    /// dry-run projection (<see cref="ComputeProjectedCounts"/>) so the two can never disagree. Returns
+    /// the partners to IMPORT plus a human-readable list of the SKIPPED ones.
+    ///
+    /// Rule (Tom's call): import ONLY forwarding partners that have a BBS-checked (F_BBS) user record —
+    /// "you only need to take forwarding partners whose user record has BBS checked". This drops two
+    /// distinct classes of BBSForwarding entry: disabled stubs with no real BBS user, AND BBSNumber-slot
+    /// collisions where a non-F_BBS partner reuses a slot already owned by the real (F_BBS) BBS (e.g.
+    /// GB7MNK/GB7BRK both reuse slot 7 owned by the F_BBS GB7BPQ — keeping them would re-flood those
+    /// BBSes, since the bitmap decode attributes slot 7 to GB7BPQ alone, so they would import with zero
+    /// pre-marked legs). Membership is by the F_BBS user flag only (not BBSNumber): the flag is the
+    /// authority. The BPQ self-entry in BBSForwarding is dropped silently (it is us, not a partner).
+    /// </summary>
+    private static (List<BpqPartner> Kept, List<string> Skipped) PartitionPartners(BpqSource source)
+    {
+        var bbsUserCalls = source.Config.Users
+            .Where(u => u.IsBbs)
+            .Select(u => Callsigns.StripSsid(Callsigns.Normalize(u.Call)))
+            .ToHashSet(StringComparer.Ordinal);
+
+        var kept = new List<BpqPartner>();
+        var skipped = new List<string>();
+        foreach (BpqPartner p in source.Config.Partners)
+        {
+            string call = Callsigns.Normalize(p.Call);
+            if (Callsigns.BaseEquals(call, source.Config.BbsName))
+            {
+                continue; // BPQ keeps a self-entry in BBSForwarding; that is us, not a partner.
+            }
+
+            if (!bbsUserCalls.Contains(Callsigns.StripSsid(call)))
+            {
+                skipped.Add($"{call} ({(p.Enabled ? "enabled" : "disabled")})");
+                continue;
+            }
+
+            kept.Add(p);
+        }
+
+        return (kept, skipped);
+    }
+
     private static void ImportPartners(SqliteConnection connection, SqliteTransaction tx, BpqSource source, ImportReport report)
     {
         using SqliteCommand cmd = connection.CreateCommand();
@@ -414,15 +457,12 @@ internal static class BpqImporter
         SqliteParameter pB2f = cmd.Parameters.Add("$b2f", SqliteType.Integer);
         SqliteParameter pConTimeout = cmd.Parameters.Add("$contimeout", SqliteType.Integer);
 
-        foreach (BpqPartner p in source.Config.Partners)
+        (List<BpqPartner> partners, List<string> skipped) = PartitionPartners(source);
+        report.SkippedPartners.AddRange(skipped);
+
+        foreach (BpqPartner p in partners)
         {
             string call = Callsigns.Normalize(p.Call);
-            if (Callsigns.BaseEquals(call, source.Config.BbsName))
-            {
-                // BPQ keeps a self-entry in BBSForwarding; don't import ourselves as a partner.
-                continue;
-            }
-
             pCall.Value = call;
             pEnabled.Value = p.Enabled ? 1 : 0;
             pInterval.Value = Math.Max(1, p.FwdInterval);
@@ -662,7 +702,9 @@ internal static class BpqImporter
         }
 
         report.ImportedBids = bidSet.Count;
-        report.ImportedPartners = source.Config.Partners.Count(p => !Callsigns.BaseEquals(p.Call, source.Config.BbsName));
+        (List<BpqPartner> keptPartners, List<string> skippedPartners) = PartitionPartners(source);
+        report.ImportedPartners = keptPartners.Count;
+        report.SkippedPartners.AddRange(skippedPartners);
         report.ImportedUsers = source.Config.Users.Count(u => !u.IsBbs && !Callsigns.BaseEquals(u.Call, source.Config.BbsName));
         int maxImported = source.Dirmes.Messages.Count == 0 ? 0 : source.Dirmes.Messages.Max(m => m.Number);
         report.HighWaterMark = Math.Max(source.Dirmes.LatestMessageNumber, maxImported);

@@ -49,6 +49,15 @@ For each message, both bitmaps are decoded with BPQ's exact bit math (`check_fwd
 
 BPQ's latest message number is the control record's `length` field (`LatestMsg = MsgHddrPtr[0]->length`, BBSUtilities.c:1393); the next message gets `++LatestMsg`. The importer sets pdn's `sqlite_sequence` for `messages` to `max(control.length, max-imported-number)`, so the next locally-originated message gets a number **above** anything already on the network — a new `<n>_GB7RDG` BID can never reuse a number a partner has already seen.
 
+## Forwarding-partner selection (the F_BBS filter)
+
+`linmail.cfg`'s `BBSForwarding` section can list more entries than the BBS actually forwards to: disabled stubs, and **legacy entries that reuse a `BBSNumber` slot already owned by a real BBS**. The importer therefore imports a partner **only if it has a BBS-checked (`F_BBS`, flags `& 0x10`) user record** in `BBSUsers` — the user flag is the authority, mirroring how the bitmap decode (Rule 2) resolves a slot. This drops two classes of entry:
+
+- **Disabled stubs** — `Enabled = 0`, no real BBS user (the GB7RDG live data had 7, all `BBSNumber` 160 sentinels).
+- **BBSNumber-slot collisions** — an active partner reusing a slot owned by the F_BBS BBS. In the GB7RDG data `GB7MNK` and `GB7BRK` (both `Enabled = 1`, real connect scripts) reuse slot 7, already owned by the F_BBS `GB7BPQ`. Keeping them would re-flood those BBSes: the bitmap decode attributes slot 7 to `GB7BPQ` alone, so they would import with **zero** pre-marked legs and the new node would re-send all eligible mail to them.
+
+The kept set is **verified against BPQ's own UI**: the live GB7RDG dump filters to exactly the 15 partners BPQ's "forwarding partners" list shows (16 incl. the GB7RDG self-entry, which is dropped — mail is never queued to self). Every **skipped** partner is reported in the import summary with its enabled/disabled state, so a dropped *active* partner is never silent (this is a no-rollback migration). The filter lives in one shared helper (`PartitionPartners`) used by both the write path and the dry-run projection, so the two can never disagree.
+
 ## Source formats (verified byte-for-byte against `bpqmail.h` + the real fixtures)
 
 | File | Format | Notes |

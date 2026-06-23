@@ -42,6 +42,11 @@ internal sealed class ImportReport
     public int ImportedUsers { get; set; }
     public int ImportedWhitePages { get; set; }
 
+    /// <summary>BBSForwarding partners SKIPPED because no BBS-checked (F_BBS) user record exists for
+    /// them — the "take only forwarding partners whose user record has BBS checked" rule. Each entry
+    /// is "CALL (enabled|disabled)" so a dropped ACTIVE partner is visible, never silent.</summary>
+    public List<string> SkippedPartners { get; } = [];
+
     // Per-partner forwarding legs.
     public SortedDictionary<string, (int Queued, int Sent)> PartnerLegs { get; } = new(StringComparer.Ordinal);
 
@@ -76,6 +81,14 @@ internal sealed class ImportReport
         sb.AppendLine(Inv($"  Partners                           : {ImportedPartners}"));
         sb.AppendLine(Inv($"  Users                              : {ImportedUsers}"));
         sb.AppendLine(Inv($"  White-pages records                : {ImportedWhitePages}"));
+        if (SkippedPartners.Count > 0)
+        {
+            sb.AppendLine(Inv($"  Partners SKIPPED (no F_BBS user)    : {SkippedPartners.Count}"));
+            foreach (string s in SkippedPartners)
+            {
+                sb.AppendLine(Inv($"      - {s}"));
+            }
+        }
         sb.AppendLine();
         sb.AppendLine("Per-partner forwarding legs (queued / already-sent)");
         if (PartnerLegs.Count == 0)
