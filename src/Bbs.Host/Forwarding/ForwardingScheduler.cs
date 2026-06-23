@@ -41,18 +41,24 @@ public sealed class ForwardingScheduler
     private readonly ConcurrentDictionary<string, Task> _loops = new(StringComparer.OrdinalIgnoreCase);
     private readonly Channel<bool> _reconcile = NewNudgeChannel();
     private static readonly TimeSpan ReconcileTick = TimeSpan.FromSeconds(60);
+    private readonly bool _enabled;
 
     /// <summary>
     /// Creates the scheduler. Nudge channels are created eagerly for every enabled partner
     /// so a nudge fired before <see cref="RunAsync"/> (the startup backlog sweep) is kept.
     /// </summary>
+    /// <param name="enabled">
+    /// Master switch (BbsHostConfig.Forwarding.Enabled). When false the scheduler holds: it starts no
+    /// per-partner loops and dials no one (the migration safe-abort window). Default true.
+    /// </param>
     public ForwardingScheduler(
         RhpNodeLink link,
         FbbSessionRunner runner,
         BbsStore store,
         BbsIdentity identity,
         TimeProvider time,
-        ILogger<ForwardingScheduler> logger)
+        ILogger<ForwardingScheduler> logger,
+        bool enabled = true)
     {
         ArgumentNullException.ThrowIfNull(link);
         ArgumentNullException.ThrowIfNull(runner);
@@ -66,6 +72,7 @@ public sealed class ForwardingScheduler
         _identity = identity;
         _time = time;
         _logger = logger;
+        _enabled = enabled;
 
         foreach (Partner partner in store.ListPartners())
         {
@@ -95,6 +102,15 @@ public sealed class ForwardingScheduler
     /// </summary>
     public async Task RunAsync(CancellationToken cancellationToken)
     {
+        if (!_enabled)
+        {
+            // Forwarding HELD (BbsHostConfig.Forwarding.Enabled = false): the migration safe-abort
+            // window. Start no loops, dial no one — the mailbox + pre-marked legs are loaded but the
+            // node never advances the network. Inbound answering is governed separately.
+            LogForwardingHeld(_logger, null);
+            return;
+        }
+
         try
         {
             while (!cancellationToken.IsCancellationRequested)
@@ -394,4 +410,9 @@ public sealed class ForwardingScheduler
     private static readonly Action<ILogger, string, string, Exception?> LogScriptFailed =
         LoggerMessage.Define<string, string>(LogLevel.Warning, new EventId(4, "ConnectScriptFailed"),
             "Partner {Partner}: {Reason}; cycle abandoned, will retry with backoff");
+
+    private static readonly Action<ILogger, Exception?> LogForwardingHeld =
+        LoggerMessage.Define(LogLevel.Warning, new EventId(6, "ForwardingHeld"),
+            "Outbound forwarding is HELD (forwarding.enabled = false); no partners will be dialled. "
+            + "Set forwarding.enabled = true to resume.");
 }

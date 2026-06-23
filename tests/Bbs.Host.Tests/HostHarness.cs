@@ -134,9 +134,9 @@ internal sealed class HostHarness : IAsyncDisposable
     /// Creates and starts the forwarding scheduler (call after seeding partners — it
     /// snapshots the enabled-partner set, like Program does) and wires the routing nudge.
     /// </summary>
-    public void StartScheduler()
+    public void StartScheduler(bool enabled = true)
     {
-        Scheduler = new ForwardingScheduler(Link, Runner, Store, Identity, Time, NullLogger<ForwardingScheduler>.Instance);
+        Scheduler = new ForwardingScheduler(Link, Runner, Store, Identity, Time, NullLogger<ForwardingScheduler>.Instance, enabled);
         Routing.NudgePartner = Scheduler.Nudge;
         _loops.Add(Scheduler.RunAsync(_cts.Token));
     }

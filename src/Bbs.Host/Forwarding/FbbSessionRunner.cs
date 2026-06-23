@@ -30,6 +30,7 @@ public sealed class FbbSessionRunner
     private readonly TimeProvider _time;
     private readonly ILogger _logger;
     private readonly FileInboundPartialStore? _partialStore;
+    private readonly bool _forwardingEnabled;
 
     /// <summary>A silent peer ends the session after this long (TimeProvider-driven).</summary>
     public TimeSpan IdleTimeout { get; init; } = TimeSpan.FromMinutes(10);
@@ -48,7 +49,8 @@ public sealed class FbbSessionRunner
         string sidVersion,
         TimeProvider time,
         ILogger<FbbSessionRunner> logger,
-        FileInboundPartialStore? partialStore = null)
+        FileInboundPartialStore? partialStore = null,
+        bool forwardingEnabled = true)
     {
         ArgumentNullException.ThrowIfNull(store);
         ArgumentNullException.ThrowIfNull(receiver);
@@ -63,6 +65,7 @@ public sealed class FbbSessionRunner
         _time = time;
         _logger = logger;
         _partialStore = partialStore;
+        _forwardingEnabled = forwardingEnabled;
     }
 
     /// <summary>
@@ -93,6 +96,19 @@ public sealed class FbbSessionRunner
     {
         ArgumentNullException.ThrowIfNull(child);
         ArgumentNullException.ThrowIfNull(initialData);
+
+        if (!_forwardingEnabled)
+        {
+            // Inbound forwarding HELD (forwarding.enabled = false): refuse the FBB session so a
+            // partner cannot push mail in either — accepting an inbound forward would advance the
+            // mailbox and make this no-rollback migration irreversible (the safe-abort window holds
+            // BOTH directions). We return without engaging the exchange; the caller closes the link
+            // and the partner retries later. Human console sessions are unaffected (the demux only
+            // reaches here for a forwarding opener). No message bodies have been exchanged yet, so
+            // the partner's mail stays on the partner.
+            LogInboundHeld(_logger, child.RemoteCallsign, null);
+            return Task.FromResult(new FbbSessionResult(Completed: false, Graceful: false));
+        }
 
         // Match the inbound caller on its BASE callsign — its source SSID is indeterminate
         // (an outbound connect grabs whatever SSID is free), so it can't key the partner lookup.
@@ -403,6 +419,11 @@ public sealed class FbbSessionRunner
     private static readonly Action<ILogger, string, string, string, Exception?> LogNegotiated =
         LoggerMessage.Define<string, string, string>(LogLevel.Information, new EventId(7, "FbbNegotiated"),
             "Forwarding session with {Partner} negotiated {Mode} (peer SID {PeerSid})");
+
+    private static readonly Action<ILogger, string, Exception?> LogInboundHeld =
+        LoggerMessage.Define<string>(LogLevel.Warning, new EventId(8, "InboundForwardingHeld"),
+            "Inbound forwarding is HELD (forwarding.enabled = false); refusing the FBB session from {Partner}. "
+            + "The link is closed and the partner will retry; no mail is accepted.");
 
     // --- Debug-level wire observability (gated by Debug; zero-cost when not enabled) ---
     // Renders the live B1F/B2F conversation: every protocol line out, every inbound chunk, and

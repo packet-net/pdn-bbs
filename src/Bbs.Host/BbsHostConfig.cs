@@ -80,11 +80,29 @@ public sealed record BbsHostConfig
     /// <remarks>Concrete <see cref="List{T}"/> because YamlDotNet binds collections, not read-only interfaces.</remarks>
     public List<PartnerConfig> Partners { get; init; } = [];
 
+    /// <summary>Outbound forwarding behaviour (the scheduler hold switch).</summary>
+    public ForwardingConfig Forwarding { get; init; } = new();
+
     /// <summary>
     /// How long the inbound demux waits for a first line before assuming a human caller
     /// (design decision 1: a SID-shaped first line selects the Fbb answerer).
     /// </summary>
     public int DemuxFirstLineWaitSeconds { get; init; } = 30;
+}
+
+/// <summary>Outbound forwarding scheduler configuration.</summary>
+public sealed record ForwardingConfig
+{
+    /// <summary>
+    /// Master switch for the OUTBOUND forwarding scheduler. <b>Default <c>true</c></b> (normal
+    /// operation: the scheduler dials enabled partners on their schedule). Set <c>false</c> to HOLD
+    /// all outbound forwarding regardless of per-partner enabled state — the migration "safe-abort
+    /// window": a freshly-imported node loads the full mailbox + pre-marked legs but dials no one, so
+    /// it can sit alongside the live LinBPQ node (or be sanity-checked) without advancing the network.
+    /// Flip to <c>true</c> at the deliberate point of no return (this migration has no rollback once
+    /// it forwards). Holds OUTBOUND only; inbound answering is governed separately.
+    /// </summary>
+    public bool Enabled { get; init; } = true;
 }
 
 /// <summary>Webmail bind configuration. MUST stay loopback (app-gateway contract).</summary>

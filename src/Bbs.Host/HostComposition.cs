@@ -134,10 +134,10 @@ public static class HostComposition
         builder.Services.AddSingleton(partialStore);
         builder.Services.AddSingleton(sp => new FbbSessionRunner(
             store, sp.GetRequiredService<InboundMessageReceiver>(), identity, version, time,
-            sp.GetRequiredService<ILogger<FbbSessionRunner>>(), partialStore));
+            sp.GetRequiredService<ILogger<FbbSessionRunner>>(), partialStore, config.Forwarding.Enabled));
         builder.Services.AddSingleton(sp => new ForwardingScheduler(
             sp.GetRequiredService<RhpNodeLink>(), sp.GetRequiredService<FbbSessionRunner>(), store, identity, time,
-            sp.GetRequiredService<ILogger<ForwardingScheduler>>()));
+            sp.GetRequiredService<ILogger<ForwardingScheduler>>(), config.Forwarding.Enabled));
         builder.Services.AddSingleton<IUserSettingsStore>(
             new JsonUserSettingsStore(Path.Combine(stateDir, "user-settings.json")));
         builder.Services.AddSingleton(sp => new InboundDemux(
