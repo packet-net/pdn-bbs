@@ -25,11 +25,13 @@ namespace Bbs.Interop.Tests;
 [Collection(F6fbbCollection.Name)]
 public class F6fbbOutboundPocTests
 {
-    private static readonly IPEndPoint Vm = new(IPAddress.Parse("192.168.76.2"), 10093);
+    private static IPEndPoint Vm => F6fbbRig.Endpoint;
 
-    [Fact]
+    [SkippableFact]
     public async Task PocOutbound_ForwardsOneMessageIntoF6fbb()
     {
+        await F6fbbRig.RequireAsync();
+
         using var deadline = new CancellationTokenSource(TimeSpan.FromMinutes(3));
         CancellationToken ct = deadline.Token;
         using var host = new InteropBbsHost("Q0PDN", "#42.GBR.EURO");

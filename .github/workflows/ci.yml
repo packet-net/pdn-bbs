@@ -35,7 +35,11 @@ jobs:
       - name: Build (Release)
         run: dotnet build -c Release
       - name: Test
-        run: dotnet test -c Release --no-build --filter "Category!=Interop"
+        # Excludes BOTH heavy interop lanes from the fast PR gate: Interop (the LinBPQ oracle,
+        # run in the `interop` job below) and InteropF6fbb / InteropF6fbbDebug (the canonical-F6FBB
+        # VM lane, run only on demand via interop-f6fbb.yml). Those tests already skip when their rig
+        # is unreachable, but excluding them here keeps this lane off the rig-probe timeout entirely.
+        run: dotnet test -c Release --no-build --filter "Category!=Interop&Category!=InteropF6fbb&Category!=InteropF6fbbDebug"
 
       # Version is the single source of truth in pdn-app.yaml (`version:`) — the same field the .deb
       # stamps and pdn shows in its UI. Bump it in the PR you want released; merge → release. Don't

@@ -1,0 +1,98 @@
+name: interop-f6fbb
+
+# The canonical-F6FBB interop lane. HEAVY + ON-DEMAND ONLY: it boots a QEMU/AX.25/F6FBB VM
+# (repo M0LTE/f6fbb-interop) on the runner and forwards real FBB B1 traffic into it over AXUDP,
+# driving pdn-bbs's production FbbSessionRunner against the original Jean-Paul Roubelat code
+# (not LinBPQ's reimplementation, not captured samples).
+#
+# Deliberately NOT scheduled and NOT a PR gate — the fast ci.yml lane excludes
+# Category=InteropF6fbb, and those tests skip when the rig is unreachable. Trigger it by hand
+# (Actions ▸ interop-f6fbb ▸ Run workflow) when you want to check pdn-bbs against real F6FBB.
+#
+# Runner prerequisites (self-hosted): /dev/kvm (falls back to slow TCG), passwordless sudo for
+# the f6fbbr0 bridge + tap, and the `make all` build deps (debootstrap, kernel toolchain).
+on:
+  workflow_dispatch:
+    inputs:
+      rig_ref:
+        description: "M0LTE/f6fbb-interop git ref to boot"
+        default: main
+
+permissions:
+  contents: read
+
+jobs:
+  interop-f6fbb:
+    runs-on: [self-hosted, Linux, X64]
+    # One VM owns host UDP 10093 + the f6fbbr0 bridge — never run two at once.
+    concurrency:
+      group: pdnbbs-f6fbb-rig
+      cancel-in-progress: false
+    env:
+      PDNBBS_F6FBB_HOST: "192.168.76.2"
+      PDNBBS_F6FBB_PORT: "10093"
+      # We booted the rig in this job, so an unreachable rig is a real failure, not a silent skip.
+      PDNBBS_F6FBB_REQUIRED: "1"
+    steps:
+      - name: Checkout pdn-bbs
+        uses: actions/checkout@v4
+        with:
+          path: pdn-bbs
+
+      - name: Checkout f6fbb-interop rig
+        uses: actions/checkout@v4
+        with:
+          repository: M0LTE/f6fbb-interop
+          ref: ${{ inputs.rig_ref }}
+          path: f6fbb-interop
+
+      # The bootable image (kernel + ext4) is expensive to build; cache it keyed on the rig's build
+      # inputs so only the first run (or a build-script/config change) pays the full `make all`.
+      - name: Restore rig image cache
+        id: rig-cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            f6fbb-interop/artifacts/f6fbb-guest.ext4
+            f6fbb-interop/artifacts/bzImage-*
+          key: f6fbb-rig-${{ inputs.rig_ref }}-${{ hashFiles('f6fbb-interop/Makefile', 'f6fbb-interop/build/**', 'f6fbb-interop/config/**') }}
+
+      - name: Build rig image (make all) — only on cache miss
+        if: steps.rig-cache.outputs.cache-hit != 'true'
+        working-directory: f6fbb-interop
+        run: make all
+
+      - name: Boot rig (NET=tap) + wait for self-test PASS
+        working-directory: f6fbb-interop
+        # Mirrors run/interop.sh: boot detached with the console to boot.log, poll for the rig's
+        # own self-test marker, fail fast (with the tail of the log) on FAIL / panic / timeout.
+        run: |
+          rm -f artifacts/boot.log artifacts/qemu.out
+          CONSOLE=file NET=tap bash run/run-vm.sh >artifacts/qemu.out 2>&1 &
+          echo ">> waiting for RIG-SELFTEST RESULT=PASS"
+          res=""
+          for _ in $(seq 1 300); do
+            grep -qa 'RIG-SELFTEST RESULT=PASS' artifacts/boot.log 2>/dev/null && { res=PASS; break; }
+            grep -qaE 'RIG-SELFTEST RESULT=FAIL|Kernel panic' artifacts/boot.log 2>/dev/null && { res=FAIL; break; }
+            sleep 2
+          done
+          echo ">> guest self-test: ${res:-TIMEOUT}"
+          [ "$res" = PASS ] || { tail -n 40 artifacts/boot.log 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g'; exit 1; }
+
+      - name: Build (Release)
+        working-directory: pdn-bbs
+        run: dotnet build -c Release
+
+      - name: F6FBB interop tests
+        working-directory: pdn-bbs
+        run: dotnet test -c Release --no-build --filter "Category=InteropF6fbb"
+
+      - name: Rig boot log on failure
+        if: failure()
+        working-directory: f6fbb-interop
+        run: tail -n 80 artifacts/boot.log 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g' || true
+
+      - name: Teardown rig
+        if: always()
+        # Match by name; `-f` would match this step's own shell. (run/interop.sh precedent.)
+        run: sudo pkill -9 qemu-system 2>/dev/null || true

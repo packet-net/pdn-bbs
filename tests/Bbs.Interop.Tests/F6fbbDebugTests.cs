@@ -17,14 +17,16 @@ namespace Bbs.Interop.Tests;
 [Collection(F6fbbCollection.Name)]
 public class F6fbbDebugTests
 {
-    private static readonly IPEndPoint Vm = new(IPAddress.Parse("192.168.76.2"), 10093);
+    private static IPEndPoint Vm => F6fbbRig.Endpoint;
     private readonly ITestOutputHelper _out;
 
     public F6fbbDebugTests(ITestOutputHelper output) => _out = output;
 
-    [Fact]
+    [SkippableFact]
     public async Task Debug_CaptureForwardingTranscript()
     {
+        await F6fbbRig.RequireAsync();
+
         using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(45));
         CancellationToken ct = deadline.Token;
         using var host = new InteropBbsHost("Q0PDN", "#42.GBR.EURO");

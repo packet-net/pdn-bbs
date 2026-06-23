@@ -27,7 +27,7 @@ namespace Bbs.Interop.Tests;
 [Collection(F6fbbCollection.Name)]
 public class F6fbbInboundTests
 {
-    private static readonly IPEndPoint Vm = new(IPAddress.Parse("192.168.76.2"), 10093);
+    private static IPEndPoint Vm => F6fbbRig.Endpoint;
 
     [Fact(Skip = "Parked: real xfbbd's autonomous outbound forward (the dial) does not fire over the " +
         "ax25ipd/kernel-AX.25 port despite full forward.sys partner + bbs.sys slot + R (force-dial) + " +

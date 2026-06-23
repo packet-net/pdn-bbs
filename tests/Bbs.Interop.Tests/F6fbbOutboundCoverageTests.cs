@@ -20,13 +20,15 @@ namespace Bbs.Interop.Tests;
 [Collection(F6fbbCollection.Name)]
 public class F6fbbOutboundCoverageTests
 {
-    private static readonly IPEndPoint Vm = new(IPAddress.Parse("192.168.76.2"), 10093);
+    private static IPEndPoint Vm => F6fbbRig.Endpoint;
 
     /// <summary>OUT-11: empty queue — the caller opens with FF and the session closes FF/FQ-clean
     /// with no proposal ever on the wire and nothing marked Forwarded.</summary>
-    [Fact]
+    [SkippableFact]
     public async Task EmptyQueue_OpensAndClosesGracefully_NoProposal()
     {
+        await F6fbbRig.RequireAsync();
+
         using var deadline = new CancellationTokenSource(TimeSpan.FromMinutes(2));
         CancellationToken ct = deadline.Token;
         using var host = new InteropBbsHost("Q0PDN", "#42.GBR.EURO");
@@ -46,9 +48,11 @@ public class F6fbbOutboundCoverageTests
 
     /// <summary>OUT-03: three small personals proposed in a single block (≤5 per block, &lt;10 KB) —
     /// three FA lines, one F&gt;, all three accepted and Forwarded.</summary>
-    [Fact]
+    [SkippableFact]
     public async Task ThreeMessages_OneProposalBlock_AllForwarded()
     {
+        await F6fbbRig.RequireAsync();
+
         using var deadline = new CancellationTokenSource(TimeSpan.FromMinutes(2));
         CancellationToken ct = deadline.Token;
         using var host = new InteropBbsHost("Q0PDN", "#42.GBR.EURO");
@@ -89,9 +93,11 @@ public class F6fbbOutboundCoverageTests
 
     /// <summary>OUT-05: a message over the partner's MaxTxSize is skipped + Held via the onOversize
     /// callback; the under-cap message in the same queue still forwards.</summary>
-    [Fact]
+    [SkippableFact]
     public async Task OversizeMessage_HeldNotProposed_SmallStillForwarded()
     {
+        await F6fbbRig.RequireAsync();
+
         using var deadline = new CancellationTokenSource(TimeSpan.FromMinutes(2));
         CancellationToken ct = deadline.Token;
         using var host = new InteropBbsHost("Q0PDN", "#42.GBR.EURO");
@@ -132,9 +138,11 @@ public class F6fbbOutboundCoverageTests
     /// <summary>OUT-17: pdn OFFERS B2 (partner AllowB2F = true → '2' in our SID), but canonical
     /// xfbbd 7.0.11 advertises no '2', so B2 must NOT activate — the transfer stays FA/B1 and the
     /// message is still Forwarded. The negative gate against a silent B2 mis-activation.</summary>
-    [Fact]
+    [SkippableFact]
     public async Task B2Offered_ButPeerIsB1Only_FallsBackToFa_AndForwards()
     {
+        await F6fbbRig.RequireAsync();
+
         using var deadline = new CancellationTokenSource(TimeSpan.FromMinutes(2));
         CancellationToken ct = deadline.Token;
         using var host = new InteropBbsHost("Q0PDN", "#42.GBR.EURO");
@@ -163,9 +171,11 @@ public class F6fbbOutboundCoverageTests
     /// <summary>OUT-02: re-forwarding the SAME BID. Real xfbbd remembers the BID (WFBID.SYS) and
     /// refuses the duplicate on the second cycle; pdn's AlreadyHave verdict must still clear the
     /// queue cleanly — the '-'/'N' refuse path the happy case never exercises.</summary>
-    [Fact]
+    [SkippableFact]
     public async Task DuplicateBid_RefusedByXfbbd_PdnStillClearsQueue()
     {
+        await F6fbbRig.RequireAsync();
+
         using var deadline = new CancellationTokenSource(TimeSpan.FromMinutes(2));
         CancellationToken ct = deadline.Token;
         using var host = new InteropBbsHost("Q0PDN", "#42.GBR.EURO");
