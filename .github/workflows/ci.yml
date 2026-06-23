@@ -70,70 +70,19 @@ jobs:
             echo "Will publish $tag."
           fi
 
-  interop:
-    # The oracle lane: real bidirectional FBB forwarding against the live
-    # LinBPQ+BPQMail stack over the simulated RF channel (docker/README.md).
-    runs-on: [self-hosted, Linux, X64]
-    # The stack owns fixed host ports (8200/8208/8210/8211) and one compose
-    # project, and the self-hosted box runs several runners — serialise.
-    concurrency:
-      group: pdnbbs-oracle-stack
-      cancel-in-progress: false
-    steps:
-      - name: Pre-checkout — clear root-owned oracle state (self-heal interrupted runs)
-        # See the test job: root-owned docker/oracle/state left by an interrupted
-        # run wedges actions/checkout --clean with EACCES. Clear it before checkout.
-        run: |
-          state="$GITHUB_WORKSPACE/docker/oracle/state"
-          if [ -d "$state" ]; then
-            docker run --rm --entrypoint /bin/sh \
-              -v "$state:/data" \
-              m0lte/linbpq@sha256:872343ffb76a52316b1ae42a42d3c0893f545ccd577301ebc7c4455b292a8025 \
-              -c 'rm -rf /data/* /data/.[!.]* /data/..?* 2>/dev/null; true' || true
-          fi
-      - uses: actions/checkout@v4
-      - name: Oracle clean slate (down -v + state wipe)
-        # `down -v` does not clear the bind mount; the state wipe runs in a
-        # throwaway root container because LinBPQ writes /data as root
-        # (same image digest as compose.oracle.yml; smoke.sh precedent).
-        run: |
-          docker compose -f docker/compose.oracle.yml down -v --remove-orphans || true
-          mkdir -p docker/oracle/state
-          docker run --rm --entrypoint /bin/sh \
-            -v "$PWD/docker/oracle/state:/data" \
-            m0lte/linbpq@sha256:872343ffb76a52316b1ae42a42d3c0893f545ccd577301ebc7c4455b292a8025 \
-            -c 'rm -rf /data/* /data/.[!.]* /data/..?* 2>/dev/null; true'
-      - name: Oracle up (healthcheck-gated)
-        run: docker compose -f docker/compose.oracle.yml up -d --wait
-      - name: Build (Release)
-        run: dotnet build -c Release
-      - name: Interop tests
-        run: dotnet test -c Release --no-build --filter "Category=Interop"
-      - name: Oracle logs on failure
-        if: failure()
-        run: |
-          docker compose -f docker/compose.oracle.yml ps || true
-          docker compose -f docker/compose.oracle.yml logs --tail 100 || true
-      - name: Oracle down (down -v + state wipe)
-        if: always()
-        run: |
-          docker compose -f docker/compose.oracle.yml down -v --remove-orphans || true
-          docker run --rm --entrypoint /bin/sh \
-            -v "$PWD/docker/oracle/state:/data" \
-            m0lte/linbpq@sha256:872343ffb76a52316b1ae42a42d3c0893f545ccd577301ebc7c4455b292a8025 \
-            -c 'rm -rf /data/* /data/.[!.]* /data/..?* 2>/dev/null; true' || true
-
   # Auto-release on a version bump landing on main (the dapps model: version is the single source of
   # truth in pdn-app.yaml, merge → release, same-version-twice = no-op). Builds the three .debs from
   # scripts/build-deb.sh — the SAME packaging publish-bbs.yml uses — and attaches them to a GitHub
   # Release. publish-bbs.yml stays as the manual escape hatch (tag push / workflow_dispatch); this is
   # the hands-off path so a normal "bump + merge" PR ships without anyone cutting a tag by hand.
   #
-  # Gated on BOTH test and interop passing: we don't ship a build that fails the oracle lane. No
-  # Actions artifacts (the .debs are built + attached from this one job's local tree, never touching
+  # Gated on the fast `test` lane only. The heavy LinBPQ-oracle interop lane is no longer a routine
+  # gate (timing-sensitive; flaky as a per-PR/push gate) — it runs out-of-band in interop-oracle.yml
+  # (nightly + on demand), where a genuine oracle regression is still caught. No Actions artifacts
+  # (the .debs are built + attached from this one job's local tree, never touching
   # the artifact store — mirrors publish-bbs.yml / publish-node.yml's free-tier quota dodge).
   release:
-    needs: [test, interop]
+    needs: [test]
     if: needs.test.outputs.should_release == 'true'
     runs-on: [self-hosted, Linux, X64]
     permissions:

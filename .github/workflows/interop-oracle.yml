@@ -1,0 +1,63 @@
+name: interop-oracle
+
+# The LinBPQ+BPQMail oracle interop lane: real bidirectional FBB forwarding against the
+# live LinBPQ stack over the simulated RF channel (docker/README.md).
+#
+# Deliberately NOT a PR/push gate. These tests stand up a heavy docker stack and exercise
+# real-time FBB forwarding, so they are timing-sensitive and slow — running them on every
+# PR/push made them a flaky routine gate. The fast ci.yml lane excludes Category=Interop;
+# this lane runs them out-of-band: on demand (workflow_dispatch) and once nightly, so a
+# genuine oracle-interop regression is still caught without blocking routine work.
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 4 * * *"   # nightly, 04:17 UTC
+
+jobs:
+  interop:
+    runs-on: [self-hosted, Linux, X64]
+    # The stack owns fixed host ports (8200/8208/8210/8211) and one compose
+    # project, and the self-hosted box runs several runners — serialise.
+    concurrency:
+      group: pdnbbs-oracle-stack
+      cancel-in-progress: false
+    steps:
+      - name: Pre-checkout — clear root-owned oracle state (self-heal interrupted runs)
+        # Root-owned docker/oracle/state left by an interrupted run wedges
+        # actions/checkout --clean with EACCES. Clear it before checkout.
+        run: |
+          state="$GITHUB_WORKSPACE/docker/oracle/state"
+          if [ -d "$state" ]; then
+            docker run --rm --entrypoint /bin/sh \
+              -v "$state:/data" \
+              m0lte/linbpq@sha256:872343ffb76a52316b1ae42a42d3c0893f545ccd577301ebc7c4455b292a8025 \
+              -c 'rm -rf /data/* /data/.[!.]* /data/..?* 2>/dev/null; true' || true
+          fi
+      - uses: actions/checkout@v4
+      - name: Oracle clean slate (down -v + state wipe)
+        run: |
+          docker compose -f docker/compose.oracle.yml down -v --remove-orphans || true
+          mkdir -p docker/oracle/state
+          docker run --rm --entrypoint /bin/sh \
+            -v "$PWD/docker/oracle/state:/data" \
+            m0lte/linbpq@sha256:872343ffb76a52316b1ae42a42d3c0893f545ccd577301ebc7c4455b292a8025 \
+            -c 'rm -rf /data/* /data/.[!.]* /data/..?* 2>/dev/null; true' || true
+      - name: Oracle up (healthcheck-gated)
+        run: docker compose -f docker/compose.oracle.yml up -d --wait
+      - name: Build (Release)
+        run: dotnet build -c Release
+      - name: Interop tests
+        run: dotnet test -c Release --no-build --filter "Category=Interop"
+      - name: Oracle logs on failure
+        if: failure()
+        run: |
+          docker compose -f docker/compose.oracle.yml ps || true
+          docker compose -f docker/compose.oracle.yml logs --tail 100 || true
+      - name: Oracle down (down -v + state wipe)
+        if: always()
+        run: |
+          docker compose -f docker/compose.oracle.yml down -v --remove-orphans || true
+          docker run --rm --entrypoint /bin/sh \
+            -v "$PWD/docker/oracle/state:/data" \
+            m0lte/linbpq@sha256:872343ffb76a52316b1ae42a42d3c0893f545ccd577301ebc7c4455b292a8025 \
+            -c 'rm -rf /data/* /data/.[!.]* /data/..?* 2>/dev/null; true' || true
