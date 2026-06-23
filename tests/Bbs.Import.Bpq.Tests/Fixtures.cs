@@ -20,6 +20,8 @@ internal static class Fixtures
     /// <summary>The real-but-stale gb7rdg snapshot directory (dev-box only).</summary>
     public static string Gb7rdgDir { get; } = "/home/tf/gb7rdg-config/bpq";
 
+    public static bool HasOracleState => File.Exists(OracleDirmes());
+
     public static bool HasGb7rdgSnapshot => File.Exists(Gb7rdgDirmes());
 
     public static string Gb7rdgDirmes() => Path.Combine(Gb7rdgDir, "DIRMES.SYS");
