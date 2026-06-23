@@ -75,11 +75,21 @@ public sealed class FbbSessionRunner
     /// so nothing is lost. A configured partner contributes its queue for reverse forwarding
     /// (spec §3.11) and its size caps; an unknown SID-shaped caller is still served with
     /// defaults (messages stored with its callsign as ReceivedFrom).
+    /// <para>
+    /// <paramref name="selfGreet"/> is for a demux-less leg — a raw AX.25 / AXUDP / direct-FBB
+    /// link with no <see cref="Sessions.InboundDemux"/> ahead of it (the interop harness and the
+    /// answer-real-xfbbd direction). When true the runner does NOT assume an upstream greet: the
+    /// FSM emits our SID + <c>de CALL&gt;</c> prompt itself on start (symmetric with the
+    /// self-greeting caller), and <paramref name="initialData"/> is normally empty (nothing was
+    /// peeked). The default (false) keeps continue-mode: the demux already greeted and handed us
+    /// the peeked SID line — the production node / FBBPORT path, unchanged.
+    /// </para>
     /// </summary>
     public Task<FbbSessionResult> RunAnswererAsync(
         IFbbConnection child,
         byte[] initialData,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool selfGreet = false)
     {
         ArgumentNullException.ThrowIfNull(child);
         ArgumentNullException.ThrowIfNull(initialData);
@@ -95,7 +105,7 @@ public sealed class FbbSessionRunner
                 // doesn't re-skip them forever — see ForwardingScheduler / compat spec §4.1.
                 onOversize: (number, bytes) => _store.HoldMessage(number,
                     FormattableString.Invariant($"too large for {partner.Call} ({bytes} > {partner.MaxTxSize} bytes)")));
-        return RunAsync(FbbRole.Answerer, child, partner, partnerCall, outbound, initialData, cancellationToken);
+        return RunAsync(FbbRole.Answerer, child, partner, partnerCall, outbound, initialData, selfGreet, cancellationToken);
     }
 
     /// <summary>
@@ -113,7 +123,7 @@ public sealed class FbbSessionRunner
         ArgumentNullException.ThrowIfNull(child);
         ArgumentNullException.ThrowIfNull(partner);
         ArgumentNullException.ThrowIfNull(outbound);
-        return RunAsync(FbbRole.Caller, child, partner, partner.Call, outbound, initialData, cancellationToken);
+        return RunAsync(FbbRole.Caller, child, partner, partner.Call, outbound, initialData, selfGreet: false, cancellationToken);
     }
 
     private async Task<FbbSessionResult> RunAsync(
@@ -123,6 +133,7 @@ public sealed class FbbSessionRunner
         string partnerCall,
         IReadOnlyList<OutboundItem> outbound,
         byte[]? initialData,
+        bool selfGreet,
         CancellationToken cancellationToken)
     {
         var session = new FbbSession(
@@ -132,8 +143,10 @@ public sealed class FbbSessionRunner
                 OwnCallsign = _identity.Callsign,
                 SidVersion = _sidVersion,
 
-                // Answerer = continue-mode: the demux greeted (SID + prompt) on accept.
-                SidAlreadySent = role == FbbRole.Answerer,
+                // Answerer = continue-mode by default: the demux greeted (SID + prompt) on
+                // accept. selfGreet flips this for a demux-less leg (raw AX.25 / AXUDP / FBB):
+                // the FSM emits our SID + prompt itself on FbbStart, symmetric with the caller.
+                SidAlreadySent = role == FbbRole.Answerer && !selfGreet,
 
                 // B2F is opt-in per partner (default off → B1 unchanged). When set we advertise
                 // '2' in our SID; the session then activates B2 only if the peer's SID also

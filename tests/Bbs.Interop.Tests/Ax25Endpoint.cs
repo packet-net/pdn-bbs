@@ -1,44 +1,50 @@
+using System.Net;
 using System.Threading.Channels;
 using Packet.Ax25.Session;
+using Packet.Ax25.Transport;
 using Packet.Core;
 using Packet.Kiss;
 
 namespace Bbs.Interop.Tests;
 
 /// <summary>
-/// One AX.25 station attached to a KISS-TCP endpoint (netsim node a), built from the
-/// published packet.net libraries: <see cref="KissTcpClient"/> fronting an
-/// <see cref="Ax25Listener"/> — the same engine a real pdn node fronts for the BBS.
-/// Surfaces sessions as <see cref="Ax25ByteSession"/>, a byte-stream handle shaped like
+/// One AX.25 station attached to a frame transport, built from the packet.net libraries:
+/// an <see cref="IAx25Transport"/> — <see cref="KissTcpClient"/> (KISS-TCP to netsim, the
+/// LinBPQ oracle) or <see cref="AxudpSocketTransport"/> (AXUDP to the real-F6FBB VM) —
+/// fronting an <see cref="Ax25Listener"/>, the same engine a real pdn node fronts for the
+/// BBS. Surfaces sessions as <see cref="Ax25ByteSession"/>, a byte-stream handle shaped like
 /// the host's RhpChildConnection so the FBB pump transcribes 1:1.
 /// </summary>
-/// <remarks>
-/// Published-package note ([VERIFY-ORACLE]-adjacent delta from the W6 brief): Packet.Ax25
-/// 0.7.0 has no <c>AddLocalAlias</c> / two-callsign <c>ConnectAsync</c> (those are
-/// post-0.7.0, m0lte/packet.net#376) — so this endpoint binds <c>MyCall</c> to the single
-/// identity the tests need (PDNBBS-1), which both originates outbound connects and answers
-/// inbound SABMs. Equivalent capability for a one-callsign test.
-/// </remarks>
 internal sealed class Ax25Endpoint : IAsyncDisposable
 {
     /// <summary>
-    /// Per-SendData chunk cap. The engine rejects an over-N1 (256) payload on a link
-    /// without the §6.6 segmenter (LinBPQ never negotiates it), and the oracle's netsim
-    /// port runs PACLEN=120 — so feed the I-frame queue in chunks the channel is sized
-    /// for. FBB is a byte stream; frame boundaries are irrelevant to it.
+    /// Per-SendData chunk cap (instance, set per transport). The engine rejects an over-N1
+    /// (256) payload on a link without the segmenter; netsim runs PACLEN 120, F6FBB 236 —
+    /// feed the I-frame queue in chunks the channel is sized for. FBB is a byte stream;
+    /// frame boundaries are irrelevant to it.
     /// </summary>
-    private const int ChunkSize = 120;
+    private readonly int _chunkSize;
 
-    private readonly KissTcpClient _kiss;
+    private readonly IAx25Transport _transport;
+    private readonly string _myCall;
+
+    /// <summary>null = use the listener's PreferExtendedConnect default (KISS/LinBPQ path,
+    /// byte-identical to before); false = force a v2.0 SABM (mod-8) connect (AXUDP/F6FBB:
+    /// xfbbd over kernel-AX.25 answers SABM, as the proven linbpq→Q0FBB-1 path did).</summary>
+    private readonly bool? _extended;
+
     private readonly Ax25Listener _listener;
     private readonly Channel<Ax25ByteSession> _accepted = Channel.CreateUnbounded<Ax25ByteSession>();
     private readonly Dictionary<Ax25Session, Ax25ByteSession> _current = new(ReferenceEqualityComparer.Instance);
     private readonly object _gate = new();
 
-    private Ax25Endpoint(KissTcpClient kiss, string myCall)
+    private Ax25Endpoint(IAx25Transport transport, string myCall, int chunkSize, bool? extended)
     {
-        _kiss = kiss;
-        _listener = new Ax25Listener(kiss, new Ax25ListenerOptions
+        _transport = transport;
+        _myCall = myCall;
+        _chunkSize = chunkSize;
+        _extended = extended;
+        _listener = new Ax25Listener(transport, new Ax25ListenerOptions
         {
             MyCall = Callsign.Parse(myCall),
             // ConfigureSession runs before any event flows into a newly built session
@@ -48,12 +54,27 @@ internal sealed class Ax25Endpoint : IAsyncDisposable
         });
     }
 
-    /// <summary>Connects KISS-TCP and starts the listener's inbound pump.</summary>
+    /// <summary>Connects KISS-TCP (netsim node a, PACLEN 120) and starts the inbound pump.</summary>
     public static async Task<Ax25Endpoint> AttachAsync(
         string host, int port, string myCall, CancellationToken cancellationToken)
     {
         KissTcpClient kiss = await KissTcpClient.ConnectAsync(host, port, cancellationToken).ConfigureAwait(false);
-        var endpoint = new Ax25Endpoint(kiss, myCall);
+        var endpoint = new Ax25Endpoint(kiss, myCall, chunkSize: 120, extended: null);
+        await endpoint._listener.StartAsync(cancellationToken).ConfigureAwait(false);
+        return endpoint;
+    }
+
+    /// <summary>
+    /// Binds an AXUDP transport (every frame → <paramref name="remote"/>, receive on
+    /// <paramref name="localPort"/>) and starts the listener — the real-F6FBB VM path
+    /// (host 192.168.76.1 ↔ VM 192.168.76.2:10093 over the f6fbbr0 bridge). Forces v2.0
+    /// SABM and chunks I-frames to F6FBB's PACLEN (236).
+    /// </summary>
+    public static async Task<Ax25Endpoint> AttachAxudpAsync(
+        IPEndPoint remote, int localPort, string myCall, CancellationToken cancellationToken)
+    {
+        var transport = new AxudpSocketTransport(remote, localPort);
+        var endpoint = new Ax25Endpoint(transport, myCall, chunkSize: 236, extended: false);
         await endpoint._listener.StartAsync(cancellationToken).ConfigureAwait(false);
         return endpoint;
     }
@@ -61,8 +82,10 @@ internal sealed class Ax25Endpoint : IAsyncDisposable
     /// <summary>Dials <paramref name="remote"/>; returns the byte-stream handle once connected.</summary>
     public async Task<Ax25ByteSession> ConnectAsync(string remote, CancellationToken cancellationToken)
     {
-        Ax25Session session = await _listener.ConnectAsync(Callsign.Parse(remote), cancellationToken)
-            .ConfigureAwait(false);
+        Callsign r = Callsign.Parse(remote);
+        Ax25Session session = _extended is bool ext
+            ? await _listener.ConnectAsync(r, Callsign.Parse(_myCall), ext, cancellationToken).ConfigureAwait(false)
+            : await _listener.ConnectAsync(r, cancellationToken).ConfigureAwait(false);
         lock (_gate)
         {
             return Handle(session);
@@ -71,8 +94,6 @@ internal sealed class Ax25Endpoint : IAsyncDisposable
 
     /// <summary>
     /// Awaits the next inbound link-up (DL-CONNECT-indication — the UA has gone out).
-    /// The oracle's dial cycle is ~2 s after queueing plus ~30 s redial cycles, so
-    /// callers pass a deadline-bounded token.
     /// </summary>
     public async Task<Ax25ByteSession> AcceptAsync(CancellationToken cancellationToken) =>
         await _accepted.Reader.ReadAsync(cancellationToken).ConfigureAwait(false);
@@ -80,9 +101,9 @@ internal sealed class Ax25Endpoint : IAsyncDisposable
     /// <summary>Sends bytes on the session, chunked to the channel's frame size.</summary>
     internal void Send(Ax25Session session, ReadOnlyMemory<byte> data)
     {
-        for (int offset = 0; offset < data.Length; offset += ChunkSize)
+        for (int offset = 0; offset < data.Length; offset += _chunkSize)
         {
-            int length = Math.Min(ChunkSize, data.Length - offset);
+            int length = Math.Min(_chunkSize, data.Length - offset);
             _listener.SendData(session, data.Slice(offset, length));
         }
     }
@@ -109,10 +130,8 @@ internal sealed class Ax25Endpoint : IAsyncDisposable
     /// <inheritdoc/>
     public async ValueTask DisposeAsync()
     {
-        // Tear live links down before vanishing: a listener that just disappears leaves
-        // LinBPQ holding a dead session for ~100 s, which stalls its forwarding cycles
-        // and can poison the next test (observed live: an abandoned dial blocked the
-        // partner queue until BPQ's inactivity timeout fired).
+        // Tear live links down before vanishing: a listener that just disappears leaves the
+        // peer holding a dead session, which can poison the next test.
         bool anyLive = false;
         foreach (Packet.Ax25.Session.Ax25Session session in _listener.ActiveSessions)
         {
@@ -129,7 +148,7 @@ internal sealed class Ax25Endpoint : IAsyncDisposable
         }
 
         await _listener.DisposeAsync().ConfigureAwait(false);
-        await _kiss.DisposeAsync().ConfigureAwait(false);
+        await _transport.DisposeAsync().ConfigureAwait(false);
     }
 
     private void OnSignal(Ax25Session session, DataLinkSignal signal)
@@ -141,9 +160,7 @@ internal sealed class Ax25Endpoint : IAsyncDisposable
             switch (signal)
             {
                 case DataLinkConnectIndication:
-                    // A fresh inbound connect — including the oracle re-dialling into a
-                    // cached session after an earlier cycle. New byte stream, surfaced
-                    // to AcceptAsync.
+                    // A fresh inbound connect (incl. a peer re-dialling a cached session).
                     _accepted.Writer.TryWrite(Reset(session));
                     break;
 
@@ -197,7 +214,7 @@ internal sealed class Ax25Endpoint : IAsyncDisposable
 /// <c>CloseAsync</c>, <c>RemoteCallsign</c>) so the FBB session pump is a direct
 /// transcription of FbbSessionRunner.
 /// </summary>
-internal sealed class Ax25ByteSession
+internal sealed class Ax25ByteSession : Bbs.Host.Rhp.IFbbConnection
 {
     private readonly Ax25Endpoint _endpoint;
     private readonly Ax25Session _session;

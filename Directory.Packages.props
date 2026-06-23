@@ -11,6 +11,9 @@
     <PackageVersion Include="Microsoft.Extensions.TimeProvider.Testing" Version="10.7.0" />
     <PackageVersion Include="MimeKit" Version="4.17.0" />
     <PackageVersion Include="Packet.Ax25" Version="0.16.0" />
+    <PackageVersion Include="Packet.Ax25.Transport.Abstractions" Version="0.16.0" />
+    <PackageVersion Include="Packet.Axudp" Version="0.16.0" />
+    <PackageVersion Include="Packet.Core" Version="0.16.0" />
     <PackageVersion Include="Packet.Kiss" Version="0.16.0" />
     <PackageVersion Include="RhpV2.Client" Version="0.3.1" />
     <!-- CVE-2025-6965: override only the native SQLite binary. See Bbs.Core.csproj. -->

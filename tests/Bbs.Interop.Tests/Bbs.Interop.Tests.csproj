@@ -19,22 +19,27 @@
   <ItemGroup>
     <PackageReference Include="coverlet.collector" />
     <PackageReference Include="Microsoft.NET.Test.Sdk" />
-    <!-- The published packet.net libraries (public interfaces only — design.md
-         architecture rule). The interop tests take the AX.25 leg directly because
-         the oracle stack has no pdn node: Ax25Listener over KISS-TCP to netsim
-         node a is the same engine a real pdn node fronts for the BBS. -->
-    <PackageReference Include="Packet.Ax25" />
-    <PackageReference Include="Packet.Kiss" />
     <PackageReference Include="xunit" />
     <PackageReference Include="xunit.runner.visualstudio" />
+  </ItemGroup>
+
+  <!-- packet.net AX.25 stack from the published 0.14.0 NuGets (no more source refs). The
+       AXUDP lane to the real-F6FBB VM uses the published AxudpSocket (Packet.Axudp) via the
+       local AxudpSocketTransport adapter — AxudpFrameTransport itself is not (yet) published;
+       it lives in the unpublished Packet.Node.Core (see AxudpSocketTransport.cs). The LinBPQ
+       KISS lane uses Packet.Kiss' KissTcpClient (also an IAx25Transport). -->
+  <ItemGroup>
+    <PackageReference Include="Packet.Ax25" />
+    <PackageReference Include="Packet.Ax25.Transport.Abstractions" />
+    <PackageReference Include="Packet.Core" />
+    <PackageReference Include="Packet.Kiss" />
+    <PackageReference Include="Packet.Axudp" />
   </ItemGroup>
 
   <ItemGroup>
     <!-- The wire-faithful fake RHP node from the W5 unit lane, compile-linked so the
          RHPv2 wire (packet.net docs/rhp2-server.md framing/shapes) has exactly one
-         test implementation. The host-path interop tests front it with the AX.25 leg
-         (RhpAx25Bridge): the REAL composed host speaks its REAL RHP client wire while
-         the session bytes ride the simulated RF channel to the oracle. -->
+         test implementation. -->
     <Compile Include="..\Bbs.Host.Tests\FakeRhpServer.cs" Link="FakeRhpServer.cs" />
   </ItemGroup>
 
