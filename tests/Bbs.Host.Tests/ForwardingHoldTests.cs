@@ -2,6 +2,7 @@ using System.Text;
 using Bbs.Core;
 using Bbs.Host.Forwarding;
 using Bbs.Host.Rhp;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 
 namespace Bbs.Host.Tests;
@@ -78,6 +79,53 @@ public class ForwardingHoldTests
         // host.Runner is constructed enabled (default); a closed connection ends the session.
         FbbSessionResult result = await host.Runner.RunAnswererAsync(conn, [], host.Token);
         Assert.True(conn.SendCount > 0 || conn.ReceiveCount > 0); // it engaged the wire
+    }
+
+    [Fact]
+    public async Task Outbound_Enabled_LogsActiveLineWithPartnerAndQueueCounts()
+    {
+        // The positive counterpart of the HELD warning: at golive (forwarding.enabled flips true)
+        // the operator needs a confirmation the hold is OFF + the backlog size. Assert the RENDERED
+        // line (counts substituted), not just that something logged.
+        await using var host = new HostHarness();
+        await host.StartLinkAsync();
+        host.Store.UpsertPartner(new Partner
+        {
+            Call = "GB7XYZ",
+            AtCalls = ["*"],
+            ConnectScript = ["C GB7XYZ-1"],
+            ForwardNewImmediately = true,
+        });
+        Message stored = host.Store.AddMessage(new MessageDraft
+        {
+            Type = MessageType.Personal,
+            From = "M0LTE",
+            Recipients = ["G8ABC"],
+            Subject = "active",
+            Body = Encoding.Latin1.GetBytes("x\r"),
+        });
+        host.Routing.RouteMessage(stored); // queue 1 message to GB7XYZ
+
+        var log = new CapturingLogger<ForwardingScheduler>();
+        var sched = new ForwardingScheduler(host.Link, host.Runner, host.Store, host.Identity, host.Time, log, enabled: true);
+        using var cts = new CancellationTokenSource();
+        Task run = sched.RunAsync(cts.Token); // ACTIVE line is emitted synchronously at the top
+        await Task.Delay(50);
+        cts.Cancel();
+        try { await run; } catch (OperationCanceledException) { }
+
+        Assert.Contains(log.Messages, m =>
+            m.Contains("Outbound forwarding ACTIVE: 1 partner(s) enabled", System.StringComparison.Ordinal)
+            && m.Contains("1 message(s) queued", System.StringComparison.Ordinal));
+    }
+
+    private sealed class CapturingLogger<T> : ILogger<T>
+    {
+        public List<string> Messages { get; } = [];
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+        public bool IsEnabled(LogLevel logLevel) => true;
+        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter)
+            => Messages.Add(formatter(state, exception));
     }
 
     private sealed class RecordingFbbConnection(string remote) : IFbbConnection

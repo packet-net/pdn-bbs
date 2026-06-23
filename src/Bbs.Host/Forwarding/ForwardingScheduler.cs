@@ -111,6 +111,14 @@ public sealed class ForwardingScheduler
             return;
         }
 
+        // The positive counterpart of LogForwardingHeld: at start (and notably right after a
+        // cutover flips forwarding.enabled true) confirm the hold is OFF and surface the backlog
+        // at t0 — how many partners will be dialled and how much mail is queued to drain. Until
+        // now the only signal was the ABSENCE of the HELD warning.
+        var enabledPartners = _store.ListPartners().Where(p => p.Enabled).ToList();
+        int queued = enabledPartners.Sum(p => _store.GetForwardQueue(p.Call).Count);
+        LogForwardingActive(_logger, enabledPartners.Count, queued, null);
+
         try
         {
             while (!cancellationToken.IsCancellationRequested)
@@ -415,4 +423,8 @@ public sealed class ForwardingScheduler
         LoggerMessage.Define(LogLevel.Warning, new EventId(6, "ForwardingHeld"),
             "Outbound forwarding is HELD (forwarding.enabled = false); no partners will be dialled. "
             + "Set forwarding.enabled = true to resume.");
+
+    private static readonly Action<ILogger, int, int, Exception?> LogForwardingActive =
+        LoggerMessage.Define<int, int>(LogLevel.Information, new EventId(7, "ForwardingActive"),
+            "Outbound forwarding ACTIVE: {Partners} partner(s) enabled, {Queued} message(s) queued to drain.");
 }
