@@ -653,6 +653,24 @@ internal static class BpqImporter
         {
             report.Warnings.Add($"sqlite_sequence seq {seq} is below the intended high-water {report.HighWaterMark}.");
         }
+
+        // Per-user "last listed" reconciliation (fail-loud guard for the field-7 regression class): the
+        // importer once hardcoded last_listed_number=0, silently resetting every user's "new mail"
+        // watermark so they re-listed the whole back-catalogue on first connect. That was found by a
+        // human reading source — exactly the kind of hole this assertion now makes self-reporting. The
+        // count of users carrying a non-zero pointer in the import MUST match BPQ's. Mirror the EXACT
+        // import filter (ImportUsers skips IsBbs partner records AND the own-BBS record), or the guard
+        // false-positives on an own-call that happens to carry a pointer.
+        int srcUsersWithPointer = source.Config.Users.Count(u =>
+            !u.IsBbs && !Callsigns.BaseEquals(u.Call, source.Config.BbsName) && u.LastListed > 0);
+        int dbUsersWithPointer = (int)ScalarLong(connection, "SELECT COUNT(*) FROM users WHERE last_listed_number > 0;");
+        if (dbUsersWithPointer != srcUsersWithPointer)
+        {
+            report.Warnings.Add(
+                $"Last-listed pointer mismatch: {srcUsersWithPointer} user(s) carry a non-zero pointer in BPQ " +
+                $"but {dbUsersWithPointer} in the import — the per-user \"new mail\" watermark may be wrong " +
+                "(users would re-list old mail as new). Check the BpqImporter field-7 mapping.");
+        }
     }
 
     private static void ComputeProjectedCounts(ImportReport report, BpqSource source, string ownCall)

@@ -196,6 +196,9 @@ public sealed class BpqImporterIntegrationTests : IDisposable
         // The "last listed" pointer (BPQ field 7 lastmsg=29) is carried over verbatim, so the migrated
         // user is not shown the whole back-catalogue as "new" on first connect (NOT hardcoded 0).
         Assert.Equal(29, ScalarLong(c, "SELECT last_listed_number FROM users WHERE callsign='M0LTE';"));
+        // The fail-loud reconciliation guard agrees source and import (1 user with a non-zero pointer),
+        // so it stays silent — it only warns if the field-7 mapping ever regresses to hardcoded 0.
+        Assert.DoesNotContain(report.Warnings, w => w.Contains("Last-listed pointer mismatch", StringComparison.Ordinal));
 
         // Password caveat: BPQ has no Argon2id hashes, so NO mail_auth row is written (= disabled).
         Assert.Equal(0, ScalarLong(c, "SELECT COUNT(*) FROM mail_auth;"));
