@@ -189,18 +189,18 @@ public sealed class ForwardingTestConnectTests : IAsyncDisposable
     }
 
     [Fact]
-    public async Task BangTarget_StrippedAndWarned_InThePlan()
+    public async Task PortAndTarget_DialledFromTheOpenLine()
     {
-        // Feature 1 + 2 together: a BPQ "!" script resolves (target stripped, warning) and the probe
-        // dials the stripped callsign, surfacing the warning in plan.warnings.
-        _host.Store.UpsertPartner(new Partner { Call = "GB7BPQ", ConnectScript = ["NC 3 !GB7BPQ"] });
+        // A partner's stored script is pdn-normalised at import (NC->C, "!" stripped — see
+        // BpqConnectScriptTests), so test-connect sees a clean "C <port> <call>" open and dials it.
+        _host.Store.UpsertPartner(new Partner { Call = "GB7BPQ", ConnectScript = ["C 3 GB7BPQ"] });
         await _host.StartLinkAsync();
 
         using HttpClient client = await StartWebAsync("tom", Sysop);
         Task<HttpResponseMessage> post = PostTestConnectAsync(client, "GB7BPQ");
 
         FakeRhpPeer peer = await _host.Server.NextOpenAsync();
-        Assert.Equal("GB7BPQ", peer.Remote);     // dialled the stripped (bare) callsign
+        Assert.Equal("GB7BPQ", peer.Remote);     // dialled the bare callsign
         Assert.Equal("3", peer.Port);            // port 3 rode the open
         await peer.SendLineAsync(PeerSid);
 
@@ -208,9 +208,7 @@ public sealed class ForwardingTestConnectTests : IAsyncDisposable
         Assert.True(json.GetProperty("ok").GetBoolean());
         Assert.Equal("GB7BPQ", json.GetProperty("target").GetString());
         Assert.Equal("3", json.GetProperty("port").GetString());
-        string[] warnings = json.GetProperty("plan").GetProperty("warnings")
-            .EnumerateArray().Select(e => e.GetString()!).ToArray();
-        Assert.Contains(warnings, w => w.Contains('!', StringComparison.Ordinal));
+        Assert.Empty(json.GetProperty("plan").GetProperty("warnings").EnumerateArray()); // clean script
         await peer.WaitForHostCloseAsync();
     }
 
