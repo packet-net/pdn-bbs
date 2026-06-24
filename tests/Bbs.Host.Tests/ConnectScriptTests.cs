@@ -5,10 +5,10 @@ namespace Bbs.Host.Tests;
 
 /// <summary>
 /// Connect-script resolution (compat spec §4.4): the first <c>C [port] &lt;target&gt;</c>
-/// names the RHP open; every later line is an expect/send post-connect step
-/// (<c>EXPECT=SEND</c> split on the first <c>=</c>; a bare line is send-only — the legacy
-/// verbatim form); <c>PAUSE n</c> delays; the directives BPQ interprets locally are
-/// recognised, warned and kept off the wire.
+/// names the RHP open (no <c>C</c> line at all → inbound-only, Target null); every later line is
+/// an expect/send post-connect step (<c>EXPECT=SEND</c> split on the first <c>=</c>; a bare line is
+/// send-only — the legacy verbatim form); <c>PAUSE n</c> is superseded to a note; the directives BPQ
+/// interprets locally are recognised, warned and kept off the wire.
 /// </summary>
 public class ConnectScriptTests
 {
@@ -22,10 +22,13 @@ public class ConnectScriptTests
     }
 
     [Fact]
-    public void EmptyScript_DialsThePartnerCallWithNoSteps()
+    public void EmptyScript_IsInboundOnly_NeverDialled()
     {
+        // An empty connect script means the partner dials US and polls for its mail (a sporadically-
+        // on-air station) — we never dial it. Target is null; IsInboundOnly is true.
         ConnectPlan plan = ConnectScript.Resolve(PartnerWith());
-        Assert.Equal("GB7BPQ", plan.Target);
+        Assert.Null(plan.Target);
+        Assert.True(plan.IsInboundOnly);
         Assert.Null(plan.Port);
         Assert.Empty(plan.Steps);
         Assert.Empty(plan.Warnings);
@@ -129,12 +132,13 @@ public class ConnectScriptTests
     }
 
     [Fact]
-    public void NoLeadingC_DialsThePartnerAndEveryLineIsAStep()
+    public void NoLeadingC_IsInboundOnly_EvenWithStrayLines()
     {
-        // Without a leading C the RHP open dials the partner call itself, and even a C
-        // appearing after another step stays a send-only step.
+        // With NO C line there is nothing to dial, so the partner is inbound-only (Target null) — we
+        // never dial it. Any stray lines still parse to steps but are never run (no open happens).
         ConnectPlan plan = ConnectScript.Resolve(PartnerWith("NODES", "C GB7RDG"));
-        Assert.Equal("GB7BPQ", plan.Target);
+        Assert.Null(plan.Target);
+        Assert.True(plan.IsInboundOnly);
         Assert.Equal(2, plan.Steps.Count);
         Assert.Equal(("", "NODES"), Pair(plan.Steps[0]));
         Assert.Equal(("", "C GB7RDG"), Pair(plan.Steps[1]));
@@ -142,14 +146,17 @@ public class ConnectScriptTests
     }
 
     [Fact]
-    public void Pause_BecomesAPauseStepInOrder()
+    public void Pause_IsSupersededToANote_NotAStep()
     {
+        // PAUSE is superseded by the runner's expect-then-send prompt gating, so it is dropped from
+        // the wire and recorded as a note (not a step, not a warning) — never silently dropped.
         ConnectPlan plan = ConnectScript.Resolve(PartnerWith("C GB7BPQ", "PAUSE 5", "BBS"));
         Assert.Equal("GB7BPQ", plan.Target);
-        Assert.Equal(2, plan.Steps.Count);
-        Assert.Equal(TimeSpan.FromSeconds(5), Assert.IsType<PauseStep>(plan.Steps[0]).Delay);
-        Assert.Equal(("", "BBS"), Pair(plan.Steps[1]));
+        Assert.Equal(("", "BBS"), Pair(Assert.Single(plan.Steps)));
         Assert.Empty(plan.Warnings);
+        string note = Assert.Single(plan.Notes);
+        Assert.Contains("PAUSE 5", note, StringComparison.Ordinal);
+        Assert.Contains("superseded", note, StringComparison.Ordinal);
     }
 
     [Theory]
@@ -158,12 +165,15 @@ public class ConnectScriptTests
     [InlineData("PAUSE 0")]
     [InlineData("PAUSE -3")]
     [InlineData("PAUSE 5 9")]
-    public void MalformedPause_IsWarnedAndKeptOffTheWire(string line)
+    public void AnyPauseLine_IsSupersededToANote_KeptOffTheWire(string line)
     {
+        // PAUSE is superseded regardless of its argument — it never reaches the wire and is recorded
+        // as a note (no step, no warning); the seconds are irrelevant now that prompts gate progress.
         ConnectPlan plan = ConnectScript.Resolve(PartnerWith("C GB7BPQ", line));
         Assert.Empty(plan.Steps);
-        string warning = Assert.Single(plan.Warnings);
-        Assert.Contains("PAUSE", warning, StringComparison.Ordinal);
+        Assert.Empty(plan.Warnings);
+        string note = Assert.Single(plan.Notes);
+        Assert.Contains("PAUSE", note, StringComparison.Ordinal);
     }
 
     [Fact]

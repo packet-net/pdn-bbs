@@ -116,6 +116,7 @@ public class OutboundForwardingTests
         {
             Call = "GB7BPQ",
             AtCalls = ["*"],
+            ConnectScript = ["C GB7BPQ"],
             ForwardIntervalSeconds = 3600,
             ForwardNewImmediately = false, // timer only
         });
@@ -137,7 +138,7 @@ public class OutboundForwardingTests
         await host.AdvanceUntilAsync(TimeSpan.FromMinutes(20), () => Task.FromResult(host.Server.OpenAttempts > 0));
 
         FakeRhpPeer peer = await host.Server.NextOpenAsync();
-        Assert.Equal("GB7BPQ", peer.Remote); // no script → dial the partner call itself
+        Assert.Equal("GB7BPQ", peer.Remote); // dials the connect-script target
     }
 
     [Fact]
@@ -148,6 +149,7 @@ public class OutboundForwardingTests
         {
             Call = "GB7BPQ",
             AtCalls = ["*"],
+            ConnectScript = ["C GB7BPQ"],
             ForwardNewImmediately = true,
         });
         await host.StartLinkAsync();
@@ -188,6 +190,7 @@ public class OutboundForwardingTests
         {
             Call = "GB7BPQ",
             AtCalls = ["*"],
+            ConnectScript = ["C GB7BPQ"],
             ForwardNewImmediately = true,
             ForwardIntervalSeconds = 3600,
         });
@@ -235,6 +238,7 @@ public class OutboundForwardingTests
         {
             Call = "GB7BPQ",
             AtCalls = ["*"],
+            ConnectScript = ["C GB7BPQ"],
             ForwardNewImmediately = true,
         });
         await host.StartLinkAsync();
@@ -310,6 +314,7 @@ public class OutboundForwardingTests
         {
             Call = "GB7CIP",
             AtCalls = ["*"],
+            ConnectScript = ["C GB7CIP"],
             Collect = true,
             ForwardIntervalSeconds = 3600,
             ForwardNewImmediately = false,
@@ -323,7 +328,7 @@ public class OutboundForwardingTests
         await host.AdvanceUntilAsync(TimeSpan.FromMinutes(20), () => Task.FromResult(host.Server.OpenAttempts > 0));
 
         FakeRhpPeer peer = await host.Server.NextOpenAsync();
-        Assert.Equal("GB7CIP", peer.Remote); // no script → dial the partner call itself
+        Assert.Equal("GB7CIP", peer.Remote); // dials the connect-script target
         await peer.SendLineAsync(PeerSid);
         await peer.SendTextAsync("de GB7CIP>\r");
 
@@ -365,6 +370,7 @@ public class OutboundForwardingTests
         {
             Call = "GB7CIP",
             AtCalls = ["*"],
+            ConnectScript = ["C GB7CIP"],
             Collect = true,
             ForwardIntervalSeconds = 3600,
             ForwardNewImmediately = false,
@@ -396,6 +402,7 @@ public class OutboundForwardingTests
         {
             Call = "GB7BPQ",
             AtCalls = ["*"],
+            ConnectScript = ["C GB7BPQ"],
             ForwardIntervalSeconds = 3600,
             ForwardNewImmediately = false,
         });

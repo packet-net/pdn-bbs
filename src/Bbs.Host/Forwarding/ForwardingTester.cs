@@ -7,7 +7,7 @@ namespace Bbs.Host.Forwarding;
 
 /// <summary>The outcome of one sysop "test connect" probe (the <c>/forwarding/test-connect</c> JSON shape).</summary>
 /// <param name="Partner">The partner callsign that was probed.</param>
-/// <param name="Target">The callsign/alias the RHP open dialled (from the resolved <see cref="ConnectPlan"/>).</param>
+/// <param name="Target">The callsign/alias the RHP open dialled (from the resolved <see cref="ConnectPlan"/>), or null for an inbound-only partner (empty script — nothing was dialled).</param>
 /// <param name="Port">The node port the open pinned, or null (any).</param>
 /// <param name="Ok">True iff we opened, navigated the script, and saw the peer SID/prompt — without any failure text.</param>
 /// <param name="Sid">The peer SID or prompt line actually observed (e.g. <c>[BPQ-6.0.25.30-B12FWIHJM$]</c> or <c>de GB7RDG&gt;</c>); null if none was seen.</param>
@@ -18,7 +18,7 @@ namespace Bbs.Host.Forwarding;
 /// <param name="Notes">The plan's informational notes (recognised-but-superseded directives, e.g. <c>INTERLOCK</c>) — surfaced on demand here even though they don't warn in the cycle log.</param>
 public sealed record ConnectTestResult(
     string Partner,
-    string Target,
+    string? Target,
     string? Port,
     bool Ok,
     string? Sid,
@@ -76,10 +76,23 @@ public sealed class ForwardingTester
         var transcript = new List<string>();
         TimeSpan wait = TimeSpan.FromSeconds(Math.Max(1, partner.ConTimeoutSeconds));
 
+        if (plan.Target is null)
+        {
+            // Inbound-only (empty connect script): this partner dials US and polls for its mail — there
+            // is nothing to dial. Not a fault: it should still be ENABLED so we reverse-forward to it on
+            // its inbound poll. Report that, having contacted no one (no open, no mail moved).
+            return new ConnectTestResult(
+                partner.Call, Target: null, Port: null, Ok: true, Sid: null,
+                ["inbound-only — this partner connects to us; there is nothing to dial. " +
+                 "Enable it so its queued mail forwards when it next polls."],
+                Error: null, steps, plan.Warnings, plan.Notes);
+        }
+
+        string target = plan.Target;
         RhpChildConnection child;
         try
         {
-            child = await _link.OpenAsync(plan.Target, plan.Port, cancellationToken).ConfigureAwait(false);
+            child = await _link.OpenAsync(target, plan.Port, cancellationToken).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -90,7 +103,7 @@ public sealed class ForwardingTester
             // A refused/failed open (link down, node rejected the connect): reachability failed
             // before any dialogue. Report it, don't throw — this is a diagnostic tool.
             return new ConnectTestResult(
-                partner.Call, plan.Target, plan.Port, Ok: false, Sid: null,
+                partner.Call, target, plan.Port, Ok: false, Sid: null,
                 transcript, ex.Message, steps, plan.Warnings, plan.Notes);
         }
 
@@ -111,7 +124,7 @@ public sealed class ForwardingTester
                 : FirstLine(initial);
 
             return new ConnectTestResult(
-                partner.Call, plan.Target, plan.Port, Ok: true, sid,
+                partner.Call, target, plan.Port, Ok: true, sid,
                 transcript, Error: null, steps, plan.Warnings, plan.Notes);
         }
         catch (ConnectScriptException ex)
@@ -119,7 +132,7 @@ public sealed class ForwardingTester
             // Node failure text, an expect that never arrived, or a timeout — the partner is
             // reachable-but-unusable per the script. The transcript captured so far rides along.
             return new ConnectTestResult(
-                partner.Call, plan.Target, plan.Port, Ok: false, Sid: null,
+                partner.Call, target, plan.Port, Ok: false, Sid: null,
                 transcript, ex.Message, steps, plan.Warnings, plan.Notes);
         }
         finally
@@ -146,7 +159,6 @@ public sealed class ForwardingTester
     /// <summary>Renders one resolved step for the JSON <c>plan.steps</c> display.</summary>
     private static string RenderStep(ConnectScriptStep step) => step switch
     {
-        PauseStep p => $"PAUSE {p.Delay.TotalSeconds:0}",
         ExpectSendStep { Expect.Length: > 0 } es => $"{es.Expect}={es.Send}",
         ExpectSendStep es => es.Send,
         _ => step.ToString() ?? "",

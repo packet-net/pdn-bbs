@@ -17,25 +17,34 @@ public abstract record ConnectScriptStep;
 /// </summary>
 public sealed record ExpectSendStep(string Expect, string Send) : ConnectScriptStep;
 
-/// <summary>The <c>PAUSE n</c> directive (spec §4.4): wait before the next step.</summary>
-public sealed record PauseStep(TimeSpan Delay) : ConnectScriptStep;
-
 /// <summary>The resolved dial plan for one forwarding cycle.</summary>
-/// <param name="Target">The callsign/alias the RHP <c>open</c>(Active) dials.</param>
+/// <param name="Target">The callsign/alias the RHP <c>open</c>(Active) dials, or <c>null</c> when the
+/// partner has no connect step at all (an empty script) — an INBOUND-ONLY partner that connects to
+/// <em>us</em> (a sporadically-on-air station that polls for its mail); we never dial it. See
+/// <see cref="IsInboundOnly"/>.</param>
 /// <param name="Port">The node port for the open, when the <c>C</c> line named one (<c>C &lt;port&gt; &lt;call&gt;</c>); null = any.</param>
 /// <param name="Steps">Post-connect steps, run by <see cref="ConnectScriptRunner"/> after the open succeeds.</param>
 /// <param name="Warnings">Script lines we do not honour but probably should have (logged at Warning each
 /// cycle, never silently dropped) — a real deferral the operator may want to act on.</param>
 /// <param name="Notes">Recognised lines we deliberately do not honour <em>here</em> because the function
 /// is owned by another layer (e.g. <c>INTERLOCK</c>, whose per-port serialization belongs to the
-/// node/port layer, not the connect script). Named — never silently dropped — but informational, not a
+/// node/port layer, not the connect script), or are superseded (e.g. <c>PAUSE</c>, replaced by the
+/// runner's expect-then-send prompt gating). Named — never silently dropped — but informational, not a
 /// warning: logged at Debug per cycle, surfaced on demand by the sysop test-connect tool.</param>
 public sealed record ConnectPlan(
-    string Target,
+    string? Target,
     string? Port,
     IReadOnlyList<ConnectScriptStep> Steps,
     IReadOnlyList<string> Warnings,
-    IReadOnlyList<string> Notes);
+    IReadOnlyList<string> Notes)
+{
+    /// <summary>
+    /// True when there is no connect step (an empty script): the partner dials US and polls for its
+    /// mail (reverse-forwarded during its inbound session) — we never dial it. The scheduler starts no
+    /// outbound loop for such a partner; the sysop test-connect tool has nothing to dial.
+    /// </summary>
+    public bool IsInboundOnly => Target is null;
+}
 
 /// <summary>
 /// Connect-script interpretation (compat spec §4.4) with an expect/send step model ported
@@ -43,17 +52,21 @@ public sealed record ConnectPlan(
 ///
 /// <list type="bullet">
 /// <item>The FIRST step being <c>C [port] &lt;target&gt;</c> names the open (port optional,
-/// digits — extra tokens such as digipeaters are warned, no via support over RHP). No leading
-/// <c>C</c> → the open dials the partner callsign itself. (BPQ node-command dialects — the
-/// <c>NC</c> verb, the <c>!</c> direct flag — are normalised to plain <c>C</c> at IMPORT by the
-/// migrator, not tolerated here; pdn's <c>C</c> already negotiates.)</item>
+/// digits — extra tokens such as digipeaters are warned, no via support over RHP). A script with
+/// NO <c>C</c> line at all is INBOUND-ONLY (<see cref="ConnectPlan.IsInboundOnly"/>): the partner
+/// dials us and polls for its mail; we never dial it. (BPQ node-command dialects — the <c>NC</c>
+/// verb, the <c>!</c> direct flag — are normalised to plain <c>C</c> at IMPORT by the migrator, not
+/// tolerated here; pdn's <c>C</c> already negotiates.)</item>
 /// <item>Every line AFTER the connect step is an <see cref="ExpectSendStep"/>. The
 /// <c>EXPECT=SEND</c> form (split on the FIRST <c>=</c>, whitespace trimmed around each)
 /// waits for EXPECT then sends SEND — e.g. <c>GB7RDG&gt;=BBS</c> waits for the node prompt
 /// then sends <c>BBS</c>. A line with NO <c>=</c> is send-only (Expect empty): it goes out
 /// verbatim with an inter-line response wait, exactly the legacy behaviour (e.g. <c>C GB7RDG</c>
 /// is a node-level connect typed at the remote prompt, <c>BBS</c> enters the BBS app).</item>
-/// <item><c>PAUSE n</c> is honoured as a delay. The remaining §4.4 directives (TIMES,
+/// <item><c>PAUSE n</c> is recognised but <em>superseded</em>, not honoured: it was BPQ's crude
+/// fixed-delay stand-in for "wait until the remote is ready", which the runner now does properly by
+/// gating every step on the node's actual prompt (expect-then-send). It is recorded as a note and
+/// kept off the wire — no timed pacing is reintroduced. The remaining §4.4 directives (TIMES,
 /// ELSE, MSGTYPE, SKIPPROMPT, SKIPCON, TEXTFORWARDING, SETCALLTOSENDER,
 /// ATTACH, RADIO, FILE, IMPORT, RMS, SendWL2KFW) are recognised so they are never sent to
 /// a node, and warned as unsupported — named deviations, not silent drops.</item>
@@ -86,7 +99,8 @@ public static class ConnectScript
     /// </summary>
     private static readonly string[] SupersededDirectives = ["INTERLOCK"];
 
-    /// <summary>Resolves a partner's script. An empty script dials the partner callsign with no steps.</summary>
+    /// <summary>Resolves a partner's script. An empty script (no <c>C</c> line) is INBOUND-ONLY:
+    /// <see cref="ConnectPlan.Target"/> is null and the partner is never dialled.</summary>
     public static ConnectPlan Resolve(Partner partner)
     {
         ArgumentNullException.ThrowIfNull(partner);
@@ -111,15 +125,13 @@ public static class ConnectScript
 
             if (verb == "PAUSE")
             {
-                if (tokens.Length == 2 && int.TryParse(tokens[1], out int seconds) && seconds > 0)
-                {
-                    steps.Add(new PauseStep(TimeSpan.FromSeconds(seconds)));
-                }
-                else
-                {
-                    warnings.Add($"malformed PAUSE line \"{line}\" ignored — expected PAUSE <seconds>");
-                }
-
+                // Superseded, not honoured: PAUSE was BPQ's fixed-delay stand-in for "wait until the
+                // remote settles" before the next line. The runner now gates every step on the node's
+                // actual prompt (expect-then-send), so a timed pause is redundant — recognised, named
+                // as a note, and dropped from the wire rather than reintroducing time-based pacing.
+                notes.Add(
+                    $"connect-script directive \"{line}\" recognised but superseded — readiness is now " +
+                    "gated by waiting for the node prompt (expect-then-send), not a fixed delay");
                 continue;
             }
 
@@ -153,7 +165,8 @@ public static class ConnectScript
             sawStep = true;
         }
 
-        return new ConnectPlan(target ?? partner.Call, port, steps, warnings, notes);
+        // No C line at all → Target null → INBOUND-ONLY (the partner dials us; we never dial it).
+        return new ConnectPlan(target, port, steps, warnings, notes);
     }
 
     /// <summary>

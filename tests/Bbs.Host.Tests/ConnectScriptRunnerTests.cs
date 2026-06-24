@@ -5,10 +5,11 @@ using Bbs.Fbb;
 namespace Bbs.Host.Tests;
 
 /// <summary>
-/// Connect-script execution at the scheduler level (compat spec §4.4): post-open steps
-/// run in order with response waits, node chatter is absorbed before the FBB caller
-/// session starts, failure text and silent nodes fail the cycle onto the backoff-retry
-/// path, and a <c>C &lt;port&gt; &lt;target&gt;</c> connect pins the port on the RHP open.
+/// Connect-script execution at the scheduler level (compat spec §4.4): post-open steps run in order
+/// (an explicit EXPECT= waits for its prompt before sending; a bare line is sent verbatim), the
+/// hand-to-FBB wait accepts ONLY a real FBB SID (never an intermediate node prompt), node chatter is
+/// absorbed before the FBB caller session starts, failure text and silent nodes fail the cycle onto
+/// the backoff-retry path, and a <c>C &lt;port&gt; &lt;target&gt;</c> connect pins the port on the RHP open.
 /// </summary>
 public class ConnectScriptRunnerTests
 {
@@ -224,6 +225,50 @@ public class ConnectScriptRunnerTests
         // the next step.
         await peer.SendLineAsync("*** Connected to GB7RDG");
         Assert.Equal("BBS", await peer.ReadLineAsync());
+    }
+
+    [Fact]
+    public async Task MultiHopBareStep_SkipsGatewayBanners_AndReturnsThePartnerSidNotTheGatewayBanner()
+    {
+        // The GB7CIP shape: dial the WEM gateway (port 3), then a BARE onward command. WEM is a
+        // URONode whose prompts END in '>'. The old terminal accept took WEM's '>'-banner AS GB7CIP's
+        // SID (the wrong-banner capture). The fix: the hand-to-FBB wait accepts ONLY a real FBB SID,
+        // so it skips every gateway banner and holds out for GB7CIP's actual SID. (A bare line still
+        // sends verbatim; an EXPECT= would be set to ALSO wait for WEM's prompt before sending — node
+        // prompts are not standardised, so only an explicit expect can gate a bare command.)
+        await using var host = new HostHarness();
+        host.Store.UpsertPartner(new Partner
+        {
+            Call = "GB7CIP",
+            AtCalls = ["*"],
+            ConnectScript = ["C 3 GB7WEM-7", "C uhf gb7cip"],
+            ForwardNewImmediately = true,
+        });
+        await host.StartLinkAsync();
+        host.StartScheduler();
+        QueueOne(host, "Hi");
+
+        FakeRhpPeer peer = await host.Server.NextOpenAsync();
+        Assert.Equal("GB7WEM-7", peer.Remote);
+        Assert.Equal("3", peer.Port);
+
+        // The bare onward command goes out verbatim (the single step; no standardised prompt to gate on).
+        Assert.Equal("C uhf gb7cip", await peer.ReadLineAsync());
+
+        // WEM emits node banners that END in '>'. The OLD code captured the first as GB7CIP's SID and
+        // started FBB on it; the fix skips them and keeps waiting for a real FBB SID.
+        await peer.SendLineAsync("URONode v2.15 - Welcome to GB7WEM-1");
+        await peer.SendLineAsync("URONode GB7WEM in IO91un Help: ? <command>");
+        await Task.Delay(200);
+        Assert.False(peer.TryReadLine(out string premature),
+            $"FBB started on the gateway banner, not GB7CIP's SID: \"{premature}\"");
+
+        // GB7CIP's actual FBB SID arrives → only now does the FBB caller session begin (our SID + a
+        // proposal), proving the run handed over GB7CIP's SID and a clean stream — not WEM's banner.
+        await peer.SendLineAsync(PeerSid);
+        await peer.SendTextAsync("de GB7CIP>\r");
+        Assert.Equal(OwnSid, await peer.ReadLineAsync());
+        Assert.StartsWith("FA ", await peer.ReadLineAsync(), StringComparison.Ordinal);
     }
 
     [Fact]

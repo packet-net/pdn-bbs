@@ -175,6 +175,14 @@ public sealed class ForwardingScheduler
                 continue;
             }
 
+            if (ConnectScript.Resolve(partner).IsInboundOnly)
+            {
+                // Inbound-only (empty connect script): the partner dials US and polls for its mail — we
+                // never dial it. Start no outbound loop; its queue clears on its next inbound poll (the
+                // FbbSessionRunner answerer path), gated by the same per-partner Enabled flag.
+                continue;
+            }
+
             string call = Callsigns.Normalize(partner.Call);
             _nudges.TryAdd(call, NewNudgeChannel());
             if (!_loops.ContainsKey(call))
@@ -323,6 +331,15 @@ public sealed class ForwardingScheduler
     private async Task<CycleOutcome> RunCycleAsync(Partner partner, IReadOnlyList<Message> queue, CancellationToken cancellationToken)
     {
         ConnectPlan plan = ConnectScript.Resolve(partner);
+        if (plan.Target is null)
+        {
+            // Inbound-only (empty connect script): the partner dials US and polls for its mail — we
+            // never dial it. StartLoopsForEnabledPartners skips starting a loop for it; this is the
+            // belt-and-braces guard (and narrows plan.Target to non-null for the dial below).
+            return new CycleOutcome(Ran: true, Graceful: true, Error: null);
+        }
+
+        string target = plan.Target;
         foreach (string warning in plan.Warnings)
         {
             LogScriptWarning(_logger, partner.Call, warning, null);
@@ -352,14 +369,14 @@ public sealed class ForwardingScheduler
         {
             // A reverse-collection poll: dial with an empty outbound batch (we open with FF) and
             // let the session's in-session reverse pick up whatever the partner holds for us.
-            LogCollectStart(_logger, partner.Call, plan.Target, null);
+            LogCollectStart(_logger, partner.Call, target, null);
         }
         else
         {
-            LogCycleStart(_logger, partner.Call, plan.Target, outbound.Count, null);
+            LogCycleStart(_logger, partner.Call, target, outbound.Count, null);
         }
 
-        RhpChildConnection child = await _link.OpenAsync(plan.Target, plan.Port, cancellationToken).ConfigureAwait(false);
+        RhpChildConnection child = await _link.OpenAsync(target, plan.Port, cancellationToken).ConfigureAwait(false);
         try
         {
             // Navigate per the connect script (spec §4.4); a script failure (node

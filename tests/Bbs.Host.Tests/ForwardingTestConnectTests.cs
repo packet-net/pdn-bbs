@@ -170,22 +170,50 @@ public sealed class ForwardingTestConnectTests : IAsyncDisposable
     [Fact]
     public async Task SteplessOpen_SurfacesThePromptAsSid()
     {
-        // No connect script: the open dials the partner call itself and the probe waits out the prompt
-        // (the runner returns nothing for a stepless plan — WaitForPeerSidAsync surfaces it).
-        _host.Store.UpsertPartner(new Partner { Call = "GB7BPQ" });
+        // A stepless dial script (a bare "C <call>" open with no post-connect steps): the probe waits
+        // out the prompt (the runner returns nothing for a stepless plan — WaitForPeerSidAsync surfaces it).
+        _host.Store.UpsertPartner(new Partner { Call = "GB7BPQ", ConnectScript = ["C GB7BPQ"] });
         await _host.StartLinkAsync();
 
         using HttpClient client = await StartWebAsync("tom", Sysop);
         Task<HttpResponseMessage> post = PostTestConnectAsync(client, "GB7BPQ");
 
         FakeRhpPeer peer = await _host.Server.NextOpenAsync();
-        Assert.Equal("GB7BPQ", peer.Remote); // dialled the partner call itself
+        Assert.Equal("GB7BPQ", peer.Remote); // dialled the connect-script target
         await peer.SendLineAsync(PeerSid);
 
         JsonElement json = await ReadJsonAsync(await post);
         Assert.True(json.GetProperty("ok").GetBoolean());
         Assert.Equal(PeerSid, json.GetProperty("sid").GetString());
         await peer.WaitForHostCloseAsync();
+    }
+
+    [Fact]
+    public async Task InboundOnlyPartner_IsReportedAndNeverDialled()
+    {
+        // An empty connect script means the partner dials US (inbound-only): test-connect must NOT
+        // dial — it reports the inbound-only status (ok, null target/sid) and contacts no one.
+        _host.Store.UpsertPartner(new Partner { Call = "GB7BMY" }); // empty script → inbound-only
+        await _host.StartLinkAsync();
+
+        using HttpClient client = await StartWebAsync("tom", Sysop);
+        JsonElement json = await ReadJsonAsync(await PostTestConnectAsync(client, "GB7BMY"));
+
+        Assert.True(json.GetProperty("ok").GetBoolean());
+        Assert.Equal(JsonValueKind.Null, json.GetProperty("sid").ValueKind);
+        Assert.Equal(JsonValueKind.Null, json.GetProperty("target").ValueKind);
+        Assert.Equal(0, _host.Server.OpenAttempts); // never dialled
+
+        bool saysInboundOnly = false;
+        foreach (JsonElement line in json.GetProperty("transcript").EnumerateArray())
+        {
+            if (line.GetString()?.Contains("inbound-only", StringComparison.OrdinalIgnoreCase) == true)
+            {
+                saysInboundOnly = true;
+            }
+        }
+
+        Assert.True(saysInboundOnly, "the transcript should explain the partner is inbound-only");
     }
 
     [Fact]

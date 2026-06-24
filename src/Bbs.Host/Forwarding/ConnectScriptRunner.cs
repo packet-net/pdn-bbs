@@ -17,22 +17,25 @@ public sealed class ConnectScriptException(string message) : Exception(message);
 /// model is expect/send, ported from pdn-bpqchat's <c>RunWithScript</c>:
 ///
 /// <list type="bullet">
-/// <item>For each <see cref="ExpectSendStep"/> with a non-empty <c>Expect</c>, the runner reads
-/// the node stream until that case-insensitive substring appears (a node prompt has no line
-/// terminator, so the match is against accumulated bytes, not lines), bounded by the partner's
-/// ConTimeout; THEN, if <c>Send</c> is non-empty, it sends it CR-terminated and logs
-/// "matched … sent …". This confirms each hop (its prompt seen) before issuing the next command
-/// — what makes a multi-hop walk reliable when round-trip times vary.</item>
-/// <item>A send-only step (empty <c>Expect</c> — a bare script line, the legacy verbatim form)
-/// goes out verbatim, CR-terminated; after every send-only step except the last the runner waits
-/// for the node's progress before the next — a line containing <c>" CONNECTED"</c> (the leading
-/// space is BPQ's own guard against matching DISCONNECTED), starting <c>OK</c>, or a
-/// <c>&gt;</c>-terminated prompt line — exactly as before this change ("you don't need to program
-/// the node responses - the software knows what to look for", spec §4.4).</item>
-/// <item>After the LAST step it waits for a SID or <c>&gt;</c> (spec §4.4) and returns the SID
-/// line plus any unconsumed tail for the FBB caller session; node chatter observed on the way
-/// (CTEXT, <c>*** Connected to …</c> progress lines) is consumed here, where it belongs, so the
-/// FBB FSM sees a clean stream.</item>
+/// <item>A step with a non-empty <c>Expect</c> reads the node stream until that case-insensitive
+/// substring appears (a node prompt has no line terminator, so the match is against accumulated
+/// bytes, not lines), bounded by the partner's ConTimeout; THEN, if <c>Send</c> is non-empty, it
+/// sends it CR-terminated and logs "matched … sent …". An explicit <c>EXPECT=</c> is the ONLY
+/// reliable way to wait for a node prompt — prompts are not standardised across
+/// BPQ/URONode/XRouter/etc — so this is how a multi-hop walk confirms each hop before the next
+/// command.</item>
+/// <item>A send-only step (empty <c>Expect</c> — a bare script line, the legacy verbatim form) has
+/// no known prompt to wait for, so it goes out verbatim, CR-terminated; between bare steps (not the
+/// last) the runner makes a best-effort wait for the node's progress — a line containing
+/// <c>" CONNECTED"</c> (the leading space is BPQ's own guard against DISCONNECTED), starting
+/// <c>OK</c>, or ending <c>&gt;</c> — but for any node whose prompt differs, set an <c>EXPECT=</c>
+/// ("the software knows what to look for" holds only for the common case, spec §4.4).</item>
+/// <item>After the LAST step it waits for the partner's FBB SID — <c>[…-…]</c> ONLY, never a bare
+/// <c>&gt;</c>-prompt: an intermediate gateway banner ending <c>&gt;</c> (e.g. a URONode
+/// "…Help: ? <command>") must NOT be mistaken for the SID (the multi-hop wrong-banner capture). It
+/// returns the SID line plus any unconsumed tail for the FBB caller session; node chatter on the way
+/// (CTEXT, <c>*** Connected to …</c> progress lines, gateway prompts) is consumed here, where it
+/// belongs, so the FBB FSM sees a clean stream.</item>
 /// <item>Failure text at any point — BUSY / FAILURE / SORRY / INVALID / RETRIED /
 /// <c>ERROR - </c> / UNABLE TO CONNECT / DISCONNECTED / FAILED TO CONNECT / REJECTED
 /// (the spec §4.4 ELSE-detection list) — fails the cycle, as does a wait exceeding the
@@ -102,55 +105,53 @@ public static class ConnectScriptRunner
         int lastStep = plan.Steps.Count - 1;
         for (int i = 0; i < plan.Steps.Count; i++)
         {
-            switch (plan.Steps[i])
+            if (plan.Steps[i] is not ExpectSendStep step)
             {
-                case PauseStep pause:
-                    await Task.Delay(pause.Delay, time, cancellationToken).ConfigureAwait(false);
-                    break;
+                throw new InvalidOperationException($"Unknown step type {plan.Steps[i].GetType().Name}.");
+            }
 
-                case ExpectSendStep step:
-                    if (step.Expect.Length > 0)
-                    {
-                        // Expect/send (bpqchat ScriptStep): wait for the prompt BEFORE sending.
-                        await ExpectAsync(
-                            child, buffer, transcript, step.Expect,
-                            responseWait, time, cancellationToken).ConfigureAwait(false);
-                    }
+            // Expect/send (bpqchat ScriptStep): an explicit EXPECT= waits for that substring BEFORE
+            // sending — the ONLY reliable way to gate on a node prompt, since prompts are not
+            // standardised across BPQ/URONode/XRouter/etc. THIS is how a multi-hop walk confirms each
+            // hop (its prompt seen) before issuing the next command.
+            if (step.Expect.Length > 0)
+            {
+                await ExpectAsync(
+                    child, buffer, transcript, step.Expect,
+                    responseWait, time, cancellationToken).ConfigureAwait(false);
+            }
 
-                    if (step.Send.Length > 0)
-                    {
-                        LogScriptSend(logger, child.RemoteCallsign, step.Send, null);
-                        transcript.Add("> " + step.Send);
-                        await child.SendAsync(Encoding.Latin1.GetBytes(step.Send + "\r"), cancellationToken)
-                            .ConfigureAwait(false);
-                        if (step.Expect.Length > 0)
-                        {
-                            LogScriptMatched(logger, child.RemoteCallsign, step.Expect, step.Send, null);
-                        }
-                    }
+            if (step.Send.Length > 0)
+            {
+                LogScriptSend(logger, child.RemoteCallsign, step.Send, null);
+                transcript.Add("> " + step.Send);
+                await child.SendAsync(Encoding.Latin1.GetBytes(step.Send + "\r"), cancellationToken)
+                    .ConfigureAwait(false);
+                if (step.Expect.Length > 0)
+                {
+                    LogScriptMatched(logger, child.RemoteCallsign, step.Expect, step.Send, null);
+                }
+            }
 
-                    // A send-only step (legacy verbatim) keeps the inter-line progress wait so
-                    // existing bare-line scripts behave exactly as before. An expect step already
-                    // synchronised on its prompt, so it needs no post-send wait.
-                    if (step.Expect.Length == 0 && step.Send.Length > 0 && i != lastStep)
-                    {
-                        await WaitForAsync(
-                            child, buffer, transcript, IsProgress, "node progress",
-                            responseWait, time, logger, cancellationToken).ConfigureAwait(false);
-                    }
-
-                    break;
-
-                default:
-                    throw new InvalidOperationException($"Unknown step type {plan.Steps[i].GetType().Name}.");
+            // A bare send-only step (no EXPECT=, the legacy verbatim form) has no standardised prompt
+            // to wait for, so it goes out verbatim; between bare steps (not the last) we make a
+            // best-effort wait for node progress — a " CONNECTED"/"OK"/">" line — before the next. For
+            // a node whose prompt does not fit that shape, set an explicit EXPECT= for that step.
+            if (step.Expect.Length == 0 && step.Send.Length > 0 && i != lastStep)
+            {
+                await WaitForAsync(
+                    child, buffer, transcript, IsProgress, "node progress",
+                    responseWait, time, logger, cancellationToken).ConfigureAwait(false);
             }
         }
 
-        // "after the last line BPQ waits for a SID or >" (spec §4.4). The SID line is
-        // re-presented to the FBB session; chatter before it stays consumed.
+        // The hand-to-FBB wait: accept ONLY a real FBB SID ("[…-…]") — the one standardised signal in
+        // this whole exchange — never a bare ">"-prompt. An intermediate gateway banner ending ">"
+        // (e.g. a URONode "…Help: ? <command>") must NOT be mistaken for the partner's SID; that was
+        // the multi-hop wrong-banner capture. Node chatter before the SID stays consumed.
         string final = await WaitForAsync(
-            child, buffer, transcript, line => Sid.IsSidShaped(line) || line.TrimEnd().EndsWith('>'),
-            "the partner SID (or prompt)", responseWait, time, logger, cancellationToken).ConfigureAwait(false);
+            child, buffer, transcript, Sid.IsSidShaped,
+            "the partner SID", responseWait, time, logger, cancellationToken).ConfigureAwait(false);
 
         byte[] tail = buffer.TakeRemaining();
         byte[] head = Encoding.Latin1.GetBytes(final + "\r");
