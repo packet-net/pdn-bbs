@@ -94,6 +94,7 @@ internal static class LinmailConfigParser
                 HomeBbs = Field(f, 2),
                 Qra = Field(f, 3),
                 Zip = Field(f, 5),
+                LastListed = FieldLong(f, 7),
                 Flags = FieldInt(f, 8),
                 BbsNumber = FieldInt(f, 10),
                 TimeLastConnected = FieldLong(f, 13),

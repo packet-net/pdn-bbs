@@ -193,6 +193,9 @@ public sealed class BpqImporterIntegrationTests : IDisposable
         Assert.Equal(1, ScalarLong(c, "SELECT COUNT(*) FROM users WHERE callsign='M0LTE';"));
         Assert.Equal("Tom", ScalarString(c, "SELECT name FROM users WHERE callsign='M0LTE';"));
         Assert.Equal("GB7RDG", ScalarString(c, "SELECT home_bbs FROM users WHERE callsign='M0LTE';"));
+        // The "last listed" pointer (BPQ field 7 lastmsg=29) is carried over verbatim, so the migrated
+        // user is not shown the whole back-catalogue as "new" on first connect (NOT hardcoded 0).
+        Assert.Equal(29, ScalarLong(c, "SELECT last_listed_number FROM users WHERE callsign='M0LTE';"));
 
         // Password caveat: BPQ has no Argon2id hashes, so NO mail_auth row is written (= disabled).
         Assert.Equal(0, ScalarLong(c, "SELECT COUNT(*) FROM mail_auth;"));

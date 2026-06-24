@@ -182,6 +182,12 @@ internal sealed record BpqUser
     /// <summary>ZIP / postcode (field 5).</summary>
     public required string Zip { get; init; }
 
+    /// <summary>The "last listed" message-number pointer (field 7, BPQ <c>lastmsg</c>): the highest
+    /// message number this user has already been shown, so an interactive "list new" only surfaces
+    /// numbers above it. Mapped to pdn's <c>users.last_listed_number</c> so migrated users don't see
+    /// the whole back-catalogue as new on first connect. 0 = never listed.</summary>
+    public required long LastListed { get; init; }
+
     /// <summary>Flags bitfield (field 8). 0x10 = F_BBS marks a forwarding partner.</summary>
     public required int Flags { get; init; }
 

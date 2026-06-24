@@ -487,14 +487,16 @@ internal static class BpqImporter
         userCmd.CommandText =
             """
             INSERT INTO users (callsign, name, home_bbs, last_login_utc, last_listed_number, pdn_username)
-            VALUES ($call, $name, $home, $login, 0, NULL)
+            VALUES ($call, $name, $home, $login, $listed, NULL)
             ON CONFLICT(callsign) DO UPDATE SET
-              name=excluded.name, home_bbs=excluded.home_bbs, last_login_utc=excluded.last_login_utc;
+              name=excluded.name, home_bbs=excluded.home_bbs, last_login_utc=excluded.last_login_utc,
+              last_listed_number=excluded.last_listed_number;
             """;
         SqliteParameter uCall = userCmd.Parameters.Add("$call", SqliteType.Text);
         SqliteParameter uName = userCmd.Parameters.Add("$name", SqliteType.Text);
         SqliteParameter uHome = userCmd.Parameters.Add("$home", SqliteType.Text);
         SqliteParameter uLogin = userCmd.Parameters.Add("$login", SqliteType.Integer);
+        SqliteParameter uListed = userCmd.Parameters.Add("$listed", SqliteType.Integer);
 
         using SqliteCommand wpCmd = connection.CreateCommand();
         wpCmd.Transaction = tx;
@@ -531,6 +533,7 @@ internal static class BpqImporter
             uName.Value = NullIfBlank(u.Name);
             uHome.Value = NullIfBlank(u.HomeBbs);
             uLogin.Value = u.TimeLastConnected > 0 ? u.TimeLastConnected : DBNull.Value;
+            uListed.Value = Math.Max(0, u.LastListed);
             userCmd.ExecuteNonQuery();
             report.ImportedUsers++;
 
