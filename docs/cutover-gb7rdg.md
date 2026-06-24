@@ -62,7 +62,7 @@ Validate at **T+15 m** (takeover + no immediate re-flood), **T+1 h** (drain + li
 
 **2. No duplicate re-flood — the critical one** *(logs + MCP)* — outbound mail volume per RF partner stays in the baseline band (~100–200 frames/24 h each), **not** an order-of-magnitude spike. `validate` reports the log signal (bodies forwarded vs partner BID-rejects on the drain); a healthy drain rejects the backlog dups. The `forwarding ACTIVE: N partners, M queued` line shows M = the pre-marked queue, not the whole mailbox.
 
-**3. Mail flows + no loss** *(bbs.db, `validate`)* — queue **draining** (queued ≤ baseline), **BID store only grows** (≥ baseline — the dedup seed is never lost), high-water carried (≥ baseline), message count not collapsing (≥ 80 % of baseline).
+**3. Mail flows + no loss** *(bbs.db, `validate`)* — queue **draining** (queued ≤ baseline), **BID store not collapsing** (≥ 90 % of baseline — it churns: new BIDs arrive while 60-day-expired orphans prune, so it doesn't grow monotonically, but it must never be wiped), high-water carried (≥ baseline), message count not collapsing (≥ 80 % of baseline).
 
 **4. AXUDP** *(node logs, `validate`)* — GB7NDH + GB7BDH reachable + exchanging (Debug per-peer logs); GB7OUK/MB7NPW/M7TAW staying silent is **expected**, not a failure.
 

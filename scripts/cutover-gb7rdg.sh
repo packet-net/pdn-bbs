@@ -418,7 +418,10 @@ validate)
   # --- forwarding ON + mailbox sane ---
   chk "forwarding ACTIVE (not HELD)" "[ \"${fa:-0}\" -ge 1 ]"
   echo "  baseline: msgs=$b_msgs bids=$b_bids queued=$b_queued hw=$b_hw   now: msgs=$n_msgs bids=$n_bids queued=$n_queued hw=$n_hw"
-  chk "BID dedup store only grows (>= baseline)" "[ \"${n_bids:-0}\" -ge \"${b_bids:-0}\" ]"
+  # The BID store CHURNS, it does not monotonically grow: new BIDs arrive but BPQ-style
+  # BidLifetime (60d) expiry prunes orphan BIDs older than the dedup window (correct — those
+  # are past where any BBS dedups). So assert it did not COLLAPSE (a wipe), not that it grew.
+  chk "BID dedup store not collapsing (>= 90% of baseline)" "[ \"${n_bids:-0}\" -ge \"$(( ${b_bids:-0} * 9 / 10 ))\" ]"
   chk "queue draining (queued <= baseline)" "[ \"${n_queued:-999999}\" -le \"${b_queued:-0}\" ]"
   chk "high-water carried (>= baseline)" "[ \"${n_hw:-0}\" -ge \"${b_hw:-0}\" ]"
   chk "message count not collapsing (>= 80% of baseline)" "[ \"${n_msgs:-0}\" -ge \"$(( ${b_msgs:-0} * 8 / 10 ))\" ]"
