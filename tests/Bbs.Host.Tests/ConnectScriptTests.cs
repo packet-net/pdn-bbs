@@ -170,10 +170,11 @@ public class ConnectScriptTests
     public void UnsupportedDirectives_AreWarnedNotSentToTheNode()
     {
         // The spec §4.4 directives BPQ interprets locally: recognised (kept off the
-        // wire) and warned — named deviations, never silent drops.
+        // wire) and warned — named deviations, never silent drops. INTERLOCK is NOT here:
+        // it is recognised as superseded (a note, not a warning) — see Interlock_IsNoted...
         string[] directives =
         [
-            "TIMES 0900 1700", "ELSE", "MSGTYPE B", "INTERLOCK 1", "SKIPPROMPT",
+            "TIMES 0900 1700", "ELSE", "MSGTYPE B", "SKIPPROMPT",
             "SKIPCON", "TEXTFORWARDING", "SETCALLTOSENDER", "ATTACH 2", "RADIO FREQ",
             "FILE x", "IMPORT x", "RMS", "SendWL2KFW",
         ];
@@ -182,6 +183,35 @@ public class ConnectScriptTests
         Assert.Equal(("", "BBS"), Pair(Assert.Single(plan.Steps)));
         Assert.Equal(directives.Length, plan.Warnings.Count);
         Assert.All(plan.Warnings, w => Assert.Contains("unsupported", w, StringComparison.Ordinal));
+        Assert.Empty(plan.Notes);
+    }
+
+    [Fact]
+    public void Interlock_IsNotedNotWarned_AndKeptOffTheWire()
+    {
+        // INTERLOCK is recognised as SUPERSEDED, not unsupported: its job (one forwarding session
+        // per shared radio) belongs to the node/port layer (kiss.ackMode), so it is a by-design
+        // no-op here — recorded as a Note (Debug, surfaced by test-connect), NOT a warning. This is
+        // the GB7CIP/GB7LOX/GB7OXF shape: a leading INTERLOCK then the real connect.
+        ConnectPlan plan = ConnectScript.Resolve(PartnerWith("INTERLOCK 3", "C 3 GB7WEM-7", "C uhf gb7cip"));
+
+        Assert.Equal("GB7WEM-7", plan.Target);   // the INTERLOCK line did not become the open
+        Assert.Equal("3", plan.Port);
+        Assert.Empty(plan.Warnings);             // no warning spam every cycle
+        string note = Assert.Single(plan.Notes); // but named, never silently dropped
+        Assert.Contains("INTERLOCK 3", note, StringComparison.Ordinal);
+        Assert.Contains("serialization", note, StringComparison.Ordinal);
+        // The trailing "C uhf gb7cip" is the multi-hop send step, not a second open.
+        Assert.Equal(("", "C uhf gb7cip"), Pair(Assert.Single(plan.Steps)));
+    }
+
+    [Fact]
+    public void Interlock_RecognitionIsCaseInsensitive()
+    {
+        ConnectPlan plan = ConnectScript.Resolve(PartnerWith("interlock 3", "C 3 GB7LOX-2", "bbs"));
+        Assert.Empty(plan.Warnings);
+        Assert.Single(plan.Notes);
+        Assert.Equal("GB7LOX-2", plan.Target);
     }
 
     [Fact]

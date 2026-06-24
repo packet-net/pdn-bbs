@@ -14,7 +14,8 @@ namespace Bbs.Host.Forwarding;
 /// <param name="Transcript">The dialogue: each line we sent (<c>&gt; …</c>) and each line/match we saw (<c>&lt; …</c>).</param>
 /// <param name="Error">The failure reason when <see cref="Ok"/> is false (node failure text, an expect that never arrived, a timeout, or a refused open); null on success.</param>
 /// <param name="Steps">The resolved post-connect steps rendered for display (<c>EXPECT=SEND</c>, a bare send, or <c>PAUSE n</c>).</param>
-/// <param name="Warnings">The plan's resolution warnings (e.g. a stripped <c>!</c>, an unsupported directive) — surfaced so the operator sees what was deferred.</param>
+/// <param name="Warnings">The plan's resolution warnings (e.g. an unsupported directive) — surfaced so the operator sees what was deferred.</param>
+/// <param name="Notes">The plan's informational notes (recognised-but-superseded directives, e.g. <c>INTERLOCK</c>) — surfaced on demand here even though they don't warn in the cycle log.</param>
 public sealed record ConnectTestResult(
     string Partner,
     string Target,
@@ -24,7 +25,8 @@ public sealed record ConnectTestResult(
     IReadOnlyList<string> Transcript,
     string? Error,
     IReadOnlyList<string> Steps,
-    IReadOnlyList<string> Warnings);
+    IReadOnlyList<string> Warnings,
+    IReadOnlyList<string> Notes);
 
 /// <summary>
 /// The sysop "test connect" tool: VALIDATE a partner connection — reachability AND the real peer
@@ -89,7 +91,7 @@ public sealed class ForwardingTester
             // before any dialogue. Report it, don't throw — this is a diagnostic tool.
             return new ConnectTestResult(
                 partner.Call, plan.Target, plan.Port, Ok: false, Sid: null,
-                transcript, ex.Message, steps, plan.Warnings);
+                transcript, ex.Message, steps, plan.Warnings, plan.Notes);
         }
 
         try
@@ -110,7 +112,7 @@ public sealed class ForwardingTester
 
             return new ConnectTestResult(
                 partner.Call, plan.Target, plan.Port, Ok: true, sid,
-                transcript, Error: null, steps, plan.Warnings);
+                transcript, Error: null, steps, plan.Warnings, plan.Notes);
         }
         catch (ConnectScriptException ex)
         {
@@ -118,7 +120,7 @@ public sealed class ForwardingTester
             // reachable-but-unusable per the script. The transcript captured so far rides along.
             return new ConnectTestResult(
                 partner.Call, plan.Target, plan.Port, Ok: false, Sid: null,
-                transcript, ex.Message, steps, plan.Warnings);
+                transcript, ex.Message, steps, plan.Warnings, plan.Notes);
         }
         finally
         {

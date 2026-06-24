@@ -24,12 +24,18 @@ public sealed record PauseStep(TimeSpan Delay) : ConnectScriptStep;
 /// <param name="Target">The callsign/alias the RHP <c>open</c>(Active) dials.</param>
 /// <param name="Port">The node port for the open, when the <c>C</c> line named one (<c>C &lt;port&gt; &lt;call&gt;</c>); null = any.</param>
 /// <param name="Steps">Post-connect steps, run by <see cref="ConnectScriptRunner"/> after the open succeeds.</param>
-/// <param name="Warnings">Script lines we do not honour (logged each cycle, never silently dropped).</param>
+/// <param name="Warnings">Script lines we do not honour but probably should have (logged at Warning each
+/// cycle, never silently dropped) — a real deferral the operator may want to act on.</param>
+/// <param name="Notes">Recognised lines we deliberately do not honour <em>here</em> because the function
+/// is owned by another layer (e.g. <c>INTERLOCK</c>, whose per-port serialization belongs to the
+/// node/port layer, not the connect script). Named — never silently dropped — but informational, not a
+/// warning: logged at Debug per cycle, surfaced on demand by the sysop test-connect tool.</param>
 public sealed record ConnectPlan(
     string Target,
     string? Port,
     IReadOnlyList<ConnectScriptStep> Steps,
-    IReadOnlyList<string> Warnings);
+    IReadOnlyList<string> Warnings,
+    IReadOnlyList<string> Notes);
 
 /// <summary>
 /// Connect-script interpretation (compat spec §4.4) with an expect/send step model ported
@@ -48,9 +54,16 @@ public sealed record ConnectPlan(
 /// verbatim with an inter-line response wait, exactly the legacy behaviour (e.g. <c>C GB7RDG</c>
 /// is a node-level connect typed at the remote prompt, <c>BBS</c> enters the BBS app).</item>
 /// <item><c>PAUSE n</c> is honoured as a delay. The remaining §4.4 directives (TIMES,
-/// ELSE, MSGTYPE, INTERLOCK, SKIPPROMPT, SKIPCON, TEXTFORWARDING, SETCALLTOSENDER,
+/// ELSE, MSGTYPE, SKIPPROMPT, SKIPCON, TEXTFORWARDING, SETCALLTOSENDER,
 /// ATTACH, RADIO, FILE, IMPORT, RMS, SendWL2KFW) are recognised so they are never sent to
 /// a node, and warned as unsupported — named deviations, not silent drops.</item>
+/// <item><c>INTERLOCK n</c> is recognised as <em>superseded</em>, not unsupported: its job —
+/// one forwarding session at a time on a shared radio — is owned by the node/port layer (per-port
+/// TX serialization, e.g. <c>kiss.ackMode</c>), and an app-level forwarding interlock is a planned
+/// fast-follow. It is kept off the wire and recorded as a <see cref="ConnectPlan.Notes">note</see>
+/// (Debug, not a Warning) so the imported GB7-* scripts that carry it don't log a benign warning
+/// every cycle. The interlock <em>number</em> is not honoured (BPQ's group id does not map to a
+/// pdn RHP port slot).</item>
 /// </list>
 /// </summary>
 public static class ConnectScript
@@ -61,9 +74,17 @@ public static class ConnectScript
     /// </summary>
     private static readonly string[] UnsupportedDirectives =
     [
-        "TIMES", "ELSE", "MSGTYPE", "INTERLOCK", "SKIPPROMPT", "SKIPCON", "TEXTFORWARDING",
+        "TIMES", "ELSE", "MSGTYPE", "SKIPPROMPT", "SKIPCON", "TEXTFORWARDING",
         "SETCALLTOSENDER", "ATTACH", "RADIO", "FILE", "IMPORT", "RMS", "SENDWL2KFW",
     ];
+
+    /// <summary>
+    /// Directives we recognise as <em>superseded</em> rather than unsupported: the function exists,
+    /// but is owned by another layer, so honouring the directive here would be redundant. Recorded as
+    /// an informational <see cref="ConnectPlan.Notes">note</see> (never silently dropped), not a warning.
+    /// Currently just <c>INTERLOCK</c> — per-port forwarding serialization is the node/port layer's job.
+    /// </summary>
+    private static readonly string[] SupersededDirectives = ["INTERLOCK"];
 
     /// <summary>Resolves a partner's script. An empty script dials the partner callsign with no steps.</summary>
     public static ConnectPlan Resolve(Partner partner)
@@ -74,6 +95,7 @@ public static class ConnectScript
         string? port = null;
         var steps = new List<ConnectScriptStep>();
         var warnings = new List<string>();
+        var notes = new List<string>();
         bool sawStep = false;
 
         foreach (string raw in partner.ConnectScript)
@@ -101,6 +123,15 @@ public static class ConnectScript
                 continue;
             }
 
+            if (SupersededDirectives.Contains(verb, StringComparer.Ordinal))
+            {
+                notes.Add(
+                    $"connect-script directive \"{line}\" recognised but not honoured here — per-port " +
+                    "forwarding serialization is owned by the node/port layer (e.g. kiss.ackMode), not the " +
+                    "connect script; an app-level forwarding interlock is a planned fast-follow");
+                continue;
+            }
+
             if (UnsupportedDirectives.Contains(verb, StringComparer.Ordinal))
             {
                 warnings.Add($"unsupported connect-script directive \"{line}\" ignored (spec §4.4 deferral)");
@@ -122,7 +153,7 @@ public static class ConnectScript
             sawStep = true;
         }
 
-        return new ConnectPlan(target ?? partner.Call, port, steps, warnings);
+        return new ConnectPlan(target ?? partner.Call, port, steps, warnings, notes);
     }
 
     /// <summary>

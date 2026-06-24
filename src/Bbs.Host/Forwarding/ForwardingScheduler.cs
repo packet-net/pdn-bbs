@@ -307,6 +307,13 @@ public sealed class ForwardingScheduler
             LogScriptWarning(_logger, partner.Call, warning, null);
         }
 
+        // Notes are recognised-but-superseded directives (e.g. INTERLOCK) — named, never silently
+        // dropped, but a by-design no-op here, so logged at Debug to avoid warning-spam every cycle.
+        foreach (string note in plan.Notes)
+        {
+            LogScriptNote(_logger, partner.Call, note, null);
+        }
+
         // Hold an over-cap message rather than re-skipping it every cycle (compat spec §4.1 "bigger
         // local → held"): it leaves the forward queue (GetForwardQueue excludes H) and the recorded
         // reason lets the Sent view explain it instead of showing a perpetually-"queued" message.
@@ -402,6 +409,10 @@ public sealed class ForwardingScheduler
     private static readonly Action<ILogger, string, string, Exception?> LogScriptWarning =
         LoggerMessage.Define<string, string>(LogLevel.Warning, new EventId(1, "ConnectScriptWarning"),
             "Partner {Partner}: {Warning}");
+
+    private static readonly Action<ILogger, string, string, Exception?> LogScriptNote =
+        LoggerMessage.Define<string, string>(LogLevel.Debug, new EventId(6, "ConnectScriptNote"),
+            "Partner {Partner}: {Note}");
 
     private static readonly Action<ILogger, string, string, int, Exception?> LogCycleStart =
         LoggerMessage.Define<string, string, int>(LogLevel.Information, new EventId(2, "CycleStart"),

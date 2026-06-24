@@ -906,6 +906,7 @@ public static class Webmail
             {
                 steps = result.Steps,
                 warnings = result.Warnings,
+                notes = result.Notes,
             },
         }, JsonOpts);
     }
