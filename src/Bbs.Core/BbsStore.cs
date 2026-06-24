@@ -700,6 +700,36 @@ public sealed class BbsStore : IDisposable
     }
 
     /// <summary>
+    /// The age of the OLDEST still-waiting forward leg for a partner — <c>now - min(queued_utc)</c>
+    /// over the same set the dashboard counts as "waiting" (a leg with <c>forwarded_utc IS NULL</c>
+    /// whose message is neither killed nor held, so it matches <see cref="GetForwardQueue"/>). Null
+    /// when nothing is waiting. Derived from the existing <c>forwards</c> table (no schema change) so
+    /// a machine-readable health probe can alert on mail that has been stuck in the queue too long —
+    /// the "queue isn't draining" signal an HTML page can't be scraped for. Never negative (a
+    /// queued_utc nominally in the future from clock skew is clamped to zero).
+    /// </summary>
+    public TimeSpan? OldestQueuedAge(string partnerCall)
+    {
+        ArgumentNullException.ThrowIfNull(partnerCall);
+
+        lock (_gate)
+        {
+            using SqliteCommand cmd = Command(null,
+                "SELECT MIN(f.queued_utc) FROM forwards f JOIN messages m ON m.number=f.message_number " +
+                "WHERE f.partner_call=$p AND f.forwarded_utc IS NULL AND m.status NOT IN ('K','H');");
+            cmd.Parameters.AddWithValue("$p", Callsigns.Normalize(partnerCall));
+            object? result = cmd.ExecuteScalar();
+            if (result is null or DBNull)
+            {
+                return null;
+            }
+
+            TimeSpan age = Now - DateTimeOffset.FromUnixTimeSeconds((long)result);
+            return age < TimeSpan.Zero ? TimeSpan.Zero : age;
+        }
+    }
+
+    /// <summary>
     /// Records a forwarding dial that reached the partner and ran (the link works) — clears the
     /// failure streak and error. Persisted, so the dashboard health survives a restart. The
     /// negotiated <paramref name="mode"/> ("B2"/"B1") and the peer's raw SID (<paramref name="peerSid"/>)
