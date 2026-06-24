@@ -24,6 +24,8 @@
 #   network    WireGuard handover (CT inherits 10.66.66.6, auto-rollback on failure) +
 #              bring the CT's RF/AXUDP ports up -> GB7RDG on-air, mail STILL HELD.
 #   verify     read-only: confirm on-air health (wg==10.66.66.6, modems, live peers).
+#   connect-test validate each partner's connect script + tighten its EXPECT= from the real
+#              prompt, moving NO mail (the test-connect tool). Run after network, before golive.
 #   golive     >>> POINT OF NO RETURN <<< hard readiness re-check + typed confirm, then
 #              enable forwarding + OARC. Mail starts moving.
 #   validate   post-golive: re-check node/bbs/db vs baseline (pass/fail) + emit the RF
@@ -325,8 +327,33 @@ verify)
   ct "ping -c2 -W2 $WG_PROBE >/dev/null 2>&1" && ok "live AXUDP peer $WG_PROBE reachable" || warn "$WG_PROBE unreachable"
   note "recent node log (links / netrom / AXUDP peers):"
   ct "journalctl -u $NODE_SVC --no-pager -n 40 -o cat | grep -iE 'listening|netrom|link|node|axudp|peer' | tail -10 || true"
-  note "If the above is healthy, the ONLY remaining step is the irreversible:"
-  note "  cutover-gb7rdg.sh golive    (NO rollback after this)"
+  note "If the above is healthy, validate the partner connect scripts next:"
+  note "  cutover-gb7rdg.sh connect-test    (then golive)"
+  ;;
+
+connect-test)
+  # Run AFTER 'network' (node on-air), BEFORE 'golive'. Validates each enabled partner's connect
+  # script + lets you tighten its EXPECT= strings from the real prompt — WITHOUT moving any mail
+  # (the test-connect tool runs the script + the SID/prompt wait, then disconnects; no FBB session).
+  note "CONNECT-TEST — validate + tighten partner connect scripts (on-air, forwarding still HELD)."
+  note "For EACH enabled partner below, in the BBS sysop UI (or an authenticated POST to"
+  note "  /apps/bbs/forwarding/test-connect with partner=CALL):"
+  note "  1. run test-connect — confirm ok=true and READ the transcript/prompt (no mail moves);"
+  note "  2. multi-hop scripts (a trailing 'bbs', or a via 'C <next>') — set the partner's EXPECT="
+  note "     to the observed prompt in the forwarding editor, then re-run test-connect to confirm;"
+  note "  3. a partner that will NOT connect — fix its script/route (or disable it) BEFORE golive."
+  note "Direct-BBS partners need only to connect (the FBB SID-wait is the implicit expect);"
+  note "only GB7LOX ('… bbs') and GB7CIP ('C GB7WEM-7' → 'C uhf gb7cip') need real EXPECT= steps."
+  note "Enabled partners + their current connect scripts (bbs.db):"
+  ct "python3 - <<'PY'
+import sqlite3
+c=sqlite3.connect('file:$BBS_STATE/bbs.db?mode=ro',uri=True)
+rows=c.execute(\"SELECT call, connect_script FROM partners WHERE enabled=1 ORDER BY call\").fetchall()
+for call,cs in rows:
+    print('  '+call+': '+repr((cs or '').replace(chr(10),' | ')))
+print('  (enabled partners: '+str(len(rows))+')')
+PY"
+  note "When every enabled partner connects cleanly, proceed: cutover-gb7rdg.sh golive"
   ;;
 
 golive)
@@ -448,5 +475,5 @@ status)
   ct "systemctl is-active $NODE_SVC; ip -4 addr show wg0 2>/dev/null | grep -oE 'inet [0-9.]+' || echo 'wg down'; journalctl -u $NODE_SVC --no-pager -n 60 -o cat | grep -iE 'forwarding is HELD|forwarding ACTIVE|configured port' | tail -2" || true
   ;;
 
-*) die "unknown phase '$phase' (preflight|freeze|sync|baseline|network|verify|golive|validate|abort|status)";;
+*) die "unknown phase '$phase' (preflight|freeze|sync|baseline|network|verify|connect-test|golive|validate|abort|status)";;
 esac
