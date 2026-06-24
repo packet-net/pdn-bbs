@@ -2,6 +2,7 @@ using System.Net;
 using System.Reflection;
 using Bbs.Console;
 using Bbs.Core;
+using Bbs.Host.Diagnostics;
 using Bbs.Host.Forwarding;
 using Bbs.Host.Rhp;
 using Bbs.Host.Sessions;
@@ -28,6 +29,12 @@ public static class HostComposition
     public static WebApplication Build(string[] args)
     {
         var builder = WebApplication.CreateBuilder(args);
+
+        // The runtime log-level switch (a singleton consulted at log time). Default = empty, so logging
+        // is exactly as appsettings configures it until the sysop raises a category live via /loglevel.
+        var logLevelOverrides = new LogLevelOverrides();
+        builder.Services.AddSingleton(logLevelOverrides);
+        ConfigureDynamicLogging(builder, logLevelOverrides);
 
         string stateDir = Environment.GetEnvironmentVariable("PDN_APP_STATE") is { Length: > 0 } s
             ? s
@@ -293,10 +300,56 @@ public static class HostComposition
             // and R-lines stay SSID-less and come from the store/engine own-call (baseCallsign) above.
             StationCallsign = bindCallsign,
             SysopCallsign = config.Sysop,
+            // Machine-readable health (/healthz, /status.json): the running version + an uptime clock.
+            Version = version,
+            StartedUtc = time.GetUtcNow(),
+            Clock = time,
+            // The runtime log-level switch backing /loglevel (the same singleton the provider reads).
+            LogLevels = logLevelOverrides,
         });
 
         log.Starting(version, bindCallsign, config.Rhp.Host!, config.Rhp.Port!.Value, config.Web.Bind, config.Web.Port);
         return app;
+    }
+
+    /// <summary>
+    /// Wires the runtime log-level switch into the logging pipeline as a live filter that consults
+    /// <paramref name="overrides"/> on every <c>IsEnabled</c>/<c>Log</c> decision. This is the
+    /// "<c>LoggingLevelSwitch</c>"-style mechanism: a singleton holding category→level overrides read
+    /// at log time, so raising <c>Bbs.Host.*</c> to Debug/Trace takes effect immediately — no restart
+    /// and no <c>appsettings.json</c> edit (read-only under <c>ProtectSystem=strict</c> in production).
+    /// </summary>
+    /// <remarks>
+    /// Implemented as a global filter delegate rather than a provider decorator: the standard
+    /// <see cref="LoggerFactory"/> evaluates filters when computing <c>ILogger.IsEnabled</c>, so an
+    /// override flips <c>IsEnabled</c> (and thus actual delivery) for every provider at once, live. The
+    /// delegate is the LEAST-specific rule, so any more-specific <c>Logging:LogLevel</c> config entry
+    /// (e.g. <c>Microsoft.AspNetCore: Warning</c>) still wins for its categories; we only supply the
+    /// baseline (the configured default minimum) PLUS the override raise. With an empty override set the
+    /// baseline alone reproduces today's behaviour exactly.
+    /// </remarks>
+    internal static void ConfigureDynamicLogging(WebApplicationBuilder builder, LogLevelOverrides overrides)
+    {
+        // The configured default minimum (Logging:LogLevel:Default), so the filter's baseline matches
+        // appsettings; absent/unparseable falls back to Information (the framework default).
+        LogLevel defaultMinimum =
+            Enum.TryParse(builder.Configuration["Logging:LogLevel:Default"], ignoreCase: true, out LogLevel configured)
+                ? configured
+                : LogLevel.Information;
+
+        builder.Logging.AddFilter((category, level) =>
+        {
+            // An override RAISES verbosity for a matching category prefix (longest match wins); it never
+            // silences below the baseline. None means "off".
+            if (level != LogLevel.None && category is { } cat && overrides.ResolveFor(cat) is { } min && level >= min)
+            {
+                return true;
+            }
+
+            // Baseline: the configured default minimum. More-specific Logging:LogLevel rules are
+            // more-specific than this delegate and so still take precedence for their categories.
+            return level != LogLevel.None && level >= defaultMinimum;
+        });
     }
 }
 

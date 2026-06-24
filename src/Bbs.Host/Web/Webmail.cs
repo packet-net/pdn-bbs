@@ -7,6 +7,7 @@ using Bbs.Host.Forwarding;
 using Bbs.SevenPlus;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
+using Microsoft.Extensions.Logging;
 
 namespace Bbs.Host.Web;
 
@@ -55,6 +56,33 @@ public sealed record WebmailOptions
     /// <summary>The sysop callsign (sysop visibility in webmail), or empty.</summary>
     public string SysopCallsign { get; init; } = "";
 
+    /// <summary>
+    /// The running app version, reported by <c>/healthz</c> and <c>/status.json</c> (the same
+    /// informational version the SID and the startup line carry). Defaults to a placeholder so a
+    /// standalone test that doesn't set it still gets a well-formed health document.
+    /// </summary>
+    public string Version { get; init; } = "0.0.0";
+
+    /// <summary>
+    /// When the host process started (UTC) — used to compute <c>uptimeSeconds</c> in the health
+    /// endpoints. Defaults to now-at-construction so a test/standalone host reports a small,
+    /// monotonic uptime without extra wiring.
+    /// </summary>
+    public DateTimeOffset StartedUtc { get; init; } = DateTimeOffset.UtcNow;
+
+    /// <summary>
+    /// The clock the health endpoints read for <c>uptimeSeconds</c> and the queued-age derivation.
+    /// Defaults to the system clock; tests inject a fake provider so uptime/age are deterministic.
+    /// </summary>
+    public TimeProvider Clock { get; init; } = TimeProvider.System;
+
+    /// <summary>
+    /// The live log-level override store (the runtime log-level switch) backing <c>/loglevel</c>.
+    /// Null when the host wires no dynamic-logging provider (e.g. a webmail-only test): the
+    /// <c>/loglevel</c> routes then report "not available" rather than 404, and nothing else changes.
+    /// </summary>
+    public Diagnostics.LogLevelOverrides? LogLevels { get; init; }
+
     /// <summary>Rows per page on the inbox/bulletins lists.</summary>
     public int PageSize { get; init; } = 25;
 
@@ -96,6 +124,17 @@ public static class Webmail
 
         app.Use(async (context, next) =>
         {
+            // The liveness probe is deliberately UNAUTHENTICATED — a health checker (or the node
+            // supervisor) hits it directly on the loopback bind, NOT through the app-gateway, so it
+            // carries none of the X-Pdn-* identity headers. It exposes nothing sensitive (status +
+            // version + uptime only), so it skips the gateway-trust gate below. Everything else —
+            // including /status.json, which mirrors the sysop dashboard — stays gated.
+            if (IsHealthProbe(context.Request.Path))
+            {
+                await next().ConfigureAwait(false);
+                return;
+            }
+
             // The gateway contract (packet.net docs/app-gateway.md): pdn strips any
             // client-supplied copy of these headers before injecting its own, and the
             // loopback bind means only pdn can reach us.
@@ -310,7 +349,44 @@ public static class Webmail
             IFormCollection form = await ctx.Request.ReadFormAsync().ConfigureAwait(false);
             return SaveYaml(options, prefix, call, form["yaml"].ToString(), embed, Theme(ctx));
         });
+
+        // ---- Observability (machine-readable) ----
+
+        // Liveness probe — UNAUTHENTICATED (skips the gateway gate above): a health checker hits this
+        // directly on the loopback bind. status/version/uptime only; nothing sensitive.
+        app.MapGet("/healthz", (HttpContext ctx) => HealthZ(options));
+
+        // The Status dashboard as JSON for scraping / remote mail-stuck alerting. Gated EXACTLY like
+        // the HTML /forwarding sysop page — partner detail is no broader than today (sysop only).
+        app.MapGet("/status.json", (HttpContext ctx) => WithCallsign(ctx, options,
+            (_, call) => StatusJson(options, call)));
+
+        // The runtime log-level switch (sysop-only), gated like the Status/Forwarding page. GET shows
+        // the current overrides; POST sets or clears one. Minimal, no HTML chrome needed for GET JSON.
+        app.MapGet("/loglevel", (HttpContext ctx) => WithCallsign(ctx, options,
+            (prefix, call) => LogLevelPage(options, prefix, call, Embed(ctx), Theme(ctx))));
+
+        app.MapPost("/loglevel", async (HttpContext ctx) =>
+        {
+            string prefix = Prefix(ctx);
+            bool embed = Embed(ctx);
+            string? call = FindCallsign(options.Store, PdnUser(ctx));
+            if (call is null)
+            {
+                return Results.Redirect(U(prefix, "/", embed));
+            }
+
+            IFormCollection form = await ctx.Request.ReadFormAsync().ConfigureAwait(false);
+            return SaveLogLevel(options, prefix, call,
+                form["category"].ToString(), form["level"].ToString(), form["action"].ToString(), embed, Theme(ctx));
+        });
     }
+
+    /// <summary>The unauthenticated liveness-probe path (a constant so the middleware and the route agree).</summary>
+    private const string HealthPath = "/healthz";
+
+    private static bool IsHealthProbe(PathString path) =>
+        path.Equals(HealthPath, StringComparison.OrdinalIgnoreCase);
 
     private const string PdnUserKey = "pdnUser";
     private const string PrefixKey = "pdnPrefix";
@@ -451,8 +527,7 @@ public static class Webmail
     private static IResult Status(WebmailOptions o, string prefix, string call, bool embed, string? theme, string? notice, long? sent = null)
     {
         (int total, int held) = o.Store.MessageCounts();
-        int unread = o.Store.ListMessages(new MessageQuery { Type = MessageType.Personal, ToCall = call, HomedLocally = true })
-            .Count(m => m.Recipients.Any(r => Callsigns.BaseEquals(r.ToCall, call) && r.ReadAt is null));
+        int unread = UnreadInbox(o, call);
 
         // The just-composed-message banner (?sent=<n> after a deferred compose): "Message sent — Undo"
         // with a live countdown while the undo window is still open, else a plain "Message sent." once
@@ -595,6 +670,168 @@ public static class Webmail
 
         sb.Append("</table>");
         return sb.ToString();
+    }
+
+    // ---------------------------------------------------------------- observability
+
+    /// <summary>Explicit camelCase JSON for the machine-readable endpoints (independent of host config).</summary>
+    private static readonly System.Text.Json.JsonSerializerOptions JsonOpts = new(System.Text.Json.JsonSerializerDefaults.Web)
+    {
+        PropertyNamingPolicy = System.Text.Json.JsonNamingPolicy.CamelCase,
+    };
+
+    /// <summary>
+    /// The unauthenticated liveness probe: <c>{status:"ok", version, uptimeSeconds}</c>. Always 200
+    /// while the process is up (that is the signal a probe wants). Exposes nothing sensitive.
+    /// </summary>
+    private static IResult HealthZ(WebmailOptions o) => Results.Json(new
+    {
+        status = "ok",
+        version = o.Version,
+        uptimeSeconds = UptimeSeconds(o),
+    }, JsonOpts);
+
+    /// <summary>Whole seconds the host has been up (never negative), from the injected clock.</summary>
+    private static long UptimeSeconds(WebmailOptions o)
+    {
+        double seconds = (o.Clock.GetUtcNow() - o.StartedUtc).TotalSeconds;
+        return seconds < 0 ? 0 : (long)seconds;
+    }
+
+    /// <summary>
+    /// The Status dashboard mirrored as JSON for scraping / remote mail-stuck alerting. Gated EXACTLY
+    /// like the HTML sysop Status/Forwarding page — a non-sysop gets a 403 (so partner detail is no
+    /// broader than today). Every per-partner field is DERIVED from existing tables (no schema change):
+    /// queueDepth + oldestQueuedAgeMins from the forwards table, lastForwardedUtc = max(forwarded_utc),
+    /// and lastAttemptUtc/consecutiveFailures/ok/error from the forwarding_status row the HTML page uses.
+    /// </summary>
+    private static IResult StatusJson(WebmailOptions o, string call)
+    {
+        if (!IsSysop(o, call))
+        {
+            return Results.Json(new { error = "sysop only" }, JsonOpts, statusCode: StatusCodes.Status403Forbidden);
+        }
+
+        (int total, int held) = o.Store.MessageCounts();
+        int unreadInbox = UnreadInbox(o, call);
+
+        var partners = new List<object>();
+        foreach (Partner p in o.Store.ListPartners().OrderBy(p => p.Call, StringComparer.OrdinalIgnoreCase))
+        {
+            // queueDepth matches the dashboard's "Waiting" column exactly (GetForwardQueue excludes
+            // killed/held legs); oldestQueuedAgeMins is now - min(queued_utc) over that same set.
+            int queueDepth = o.Store.GetForwardQueue(p.Call).Count;
+            TimeSpan? oldest = o.Store.OldestQueuedAge(p.Call);
+            DateTimeOffset? lastForwarded = o.Store.LastForwardedTo(p.Call);
+            PartnerForwardingState? st = o.Store.GetForwardingStatus(p.Call);
+
+            partners.Add(new
+            {
+                call = p.Call,
+                enabled = p.Enabled,
+                queueDepth,
+                // Whole minutes the oldest waiting message has sat queued; null when nothing waits.
+                oldestQueuedAgeMins = oldest is { } age ? (long)age.TotalMinutes : (long?)null,
+                // The last SUCCESSFUL forward (max forwarded_utc), the dashboard's "last forwarded".
+                lastForwardedUtc = lastForwarded?.UtcDateTime,
+                // From the forwarding_status row (the last DIAL outcome): null until first dialled.
+                lastAttemptUtc = st?.LastAttemptUtc.UtcDateTime,
+                consecutiveFailures = st?.ConsecutiveFailures ?? 0,
+                ok = st?.Ok,
+                error = st?.Error,
+            });
+        }
+
+        return Results.Json(new
+        {
+            version = o.Version,
+            uptimeSeconds = UptimeSeconds(o),
+            messages = new { total, held, unreadInbox },
+            partners,
+        }, JsonOpts);
+    }
+
+    /// <summary>
+    /// The runtime log-level switch — GET returns the active overrides as JSON (sysop only, gated like
+    /// the Status/Forwarding page). When no dynamic-logging provider was wired (a webmail-only test),
+    /// reports <c>available:false</c> rather than 404 so the contract is stable.
+    /// </summary>
+    private static IResult LogLevelPage(WebmailOptions o, string prefix, string call, bool embed, string? theme)
+    {
+        if (!IsSysop(o, call))
+        {
+            return Results.Json(new { error = "sysop only" }, JsonOpts, statusCode: StatusCodes.Status403Forbidden);
+        }
+
+        if (o.LogLevels is null)
+        {
+            return Results.Json(new { available = false, overrides = new Dictionary<string, string>() }, JsonOpts);
+        }
+
+        var overrides = o.LogLevels.Snapshot()
+            .OrderBy(kv => kv.Key, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(kv => kv.Key, kv => kv.Value.ToString(), StringComparer.OrdinalIgnoreCase);
+        return Results.Json(new
+        {
+            available = true,
+            // The valid level tokens the POST accepts, for a caller building a form.
+            levels = Enum.GetNames<LogLevel>(),
+            overrides,
+        }, JsonOpts);
+    }
+
+    /// <summary>
+    /// Sets or clears a runtime log-level override (sysop only). <c>action=clear</c> removes the named
+    /// category (or every override when no category is given); otherwise the level is validated against
+    /// <see cref="LogLevel"/> and the override is set. Returns the resulting override set as JSON; a
+    /// bad level is a 400, an unwired provider a stable <c>available:false</c>.
+    /// </summary>
+    private static IResult SaveLogLevel(
+        WebmailOptions o, string prefix, string call, string category, string level, string action, bool embed, string? theme)
+    {
+        if (!IsSysop(o, call))
+        {
+            return Results.Json(new { error = "sysop only" }, JsonOpts, statusCode: StatusCodes.Status403Forbidden);
+        }
+
+        if (o.LogLevels is null)
+        {
+            return Results.Json(new { available = false }, JsonOpts);
+        }
+
+        category = category.Trim();
+        if (string.Equals(action.Trim(), "clear", StringComparison.OrdinalIgnoreCase))
+        {
+            if (category.Length == 0)
+            {
+                o.LogLevels.ClearAll();
+            }
+            else
+            {
+                o.LogLevels.Clear(category);
+            }
+        }
+        else
+        {
+            if (category.Length == 0)
+            {
+                return Results.Json(new { error = "category is required" }, JsonOpts, statusCode: StatusCodes.Status400BadRequest);
+            }
+
+            if (!Enum.TryParse(level.Trim(), ignoreCase: true, out LogLevel parsed) || !Enum.IsDefined(parsed))
+            {
+                return Results.Json(
+                    new { error = "invalid level", levels = Enum.GetNames<LogLevel>() },
+                    JsonOpts, statusCode: StatusCodes.Status400BadRequest);
+            }
+
+            o.LogLevels.Set(category, parsed);
+        }
+
+        var overrides = o.LogLevels.Snapshot()
+            .OrderBy(kv => kv.Key, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(kv => kv.Key, kv => kv.Value.ToString(), StringComparer.OrdinalIgnoreCase);
+        return Results.Json(new { available = true, overrides }, JsonOpts);
     }
 
     private static IResult Bulletins(WebmailOptions o, string prefix, string call, int page, bool embed, string? theme)
@@ -1624,6 +1861,16 @@ public static class Webmail
 
     private static bool IsSysop(WebmailOptions o, string call) =>
         o.SysopCallsign.Length > 0 && Callsigns.BaseEquals(o.SysopCallsign, call);
+
+    /// <summary>
+    /// Unread personals homed here for a callsign — the single definition shared by the HTML Status
+    /// dashboard and the <c>/status.json</c> mirror, so the two can never disagree on "unread". A
+    /// message counts as unread when any recipient leg base-matching <paramref name="call"/> has not
+    /// been marked read (<see cref="MessageRecipient.ReadAt"/> null).
+    /// </summary>
+    private static int UnreadInbox(WebmailOptions o, string call) =>
+        o.Store.ListMessages(new MessageQuery { Type = MessageType.Personal, ToCall = call, HomedLocally = true })
+            .Count(m => m.Recipients.Any(r => Callsigns.BaseEquals(r.ToCall, call) && r.ReadAt is null));
 
     /// <summary>The Cc meta row, or empty when the message has no Cc recipients (spec §3.9).</summary>
     private static string RenderCcRow(Message message)
