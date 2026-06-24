@@ -2219,6 +2219,38 @@ public sealed class WebmailTests : IAsyncDisposable
     }
 
     [Fact]
+    public async Task Forwarding_MasterSwitch_TogglesAndPersists()
+    {
+        ClaimCallsign("tom", "G0SYS");
+        using HttpClient client = await StartAsync(pdnUser: "tom", autoRedirect: false);
+
+        // Default (unset) → master ON; the page shows the switch with a "Turn OFF" button.
+        string page = await client.GetStringAsync(new Uri("/forwarding", UriKind.Relative));
+        Assert.Contains("Turn OFF", page, StringComparison.Ordinal);
+
+        // Sysop turns the whole-BBS forwarding OFF (the safe-abort hold).
+        HttpResponseMessage off = await client.PostAsync(new Uri("/forwarding/master", UriKind.Relative),
+            new FormUrlEncodedContent([new("enabled", "0")]));
+        Assert.Equal(HttpStatusCode.Redirect, off.StatusCode);
+        Assert.False(_store.GetForwardingMaster()!.Value); // persisted in the store
+
+        // The page now reflects OFF (an ON button + the held note).
+        string page2 = await client.GetStringAsync(new Uri("/forwarding", UriKind.Relative));
+        Assert.Contains("Turn ON", page2, StringComparison.Ordinal);
+        Assert.Contains("held", page2, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Forwarding_MasterSwitch_NonSysop_Forbidden()
+    {
+        ClaimCallsign("bob", "M0BOB");
+        using HttpClient client = await StartAsync(pdnUser: "bob", autoRedirect: false);
+        HttpResponseMessage r = await client.PostAsync(new Uri("/forwarding/master", UriKind.Relative),
+            new FormUrlEncodedContent([new("enabled", "0")]));
+        Assert.Equal(HttpStatusCode.Forbidden, r.StatusCode);
+    }
+
+    [Fact]
     public async Task Forwarding_EnableToggle_NonSysop_Forbidden()
     {
         ClaimCallsign("bob", "M0BOB"); // mapped, not the sysop (G0SYS)

@@ -41,24 +41,19 @@ public sealed class ForwardingScheduler
     private readonly ConcurrentDictionary<string, Task> _loops = new(StringComparer.OrdinalIgnoreCase);
     private readonly Channel<bool> _reconcile = NewNudgeChannel();
     private static readonly TimeSpan ReconcileTick = TimeSpan.FromSeconds(60);
-    private readonly bool _enabled;
-
     /// <summary>
     /// Creates the scheduler. Nudge channels are created eagerly for every enabled partner
-    /// so a nudge fired before <see cref="RunAsync"/> (the startup backlog sweep) is kept.
+    /// so a nudge fired before <see cref="RunAsync"/> (the startup backlog sweep) is kept. The
+    /// whole-BBS master switch is NOT a constructor flag any more — it is read LIVE from the store
+    /// (<see cref="BbsStore.GetForwardingMaster"/>), seeded from config + toggled at runtime.
     /// </summary>
-    /// <param name="enabled">
-    /// Master switch (BbsHostConfig.Forwarding.Enabled). When false the scheduler holds: it starts no
-    /// per-partner loops and dials no one (the migration safe-abort window). Default true.
-    /// </param>
     public ForwardingScheduler(
         RhpNodeLink link,
         FbbSessionRunner runner,
         BbsStore store,
         BbsIdentity identity,
         TimeProvider time,
-        ILogger<ForwardingScheduler> logger,
-        bool enabled = true)
+        ILogger<ForwardingScheduler> logger)
     {
         ArgumentNullException.ThrowIfNull(link);
         ArgumentNullException.ThrowIfNull(runner);
@@ -72,7 +67,6 @@ public sealed class ForwardingScheduler
         _identity = identity;
         _time = time;
         _logger = logger;
-        _enabled = enabled;
 
         foreach (Partner partner in store.ListPartners())
         {
@@ -82,6 +76,9 @@ public sealed class ForwardingScheduler
             }
         }
     }
+
+    /// <summary>The whole-BBS forwarding master switch, read live from the store (default on if unset).</summary>
+    private bool MasterOn() => _store.GetForwardingMaster() ?? true;
 
     /// <summary>Wakes a partner's loop now (FWDNewImmediately). Unknown/disabled partners are ignored.</summary>
     public void Nudge(string partnerCall)
@@ -102,27 +99,33 @@ public sealed class ForwardingScheduler
     /// </summary>
     public async Task RunAsync(CancellationToken cancellationToken)
     {
-        if (!_enabled)
-        {
-            // Forwarding HELD (BbsHostConfig.Forwarding.Enabled = false): the migration safe-abort
-            // window. Start no loops, dial no one — the mailbox + pre-marked legs are loaded but the
-            // node never advances the network. Inbound answering is governed separately.
-            LogForwardingHeld(_logger, null);
-            return;
-        }
-
-        // The positive counterpart of LogForwardingHeld: at start (and notably right after a
-        // cutover flips forwarding.enabled true) confirm the hold is OFF and surface the backlog
-        // at t0 — how many partners will be dialled and how much mail is queued to drain. Until
-        // now the only signal was the ABSENCE of the HELD warning.
-        var enabledPartners = _store.ListPartners().Where(p => p.Enabled).ToList();
-        int queued = enabledPartners.Sum(p => _store.GetForwardQueue(p.Call).Count);
-        LogForwardingActive(_logger, enabledPartners.Count, queued, null);
-
+        bool? lastMaster = null;
         try
         {
             while (!cancellationToken.IsCancellationRequested)
             {
+                // The whole-BBS forwarding MASTER switch is read LIVE (persisted in the store, toggled
+                // at runtime from the sysop UI). Off = the safe-abort hold: no loop dials, regardless of
+                // any partner's Enabled, and the inbound answerer (reading the same master) refuses
+                // sessions. off→on is picked up here on the next reconcile and spins the loops; on→off
+                // self-exits the running loops at their gate re-check. Log only on a transition — the
+                // positive line surfaces the t0 backlog (partners + queued) the moment the hold lifts.
+                bool master = MasterOn();
+                if (master != lastMaster)
+                {
+                    if (master)
+                    {
+                        var active = _store.ListPartners().Where(p => p.Enabled).ToList();
+                        LogForwardingActive(_logger, active.Count, active.Sum(p => _store.GetForwardQueue(p.Call).Count), null);
+                    }
+                    else
+                    {
+                        LogForwardingHeld(_logger, null);
+                    }
+
+                    lastMaster = master;
+                }
+
                 StartLoopsForEnabledPartners(cancellationToken);
 
                 // Re-sweep on an explicit reconcile (a partner created/enabled in the editor) or a
@@ -158,6 +161,13 @@ public sealed class ForwardingScheduler
     /// single supervisor loop, so the contains-then-add is race-free.</summary>
     private void StartLoopsForEnabledPartners(CancellationToken cancellationToken)
     {
+        // Master off → spin nothing (the whole-BBS hold); running loops self-exit at their gate
+        // re-check. Read once for the whole sweep.
+        if (!MasterOn())
+        {
+            return;
+        }
+
         foreach (Partner partner in _store.ListPartners())
         {
             if (!partner.Enabled)
@@ -200,9 +210,9 @@ public sealed class ForwardingScheduler
         while (!cancellationToken.IsCancellationRequested)
         {
             Partner? partner = _store.GetPartner(call);
-            if (partner is null || !partner.Enabled)
+            if (partner is null || !partner.Enabled || !MasterOn())
             {
-                return; // deleted or disabled → the loop self-exits and is reaped (a re-enable re-spins it)
+                return; // deleted, disabled, or master-off → self-exit + reap (re-enable/master-on re-spins it)
             }
 
             var interval = TimeSpan.FromSeconds(Math.Max(1, partner.ForwardIntervalSeconds));
@@ -216,13 +226,13 @@ public sealed class ForwardingScheduler
                 return;
             }
 
-            // Re-check the gate AFTER the wait: a disable that lands while this loop is parked must
-            // abort BEFORE it dials, not after one more cycle — the top-of-loop check only catches a
-            // change made before the wait, but a nudge would otherwise wake the loop straight into a
-            // dial. Re-fetch so disabling a partner is a clean abort whenever it lands (and pick up
-            // fresher config for the cycle).
+            // Re-check the gate AFTER the wait: a disable OR a master-off that lands while this loop is
+            // parked must abort BEFORE it dials, not after one more cycle — the top-of-loop check only
+            // catches a change made before the wait, but a nudge would otherwise wake the loop straight
+            // into a dial. Re-fetch so disabling a partner (or the master) is a clean abort whenever it
+            // lands (and pick up fresher config for the cycle).
             partner = _store.GetPartner(call);
-            if (partner is null || !partner.Enabled)
+            if (partner is null || !partner.Enabled || !MasterOn())
             {
                 return;
             }

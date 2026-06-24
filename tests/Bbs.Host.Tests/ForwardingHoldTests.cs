@@ -57,12 +57,10 @@ public class ForwardingHoldTests
     public async Task Inbound_Held_RefusesTheFbbAnswererWithoutEngaging()
     {
         await using var host = new HostHarness();
-        var held = new FbbSessionRunner(
-            host.Store, host.Receiver, host.Identity, "TEST", host.Time,
-            NullLogger<FbbSessionRunner>.Instance, partialStore: null, forwardingEnabled: false);
+        host.Store.SetForwardingMaster(false); // the master hold is store-backed + read live now
 
         var conn = new RecordingFbbConnection("GB7XYZ-1");
-        FbbSessionResult result = await held.RunAnswererAsync(conn, [], host.Token);
+        FbbSessionResult result = await host.Runner.RunAnswererAsync(conn, [], host.Token);
 
         Assert.False(result.Completed);     // no forwarding exchange happened
         Assert.Equal(0, conn.SendCount);    // we sent nothing into the session
@@ -107,7 +105,8 @@ public class ForwardingHoldTests
         host.Routing.RouteMessage(stored); // queue 1 message to GB7XYZ
 
         var log = new CapturingLogger<ForwardingScheduler>();
-        var sched = new ForwardingScheduler(host.Link, host.Runner, host.Store, host.Identity, host.Time, log, enabled: true);
+        host.Store.SetForwardingMaster(true); // master on (the default, but be explicit)
+        var sched = new ForwardingScheduler(host.Link, host.Runner, host.Store, host.Identity, host.Time, log);
         using var cts = new CancellationTokenSource();
         Task run = sched.RunAsync(cts.Token); // ACTIVE line is emitted synchronously at the top
         await Task.Delay(50);

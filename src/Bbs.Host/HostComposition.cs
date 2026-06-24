@@ -139,12 +139,21 @@ public static class HostComposition
         var partialStore = new FileInboundPartialStore(stateDir, time);
         partialStore.CollectStale();
         builder.Services.AddSingleton(partialStore);
+        // The whole-BBS forwarding master switch is persisted in the store and read live by the
+        // scheduler + inbound answerer (so the sysop's runtime toggle survives a restart). Seed it from
+        // bbs.yaml's forwarding.enabled on first start ONLY — once set, the persisted value wins, like
+        // partners do (a later bbs.yaml edit doesn't silently clobber a runtime toggle).
+        if (store.GetForwardingMaster() is null)
+        {
+            store.SetForwardingMaster(config.Forwarding.Enabled);
+        }
+
         builder.Services.AddSingleton(sp => new FbbSessionRunner(
             store, sp.GetRequiredService<InboundMessageReceiver>(), identity, version, time,
-            sp.GetRequiredService<ILogger<FbbSessionRunner>>(), partialStore, config.Forwarding.Enabled));
+            sp.GetRequiredService<ILogger<FbbSessionRunner>>(), partialStore));
         builder.Services.AddSingleton(sp => new ForwardingScheduler(
             sp.GetRequiredService<RhpNodeLink>(), sp.GetRequiredService<FbbSessionRunner>(), store, identity, time,
-            sp.GetRequiredService<ILogger<ForwardingScheduler>>(), config.Forwarding.Enabled));
+            sp.GetRequiredService<ILogger<ForwardingScheduler>>()));
         // The sysop "test connect" tool — same RHP open path as the scheduler cycle, but no FBB
         // session and no queue (so it cannot move mail). Reuses the live link.
         builder.Services.AddSingleton(sp => new ForwardingTester(

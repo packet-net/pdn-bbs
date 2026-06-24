@@ -362,6 +362,22 @@ public static class Webmail
             return SetPartnerEnabled(options, prefix, call, form["call"].ToString(), form["enabled"].ToString() == "1", embed, Theme(ctx));
         });
 
+        // The whole-BBS forwarding master switch (the safe-abort hold). Off = no dialling out AND no
+        // inbound accepted, regardless of any partner's Enabled. Persisted in the store + read live.
+        app.MapPost("/forwarding/master", async (HttpContext ctx) =>
+        {
+            string prefix = Prefix(ctx);
+            bool embed = Embed(ctx);
+            string? call = FindCallsign(options.Store, PdnUser(ctx));
+            if (call is null)
+            {
+                return Results.Redirect(U(prefix, "/", embed));
+            }
+
+            IFormCollection form = await ctx.Request.ReadFormAsync().ConfigureAwait(false);
+            return SetForwardingMaster(options, prefix, call, form["enabled"].ToString() == "1", embed, Theme(ctx));
+        });
+
         app.MapPost("/forwarding/yaml", async (HttpContext ctx) =>
         {
             string prefix = Prefix(ctx);
@@ -1624,10 +1640,34 @@ public static class Webmail
         return Html(Page(o, prefix, call, "Forwarding", embed,
             $"""
             <h2>Forwarding partners <span class="dim">— {partners.Count} configured</span></h2>
+            {MasterSwitch(o, prefix, embed)}
             {tabs}
             {banner}
             {body}
             """, theme), status);
+    }
+
+    /// <summary>
+    /// The whole-BBS forwarding master switch — the safe-abort hold. On = partners are dialled +
+    /// inbound accepted (subject to each partner's own enable); OFF = nothing forwards in EITHER
+    /// direction regardless of per-partner settings. Persisted; survives a restart.
+    /// </summary>
+    private static string MasterSwitch(WebmailOptions o, string prefix, bool embed)
+    {
+        bool on = o.Store.GetForwardingMaster() ?? true;
+        string state = on
+            ? """<span class="badge on">ON</span> — partners forward (each subject to its own enable)"""
+            : """<span class="badge off">OFF</span> — held: nothing forwards in or out, whatever the partners say""";
+        string button = on
+            ? $"""<input type="hidden" name="enabled" value="0"><button type="submit" class="btn danger">Turn OFF (hold all forwarding)</button>"""
+            : $"""<input type="hidden" name="enabled" value="1"><button type="submit" class="btn primary">Turn ON</button>""";
+        return $"""
+            <fieldset class="master-switch">
+            <legend>Forwarding</legend>
+            <p>{state}</p>
+            <form method="post" action="{U(prefix, "/forwarding/master", embed)}">{EmbedField(embed)}{button}</form>
+            </fieldset>
+            """;
     }
 
     /// <summary>
@@ -1954,6 +1994,20 @@ public static class Webmail
         o.OnPartnersChanged?.Invoke(); // reconcile: spin the loop on enable, or reap it on disable
         string verb = enabled ? "enabled" : "disabled";
         return Results.Redirect(U(prefix, "/forwarding", embed) + Notice(embed, $"{normalized} {verb}."));
+    }
+
+    private static IResult SetForwardingMaster(WebmailOptions o, string prefix, string call, bool enabled, bool embed, string? theme)
+    {
+        if (!IsSysop(o, call))
+        {
+            return Forwarding(o, prefix, call, tab: null, editCall: null, embed, theme, status: StatusCodes.Status403Forbidden);
+        }
+
+        o.Store.SetForwardingMaster(enabled);
+        o.OnPartnersChanged?.Invoke(); // reconcile: the scheduler re-reads the master live + spins/reaps loops
+        string state = enabled ? "ON — partners will be dialled and inbound accepted"
+                               : "OFF — the whole-BBS hold: no dialling, no inbound, regardless of per-partner settings";
+        return Results.Redirect(U(prefix, "/forwarding", embed) + Notice(embed, $"Forwarding master {state}."));
     }
 
     /// <summary>

@@ -142,7 +142,8 @@ internal sealed class HostHarness : IAsyncDisposable
     /// </summary>
     public void StartScheduler(bool enabled = true)
     {
-        Scheduler = new ForwardingScheduler(Link, Runner, Store, Identity, Time, NullLogger<ForwardingScheduler>.Instance, enabled);
+        Store.SetForwardingMaster(enabled); // the master switch is store-backed + read live now
+        Scheduler = new ForwardingScheduler(Link, Runner, Store, Identity, Time, NullLogger<ForwardingScheduler>.Instance);
         Routing.NudgePartner = Scheduler.Nudge;
         _loops.Add(Scheduler.RunAsync(_cts.Token));
     }

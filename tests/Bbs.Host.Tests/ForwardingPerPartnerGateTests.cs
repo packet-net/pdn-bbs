@@ -100,6 +100,48 @@ public class ForwardingPerPartnerGateTests
         Assert.Equal(0, host.Server.OpenAttempts); // never dialled — disable aborted the parked loop
     }
 
+    [Fact]
+    public async Task MasterOff_AtRuntime_AbortsAParkedLoopBeforeDialling()
+    {
+        await using var host = new HostHarness();
+        await host.StartLinkAsync();
+        host.StartScheduler(enabled: true); // master ON
+
+        // Enabled partner, no mail → its loop spins and parks.
+        host.Store.UpsertPartner(Partner("GB7MAS", enabled: true));
+        host.Scheduler!.Reconcile();
+        await Task.Delay(40);
+
+        // Flip the whole-BBS MASTER off at runtime, then queue mail + nudge: the loop's after-wait
+        // re-check reads the live master (store-backed) and aborts before dialling. The whole-BBS hold
+        // beats per-partner enable.
+        host.Store.SetForwardingMaster(false);
+        host.Scheduler!.Reconcile();
+        QueueTo(host, "after-master-off");
+        host.Scheduler!.Nudge("GB7MAS");
+        for (int i = 0; i < 5; i++)
+        {
+            host.Time.Advance(TimeSpan.FromMinutes(5));
+            await Task.Delay(10);
+        }
+
+        Assert.Equal(0, host.Server.OpenAttempts); // never dialled — master-off held everything
+    }
+
+    [Fact]
+    public async Task MasterOff_RefusesInbound_EvenForAnEnabledPartner()
+    {
+        await using var host = new HostHarness();
+        host.Store.UpsertPartner(Partner("GB7XYZ", enabled: true)); // partner enabled...
+        host.Store.SetForwardingMaster(false);                      // ...but the master is OFF
+        var conn = new RecordingFbbConn("GB7XYZ-1");
+        FbbSessionResult result = await host.Runner.RunAnswererAsync(conn, [], host.Token);
+
+        Assert.False(result.Completed);
+        Assert.Equal(0, conn.SendCount);    // master-off refuses inbound regardless of per-partner enable
+        Assert.Equal(0, conn.ReceiveCount);
+    }
+
     private sealed class RecordingFbbConn(string remote) : IFbbConnection
     {
         public string RemoteCallsign { get; } = remote;

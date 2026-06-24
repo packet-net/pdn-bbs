@@ -30,7 +30,6 @@ public sealed class FbbSessionRunner
     private readonly TimeProvider _time;
     private readonly ILogger _logger;
     private readonly FileInboundPartialStore? _partialStore;
-    private readonly bool _forwardingEnabled;
 
     /// <summary>A silent peer ends the session after this long (TimeProvider-driven).</summary>
     public TimeSpan IdleTimeout { get; init; } = TimeSpan.FromMinutes(10);
@@ -49,8 +48,7 @@ public sealed class FbbSessionRunner
         string sidVersion,
         TimeProvider time,
         ILogger<FbbSessionRunner> logger,
-        FileInboundPartialStore? partialStore = null,
-        bool forwardingEnabled = true)
+        FileInboundPartialStore? partialStore = null)
     {
         ArgumentNullException.ThrowIfNull(store);
         ArgumentNullException.ThrowIfNull(receiver);
@@ -65,7 +63,6 @@ public sealed class FbbSessionRunner
         _time = time;
         _logger = logger;
         _partialStore = partialStore;
-        _forwardingEnabled = forwardingEnabled;
     }
 
     /// <summary>
@@ -97,7 +94,7 @@ public sealed class FbbSessionRunner
         ArgumentNullException.ThrowIfNull(child);
         ArgumentNullException.ThrowIfNull(initialData);
 
-        if (!_forwardingEnabled)
+        if (!(_store.GetForwardingMaster() ?? true))
         {
             // Inbound forwarding HELD (forwarding.enabled = false): refuse the FBB session so a
             // partner cannot push mail in either — accepting an inbound forward would advance the

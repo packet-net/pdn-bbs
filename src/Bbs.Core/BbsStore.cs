@@ -1784,6 +1784,35 @@ public sealed class BbsStore : IDisposable
         }
     }
 
+    /// <summary>
+    /// The whole-BBS forwarding MASTER switch, persisted in <c>meta</c> (so it survives a restart like
+    /// the partners do, rather than reverting to the bbs.yaml seed). Read LIVE by the forwarding
+    /// scheduler and the inbound FBB answerer; toggled at runtime from the sysop UI. Off = the
+    /// safe-abort hold — no dialling out, no inbound accepted — regardless of any partner's Enabled.
+    /// Null = never set (the host seeds it from BbsHostConfig.Forwarding.Enabled at first start).
+    /// </summary>
+    public bool? GetForwardingMaster()
+    {
+        lock (_gate)
+        {
+            using SqliteCommand cmd = Command(null, "SELECT value FROM meta WHERE key='forwarding_master';");
+            return cmd.ExecuteScalar() is string s ? s == "1" : null;
+        }
+    }
+
+    /// <summary>Persists the whole-BBS forwarding master switch (see <see cref="GetForwardingMaster"/>).</summary>
+    public void SetForwardingMaster(bool enabled)
+    {
+        lock (_gate)
+        {
+            using SqliteCommand cmd = Command(null,
+                "INSERT INTO meta(key,value) VALUES('forwarding_master',$v) " +
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value;");
+            cmd.Parameters.AddWithValue("$v", enabled ? "1" : "0");
+            cmd.ExecuteNonQuery();
+        }
+    }
+
     /// <summary>Inserts or fully updates a partner record (keyed by exact call incl. SSID, compat spec §2.5).</summary>
     public void UpsertPartner(Partner partner)
     {
