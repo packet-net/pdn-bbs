@@ -84,6 +84,7 @@ public sealed class LinmailConfigParserTests
         Assert.Equal("RG1 1AA", tom.Zip);
         Assert.Equal(0, tom.Flags);
         Assert.False(tom.IsBbs);
+        Assert.Equal(29, tom.LastListed);        // field index 7 (lastmsg)
         Assert.Equal(1781734234, tom.TimeLastConnected);
 
         BpqUser cip = cfg.Users.Single(u => u.Call == "GB7CIP");
