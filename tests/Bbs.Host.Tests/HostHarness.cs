@@ -119,6 +119,12 @@ internal sealed class HostHarness : IAsyncDisposable
     {
         _loops.Add(Link.RunAsync(_cts.Token));
         await Server.WaitForListenAsync().ConfigureAwait(false);
+        // WaitForListenAsync only proves the server SAW the primary listen; the link publishes its
+        // up-state (_up) a few statements later, AFTER the service-alias bind (incl. a refusal). So
+        // asserting Link.IsUp on the next line is racy — it fails under CPU load when that window
+        // widens (the recurring RhpLink "alias duplicate" flake). Make the harness contract honest:
+        // StartLinkAsync returns only once the link is actually up, so every IsUp assertion is sound.
+        await Link.WaitForUpAsync(_cts.Token).ConfigureAwait(false);
     }
 
     /// <summary>
