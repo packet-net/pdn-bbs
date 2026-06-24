@@ -172,7 +172,10 @@ public sealed class BpqImporterIntegrationTests : IDisposable
 
         Assert.Equal(2, report.ImportedPartners); // GB7BSK + GB7CIP, not the GB7RDG self-entry
         Assert.Equal(0, ScalarLong(c, "SELECT COUNT(*) FROM partners WHERE call='GB7RDG';"));
-        Assert.Equal(1, ScalarLong(c, "SELECT enabled FROM partners WHERE call='GB7CIP';"));
+        // Controlled cutover: every partner imports DISABLED (regardless of BPQ's flag), so the node
+        // forwards to no one + refuses inbound until the sysop test-connects and enables each.
+        Assert.Equal(0, ScalarLong(c, "SELECT enabled FROM partners WHERE call='GB7CIP';"));
+        Assert.Equal(0, ScalarLong(c, "SELECT enabled FROM partners WHERE call='GB7BSK';"));
         Assert.Equal(1, ScalarLong(c, "SELECT allow_b2f FROM partners WHERE call='GB7CIP';"));
         Assert.Equal(0, ScalarLong(c, "SELECT allow_b2f FROM partners WHERE call='GB7BSK';"));
         Assert.Equal("C 3 GB7BSK", ScalarString(c, "SELECT connect_script FROM partners WHERE call='GB7BSK';"));

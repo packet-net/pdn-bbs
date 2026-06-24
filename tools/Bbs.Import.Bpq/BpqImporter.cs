@@ -464,7 +464,11 @@ internal static class BpqImporter
         {
             string call = Callsigns.Normalize(p.Call);
             pCall.Value = call;
-            pEnabled.Value = p.Enabled ? 1 : 0;
+            // Controlled cutover: import EVERY partner DISABLED, regardless of BPQ's enabled flag, so
+            // the migrated node forwards to no one and accepts no inbound until the sysop test-connects
+            // and enables each partner one at a time ("enable per partner with confidence"). The toggle
+            // gates both directions. A re-import re-disables — deterministic-rebuild, re-enable after.
+            pEnabled.Value = 0;
             pInterval.Value = Math.Max(1, p.FwdInterval);
             pNewImm.Value = p.FwdNewImmediately ? 1 : 0;
             pScript.Value = string.Join('\n', p.ConnectScript.Select(BpqConnectScript.Translate));

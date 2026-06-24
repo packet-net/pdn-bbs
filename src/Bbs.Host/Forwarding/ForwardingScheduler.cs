@@ -202,7 +202,7 @@ public sealed class ForwardingScheduler
             Partner? partner = _store.GetPartner(call);
             if (partner is null || !partner.Enabled)
             {
-                return; // config is fixed for the process lifetime (source-of-truth at startup)
+                return; // deleted or disabled → the loop self-exits and is reaped (a re-enable re-spins it)
             }
 
             var interval = TimeSpan.FromSeconds(Math.Max(1, partner.ForwardIntervalSeconds));
@@ -212,6 +212,17 @@ public sealed class ForwardingScheduler
                 await WaitForTimerOrNudgeAsync(wait, nudge, cancellationToken).ConfigureAwait(false);
             }
             catch (OperationCanceledException)
+            {
+                return;
+            }
+
+            // Re-check the gate AFTER the wait: a disable that lands while this loop is parked must
+            // abort BEFORE it dials, not after one more cycle — the top-of-loop check only catches a
+            // change made before the wait, but a nudge would otherwise wake the loop straight into a
+            // dial. Re-fetch so disabling a partner is a clean abort whenever it lands (and pick up
+            // fresher config for the cycle).
+            partner = _store.GetPartner(call);
+            if (partner is null || !partner.Enabled)
             {
                 return;
             }

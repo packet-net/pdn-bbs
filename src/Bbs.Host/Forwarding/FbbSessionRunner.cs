@@ -113,6 +113,19 @@ public sealed class FbbSessionRunner
         // Match the inbound caller on its BASE callsign — its source SSID is indeterminate
         // (an outbound connect grabs whatever SSID is free), so it can't key the partner lookup.
         Partner? partner = _store.FindPartnerByBaseCall(child.RemoteCallsign);
+
+        // Per-partner gate: disabling a partner stops it in BOTH directions, not just outbound dials.
+        // Refuse the inbound FBB session from a CONFIGURED-but-disabled partner before any mail moves —
+        // the same single toggle gates dial-out and accept-in. No bodies have been exchanged, so the
+        // partner keeps its mail and retries; it is accepted the instant it is re-enabled. Scoped to
+        // KNOWN partners: an unknown/temporary caller keeps its existing LinBPQ "temporary BBS"
+        // behaviour (the whole-BBS forwarding hold is the lever for those, not this per-partner gate).
+        if (partner is not null && !partner.Enabled)
+        {
+            LogInboundDisabled(_logger, child.RemoteCallsign, null);
+            return Task.FromResult(new FbbSessionResult(Completed: false, Graceful: false));
+        }
+
         string partnerCall = partner?.Call ?? Callsigns.Normalize(child.RemoteCallsign);
         IReadOnlyList<OutboundItem> outbound = partner is null
             ? []
@@ -424,6 +437,11 @@ public sealed class FbbSessionRunner
         LoggerMessage.Define<string>(LogLevel.Warning, new EventId(8, "InboundForwardingHeld"),
             "Inbound forwarding is HELD (forwarding.enabled = false); refusing the FBB session from {Partner}. "
             + "The link is closed and the partner will retry; no mail is accepted.");
+
+    private static readonly Action<ILogger, string, Exception?> LogInboundDisabled =
+        LoggerMessage.Define<string>(LogLevel.Information, new EventId(9, "InboundForwardingPartnerDisabled"),
+            "Refusing the inbound FBB session from {Partner}: the partner is disabled. The link is closed "
+            + "and the partner will retry; no mail is accepted — enable the partner to let it forward.");
 
     // --- Debug-level wire observability (gated by Debug; zero-cost when not enabled) ---
     // Renders the live B1F/B2F conversation: every protocol line out, every inbound chunk, and
