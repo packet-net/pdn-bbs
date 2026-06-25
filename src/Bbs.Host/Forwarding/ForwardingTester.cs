@@ -1,4 +1,5 @@
 using System.Text;
+using System.Text.Json;
 using Bbs.Core;
 using Bbs.Host.Rhp;
 using Microsoft.Extensions.Logging;
@@ -155,6 +156,80 @@ public sealed class ForwardingTester
             await child.CloseAsync(CancellationToken.None).ConfigureAwait(false);
         }
     }
+
+    private static readonly JsonSerializerOptions ResultJson = new() { PropertyNamingPolicy = JsonNamingPolicy.CamelCase };
+
+    /// <summary>
+    /// The streaming whole-script "Test connect": same validation as <see cref="TestConnectAsync"/> (the
+    /// UNSAVED draft when provided, else the stored script) but emits each transcript line LIVE via
+    /// <paramref name="emit"/> as the dialogue happens, then a final <c>result</c> event whose text is the
+    /// JSON verdict (<c>ok</c>/<c>target</c>/<c>port</c>/<c>sid</c>/<c>error</c>). Moves no mail; the child
+    /// is always closed.
+    /// </summary>
+    public async Task TestConnectStreamAsync(
+        string partnerCall,
+        IReadOnlyList<ConnectStep>? draftSteps,
+        Func<ProbeEvent, Task> emit,
+        CancellationToken cancellationToken)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(partnerCall);
+        ArgumentNullException.ThrowIfNull(emit);
+
+        Partner? stored = _store.GetPartner(partnerCall);
+        if (draftSteps is null && stored is null)
+        {
+            await emit(new ProbeEvent("result", ResultText(false, null, null, null, $"No such forwarding partner \"{partnerCall}\"."))).ConfigureAwait(false);
+            return;
+        }
+
+        Partner partner = draftSteps is null
+            ? stored!
+            : (stored ?? new Partner { Call = partnerCall }) with { ConnectScript = [.. draftSteps] };
+        ConnectPlan plan = ConnectScript.Resolve(partner);
+        TimeSpan wait = TimeSpan.FromSeconds(Math.Max(1, partner.ConTimeoutSeconds));
+
+        foreach (string warning in plan.Warnings)
+        {
+            await emit(new ProbeEvent("line", "! " + warning)).ConfigureAwait(false);
+        }
+
+        if (plan.Target is null)
+        {
+            await emit(new ProbeEvent("line", "inbound-only — this partner connects to us; there is nothing to dial. Enable it so its queued mail forwards when it next polls.")).ConfigureAwait(false);
+            await emit(new ProbeEvent("result", ResultText(true, null, null, null, null))).ConfigureAwait(false);
+            return;
+        }
+
+        RhpChildConnection child;
+        try
+        {
+            child = await _link.OpenAsync(plan.Target, plan.Port, cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            return;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            await emit(new ProbeEvent("result", ResultText(false, plan.Target, plan.Port, null, ex.Message))).ConfigureAwait(false);
+            return;
+        }
+
+        try
+        {
+            (bool ok, string? sid, string? error) = await ConnectScriptRunner
+                .RunStreamAsync(child, plan, wait, _time, _logger, [], emit, cancellationToken)
+                .ConfigureAwait(false);
+            await emit(new ProbeEvent("result", ResultText(ok, plan.Target, plan.Port, sid, error))).ConfigureAwait(false);
+        }
+        finally
+        {
+            await child.CloseAsync(CancellationToken.None).ConfigureAwait(false);
+        }
+    }
+
+    private static string ResultText(bool ok, string? target, string? port, string? sid, string? error) =>
+        JsonSerializer.Serialize(new { ok, target, port, sid, error }, ResultJson);
 
     /// <summary>
     /// The live "test to here" probe (step editor): dial the DRAFT script's target, replay its steps up to

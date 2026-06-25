@@ -61,6 +61,7 @@ public sealed class ForwardingTestConnectTests : IAsyncDisposable
             SysopCallsign = Sysop,
             TestConnect = tester.TestConnectAsync,
             ProbeStream = tester.ProbeStreamToAsync,
+            TestConnectStream = tester.TestConnectStreamAsync,
         });
         await _app.StartAsync();
 
@@ -214,6 +215,51 @@ public sealed class ForwardingTestConnectTests : IAsyncDisposable
         using HttpClient client = await StartWebAsync("nonsysop", "G7XYZ");
         HttpResponseMessage res = await client.GetAsync(new Uri("/forwarding/test-connect/probe?partner=GB7BPQ&stopBefore=0&steps=%5B%5D", UriKind.Relative));
         Assert.Equal(HttpStatusCode.Forbidden, res.StatusCode);
+    }
+
+    [Fact]
+    public async Task TestConnectStream_StreamsTheDialogueLive_ThenAResultVerdict()
+    {
+        _host.Store.UpsertPartner(new Partner { Call = "GB7BPQ" });
+        var tester = new ForwardingTester(_host.Link, _host.Store, _host.Time, NullLogger<ForwardingTester>.Instance);
+        await _host.StartLinkAsync();
+
+        ConnectStep[] draft = [new() { Open = "GB7BPQ-1" }, new() { Expect = "GB7BPQ-1>", Send = "BBS" }];
+        var events = new List<ProbeEvent>();
+        var done = new TaskCompletionSource();
+        Task Emit(ProbeEvent ev)
+        {
+            lock (events)
+            {
+                events.Add(ev);
+            }
+
+            if (ev.Type == "result")
+            {
+                done.TrySetResult();
+            }
+
+            return Task.CompletedTask;
+        }
+
+        Task run = tester.TestConnectStreamAsync("GB7BPQ", draft, Emit, CancellationToken.None);
+
+        FakeRhpPeer peer = await _host.Server.NextOpenAsync();
+        Assert.Equal("GB7BPQ-1", peer.Remote);
+        await peer.SendTextAsync("Welcome\rGB7BPQ-1>");       // releases the BBS send
+        Assert.Equal("BBS", await peer.ReadLineAsync());
+        await peer.SendLineAsync(PeerSid);                     // the FBB SID
+        await peer.SendTextAsync("de GB7BPQ-1>\r");
+        await done.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await run;
+
+        // The dialogue streamed line-by-line (the "> BBS" send), then a final result verdict.
+        Assert.Contains(events, e => e.Type == "line" && e.Text.Contains("BBS", StringComparison.Ordinal));
+        ProbeEvent result = events.Last(e => e.Type == "result");
+        using JsonDocument doc = JsonDocument.Parse(result.Text);
+        Assert.True(doc.RootElement.GetProperty("ok").GetBoolean());
+        Assert.Equal("GB7BPQ-1", doc.RootElement.GetProperty("target").GetString());
+        Assert.Equal(PeerSid, doc.RootElement.GetProperty("sid").GetString());
     }
 
     [Fact]

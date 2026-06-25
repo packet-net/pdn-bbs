@@ -309,6 +309,8 @@ public static class HostComposition
             TestConnect = forwardingTester.TestConnectAsync,
             // The live "test to here" step-editor probe (SSE) — dial the draft, replay to a step, stream.
             ProbeStream = forwardingTester.ProbeStreamToAsync,
+            // The streaming whole-script "Test connect" (SSE) — emit the dialogue live + a final verdict.
+            TestConnectStream = forwardingTester.TestConnectStreamAsync,
             // The same per-user settings singleton the console session uses — a webmail
             // interface-mode flip is the persisted choice the next console connect reads.
             Settings = app.Services.GetRequiredService<IUserSettingsStore>(),
