@@ -47,6 +47,15 @@ public sealed record WebmailOptions
     public Func<string, CancellationToken, Task<Bbs.Host.Forwarding.ConnectTestResult>>? TestConnect { get; init; }
 
     /// <summary>
+    /// The live "test to here" step-editor probe (<c>GET /forwarding/test-connect/probe</c>, an SSE
+    /// stream): dial the UNSAVED draft script's target, replay its steps up to a given index, then stream
+    /// the node's output live so the operator can watch and press "Use as Wait-for" when the prompt has
+    /// settled. Wired in <c>HostComposition</c> to
+    /// <see cref="Bbs.Host.Forwarding.ForwardingTester.ProbeStreamToAsync"/>. Null when no RHP link is available.
+    /// </summary>
+    public Func<string, IReadOnlyList<Bbs.Core.ConnectStep>, int, Func<Bbs.Host.Forwarding.ProbeEvent, Task>, CancellationToken, Task>? ProbeStream { get; init; }
+
+    /// <summary>
     /// The per-user console preferences store (the same singleton the console session uses —
     /// <c>HostComposition</c> wires the <see cref="Bbs.Host.Sessions.JsonUserSettingsStore"/>).
     /// Backs the <c>/settings</c> interface-mode toggle so a webmail flip is the same persisted
@@ -406,6 +415,48 @@ public static class Webmail
 
             IFormCollection form = await ctx.Request.ReadFormAsync().ConfigureAwait(false);
             return await TestConnect(options, call, form["partner"].ToString(), ctx.RequestAborted).ConfigureAwait(false);
+        });
+
+        // The live "test to here" step-editor probe — an SSE stream (EventSource GET). Dial the UNSAVED
+        // draft script's target, replay it up to ?stopBefore, then stream the node's output so the operator
+        // judges when the prompt has settled. Sysop-gated; moves no mail (the ForwardingTester probe path).
+        app.MapGet("/forwarding/test-connect/probe", async (HttpContext ctx) =>
+        {
+            string? call = FindCallsign(options.Store, PdnUser(ctx));
+            if (call is null || !IsSysop(options, call))
+            {
+                ctx.Response.StatusCode = StatusCodes.Status403Forbidden;
+                return;
+            }
+
+            if (options.ProbeStream is null)
+            {
+                ctx.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
+                return;
+            }
+
+            string partner = ctx.Request.Query["partner"].ToString().Trim();
+            if (partner.Length == 0)
+            {
+                // Validate the TRIMMED value before committing the SSE response, so a whitespace-only
+                // partner is a clean 400 rather than an exception after the stream headers are sent.
+                ctx.Response.StatusCode = StatusCodes.Status400BadRequest;
+                return;
+            }
+
+            int stopBefore = int.TryParse(ctx.Request.Query["stopBefore"].ToString(), out int sb) ? Math.Max(0, sb) : 0;
+            IReadOnlyList<ConnectStep> steps;
+            try
+            {
+                steps = ConnectScriptJson.Parse(ctx.Request.Query["steps"].ToString());
+            }
+            catch (System.Text.Json.JsonException)
+            {
+                ctx.Response.StatusCode = StatusCodes.Status400BadRequest;
+                return;
+            }
+
+            await ProbeStreamHandler(options, partner, steps, stopBefore, ctx).ConfigureAwait(false);
         });
 
         // ---- Observability (machine-readable) ----
@@ -995,6 +1046,38 @@ public static class Webmail
                 notes = result.Notes,
             },
         }, JsonOpts);
+    }
+
+    /// <summary>
+    /// Streams the live "test to here" probe as Server-Sent Events: each <see cref="ProbeEvent"/> is written
+    /// as one <c>data: {json}</c> frame and flushed, so the browser EventSource renders the dialogue live and
+    /// the operator presses "Use as Wait-for" (closing the stream, which closes the RHP child) once the prompt
+    /// has settled. Sysop + null-link are already checked by the route.
+    /// </summary>
+    private static async Task ProbeStreamHandler(WebmailOptions o, string partnerCall, IReadOnlyList<ConnectStep> steps, int stopBefore, HttpContext ctx)
+    {
+        HttpResponse res = ctx.Response;
+        res.Headers.ContentType = "text/event-stream";
+        res.Headers.CacheControl = "no-cache, no-store";
+        res.Headers["X-Accel-Buffering"] = "no"; // defeat reverse-proxy buffering so events flush live
+
+        async Task Emit(ProbeEvent ev)
+        {
+            string json = System.Text.Json.JsonSerializer.Serialize(ev, JsonOpts);
+            await res.WriteAsync($"data: {json}\n\n", ctx.RequestAborted).ConfigureAwait(false);
+            await res.Body.FlushAsync(ctx.RequestAborted).ConfigureAwait(false);
+        }
+
+        try
+        {
+            await res.WriteAsync(": probe open\n\n", ctx.RequestAborted).ConfigureAwait(false);
+            await res.Body.FlushAsync(ctx.RequestAborted).ConfigureAwait(false);
+            await o.ProbeStream!(partnerCall.Trim(), steps, stopBefore, Emit, ctx.RequestAborted).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            // The operator closed the stream (EventSource.close / navigated away) — the normal end of a probe.
+        }
     }
 
     private static IResult Bulletins(WebmailOptions o, string prefix, string call, int page, bool embed, string? theme)
@@ -1819,14 +1902,14 @@ public static class Webmail
     /// straight into a Wait-for step. The whole step list is serialised to the hidden
     /// <c>connectScript</c> JSON field on submit (small-JS island, like the list-page test-connect).
     /// </summary>
-    private static string ConnectScriptEditor(string call, bool editing, string json, string testUrl)
+    private static string ConnectScriptEditor(string call, bool editing, string json, string testUrl, string probeUrl)
     {
         string testButton = editing
             ? """ <button type="button" class="btn" id="cs-testbtn">Test connect</button>"""
             : "";
         return $"""
-            <div class="cs-help dim">Each step waits for text from the link, then sends a line. Type prompts exactly — a trailing space (shown below as <code>␣</code>) is significant. The Dial is the one hop we make; the steps below are typed at the remote node prompts. Advanced fields (regex, timeout, line-ending, raw bytes, alternatives) are per step; the YAML tab has the full reference.</div>
-            <div id="cs-editor" data-script="{H(json)}" data-call="{H(call)}" data-test="{H(testUrl)}">
+            <div class="cs-help dim">Each step waits for text from the link, then sends a line. Type prompts exactly — a trailing space (shown below as <code>␣</code>) is significant. The Dial is the one hop we make; the steps below are typed at the remote node prompts. {(editing ? "On a step's Wait-for, <b>⤓ test to here</b> dials and replays the steps above it, then streams the node live so you can capture the prompt by eye. " : "")}Advanced fields (regex, timeout, line-ending, raw bytes, alternatives) are per step; the YAML tab has the full reference.</div>
+            <div id="cs-editor" data-script="{H(json)}" data-call="{H(call)}" data-test="{H(testUrl)}" data-probe="{H(probeUrl)}" data-editing="{(editing ? "1" : "")}">
               <div class="cs-dial"><strong>Dial</strong>
                 <input id="cs-open" placeholder="e.g. GB7RDG" autocomplete="off">
                 <label class="dim">port <input id="cs-port" class="cs-port" placeholder="any" autocomplete="off"></label>
@@ -1851,6 +1934,7 @@ public static class Webmail
           var portEl=document.getElementById('cs-port');
           var jsonEl=document.getElementById('cs-json');
           var form=ed.closest('form');
+          var probeSrc=null;
           var MATCH=['substring','exact-line','regex'], EOL=['cr','lf','crlf','none'];
           function el(t,c,x){var e=document.createElement(t); if(c)e.className=c; if(x!=null)e.textContent=x; return e;}
           function inp(v,p){var e=el('input'); e.type='text'; e.autocomplete='off'; if(v!=null)e.value=v; if(p)e.placeholder=p; return e;}
@@ -1869,6 +1953,7 @@ public static class Webmail
             var dn=el('button','btn cs-mini','↓'); dn.type='button';
             var rm=el('button','btn cs-mini','✕'); rm.type='button';
             main.append(num,expect,send,up,dn,rm);
+            if(ed.dataset.editing){ var tt=el('button','btn cs-mini','⤓'); tt.type='button'; tt.title='test to here — dial, replay the steps above, then stream the prompt live'; tt.onclick=function(){probeToHere(row);}; main.append(tt); }
             var wsp=el('span','cs-ws'); wsp.hidden=true;
             expect.addEventListener('input',function(){ws(expect,wsp);}); ws(expect,wsp);
             var det=el('details','cs-adv'); det.append(el('summary',null,'Advanced'));
@@ -1914,12 +1999,64 @@ public static class Webmail
           if(form)form.addEventListener('submit',serialize);
           var tb=document.getElementById('cs-testbtn'), out=document.getElementById('cs-test');
           if(tb){ tb.addEventListener('click',function(){
+            closeProbe();
             out.hidden=false; out.className='tc-result'; out.textContent='Testing…';
             var fd=new FormData(); fd.append('partner', ed.dataset.call);
             fetch(ed.dataset.test,{method:'POST',body:fd,headers:{'Accept':'application/json'}})
               .then(function(r){return r.json();}).then(function(d){render(d);})
               .catch(function(e){out.textContent='Test failed: '+e; out.className='tc-result fail';});
           }); }
+          function closeProbe(){ if(probeSrc){ try{probeSrc.close();}catch(e){} probeSrc=null; } }
+          function tailOf(t){
+            if(!t) return '';
+            var m=t.replace(/\r\n?/g,'\n');
+            var i=m.lastIndexOf('\n');
+            var tail=i<0?m:m.slice(i+1);
+            if(tail.length) return tail;            // the trailing UNTERMINATED prompt (e.g. "=> ")
+            var lines=m.split('\n');                 // all terminated → the last non-empty line
+            for(var k=lines.length-1;k>=0;k--){ if(lines[k].trim().length) return lines[k]; }
+            return '';
+          }
+          function probeToHere(row){
+            if(!ed.dataset.editing) return;
+            serialize();
+            // stopBefore = the index of this row among the NON-EMPTY steps serialize() actually sends
+            // (empty rows are dropped server-side), so it lines up 1:1 with the resolved plan.Steps.
+            var idx=0, rows=stepsEl.querySelectorAll('.cs-step');
+            for(var j=0;j<rows.length;j++){ if(rows[j]===row) break; if(Object.keys(rows[j]._get()).length) idx++; }
+            closeProbe();
+            out.hidden=false; out.className='tc-result'; out.textContent='';
+            var head=el('div','dim','Live — dialling, then replaying the '+idx+' step(s) above. Watch the node, then press “Use as Wait-for” when the prompt has settled.');
+            var lines=el('div','cs-probe-lines');
+            var live=el('pre','cs-probe-raw');
+            var promptRow=el('div','cs-probe-prompt'); var tailEl=el('code','cs-probe-tail',''); tailEl.dataset.raw='';
+            promptRow.append(el('span','dim','prompt now: '), tailEl);
+            var bar=el('div','cs-toolbar');
+            var useBtn=el('button','btn primary cs-mini','Use as Wait-for'); useBtn.type='button';
+            var stopBtn=el('button','btn cs-mini','Stop'); stopBtn.type='button';
+            bar.append(useBtn,stopBtn);
+            out.append(head,lines,el('div','dim','— live —'),live,promptRow,bar);
+            var raw='', finished=false;
+            function updateTail(){ var t=tailOf(raw); tailEl.dataset.raw=t; tailEl.textContent='“'+t.replace(/ /g,'␣')+'”'; }
+            updateTail();
+            function fill(text){ var ex=row.querySelector('.cs-expect'); ex.value=text; ws(ex, row.querySelector('.cs-ws')); }
+            useBtn.onclick=function(){ finished=true; fill(tailEl.dataset.raw||''); closeProbe(); out.className='tc-result ok'; head.textContent='Captured — Wait-for set to the highlighted prompt. Edit it if you want a shorter substring.'; };
+            stopBtn.onclick=function(){ finished=true; closeProbe(); head.textContent='Stopped.'; };
+            var q='partner='+encodeURIComponent(ed.dataset.call)+'&stopBefore='+idx+'&steps='+encodeURIComponent(jsonEl.value);
+            probeSrc=new EventSource(ed.dataset.probe+(ed.dataset.probe.indexOf('?')<0?'?':'&')+q);
+            probeSrc.onmessage=function(e){
+              var d; try{d=JSON.parse(e.data);}catch(err){return;}
+              if(d.type==='line'){
+                var ln=el('div','cs-tline'); ln.append(el('span',null,d.text));
+                if(d.text.indexOf('< ')===0 && d.text.indexOf('< (matched')!==0){ var u=el('button','btn cs-mini','use'); u.type='button'; u.onclick=function(){ fill(d.text.slice(2)); finished=true; closeProbe(); }; ln.append(u); }
+                lines.append(ln);
+              } else if(d.type==='chunk'){ raw+=d.text; live.textContent=raw; updateTail(); }
+              else if(d.type==='error'){ finished=true; out.className='tc-result fail'; head.textContent='Error: '+d.text; closeProbe(); }
+              else if(d.type==='end'){ finished=true; head.textContent='Stream ended (node quiet / hold lapsed). The prompt above is what was captured — press “Use as Wait-for”, or ⤓ again.'; closeProbe(); }
+            };
+            // one-shot: never auto-reconnect (would re-dial). A drop before we finished is a real failure.
+            probeSrc.onerror=function(){ closeProbe(); if(!finished){ finished=true; out.className='tc-result fail'; head.textContent=(raw||lines.children.length)?'Connection lost mid-stream.':'Probe failed to start (node host unreachable or RHP link down).'; } };
+          }
           function render(d){
             out.className='tc-result '+(d.ok?'ok':'fail'); out.textContent='';
             out.append(el('div',null,(d.ok?'✓ OK':'✗ FAILED')+' — '+((d.target||'')+(d.port?(' (port '+d.port+')'):''))));
@@ -1983,7 +2120,7 @@ public static class Webmail
             : """<input name="call" placeholder="e.g. GB7AAA" maxlength="9" required>""";
 
         string csJson = editing && partner!.ConnectScript.Count > 0 ? ConnectScriptJson.Serialize(partner.ConnectScript) : "[]";
-        string csEditor = ConnectScriptEditor(editing ? partner!.Call : "", editing, csJson, U(prefix, "/forwarding/test-connect", embed));
+        string csEditor = ConnectScriptEditor(editing ? partner!.Call : "", editing, csJson, U(prefix, "/forwarding/test-connect", embed), U(prefix, "/forwarding/test-connect/probe", embed));
         string to = editing ? string.Join(" ", partner!.ToCalls) : "";
         string at = editing ? string.Join(" ", partner!.AtCalls) : "";
         string hr = editing ? string.Join(" ", partner!.HRoutes) : "";
@@ -2787,6 +2924,10 @@ public static class Webmail
         .tc-result{white-space:pre-wrap;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:.85em;margin:.4rem 0 0;padding:.5rem .6rem;border-radius:6px;background:hsl(var(--muted)/.5);border:1px solid hsl(var(--border))}
         .tc-result.ok{background:#14803115;border-color:#14803140}
         .tc-result.fail{background:#b9261515;border-color:#b9261540}
+        .cs-probe-lines{margin:.3rem 0}
+        .cs-probe-raw{white-space:pre-wrap;word-break:break-all;background:hsl(var(--background));border:1px solid hsl(var(--border));border-radius:4px;padding:.4rem;margin:.2rem 0;max-height:12rem;overflow:auto;font-family:"JetBrains Mono",ui-monospace,monospace;font-size:.8rem}
+        .cs-probe-prompt{margin:.35rem 0}
+        .cs-probe-tail{font-family:"JetBrains Mono",ui-monospace,monospace;background:hsl(var(--primary)/.14);border:1px solid hsl(var(--primary)/.4);border-radius:4px;padding:.05rem .35rem}
         button{
           font:inherit;font-weight:500;font-size:.875rem;cursor:pointer;
           padding:.45rem 1rem;border-radius:calc(var(--radius) - 2px);border:1px solid transparent;

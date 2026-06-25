@@ -106,47 +106,7 @@ public static class ConnectScriptRunner
         int lastStep = plan.Steps.Count - 1;
         for (int i = 0; i < plan.Steps.Count; i++)
         {
-            if (plan.Steps[i] is not ExpectSendStep step)
-            {
-                throw new InvalidOperationException($"Unknown step type {plan.Steps[i].GetType().Name}.");
-            }
-
-            // Expect/send (bpqchat ScriptStep): an explicit expect waits for that prompt BEFORE
-            // sending — the ONLY reliable way to gate on a node prompt, since prompts are not
-            // standardised across BPQ/URONode/XRouter/etc. THIS is how a multi-hop walk confirms each
-            // hop (its prompt seen) before issuing the next command. The per-step Timeout overrides the
-            // partner ConTimeout for this wait; Match/IgnoreCase/ExpectAny pick how the prompt is matched.
-            TimeSpan wait = step.Timeout ?? responseWait;
-            bool hasWait = step.Expect.Length > 0 || step.ExpectAny is { Count: > 0 };
-            string matched = string.Empty;
-            if (hasWait)
-            {
-                matched = await ExpectAsync(child, buffer, transcript, step, wait, time, cancellationToken).ConfigureAwait(false);
-            }
-
-            if (step.Send.Length > 0)
-            {
-                LogScriptSend(logger, child.RemoteCallsign, step.Send, null);
-                transcript.Add("> " + StepLabel(step) + step.Send);
-                string payload = step.Raw ? ExpandEscapes(step.Send) : step.Send;
-                await child.SendAsync(Encoding.Latin1.GetBytes(payload + EolBytes(step.Eol)), cancellationToken)
-                    .ConfigureAwait(false);
-                if (hasWait)
-                {
-                    LogScriptMatched(logger, child.RemoteCallsign, matched, step.Send, null);
-                }
-            }
-
-            // A send-only step (no expect) has no standardised prompt to wait for, so it goes out
-            // verbatim; between such steps (not the last) we make a best-effort wait for node progress —
-            // a " CONNECTED"/"OK"/">" line — before the next. For a node whose prompt does not fit that
-            // shape, set an explicit expect for that step.
-            if (!hasWait && step.Send.Length > 0 && i != lastStep)
-            {
-                await WaitForAsync(
-                    child, buffer, transcript, IsProgress, "node progress",
-                    wait, time, logger, cancellationToken).ConfigureAwait(false);
-            }
+            await RunStepAsync(child, buffer, transcript, plan.Steps[i], responseWait, time, logger, i == lastStep, cancellationToken).ConfigureAwait(false);
         }
 
         // The hand-to-FBB wait: accept ONLY a real FBB SID ("[…-…]") — the one standardised signal in
@@ -163,6 +123,150 @@ public static class ConnectScriptRunner
         head.CopyTo(initial, 0);
         tail.CopyTo(initial, head.Length);
         return initial;
+    }
+
+    /// <summary>
+    /// Runs one expect/send step: wait for its prompt (if any), then send (if any); a bare send-only
+    /// step that is not the last makes a best-effort node-progress wait before the next. Shared by the
+    /// full <see cref="RunAsync(RhpChildConnection,ConnectPlan,TimeSpan,TimeProvider,ILogger,List{string},CancellationToken)"/>
+    /// and the editor <see cref="ProbeStreamAsync"/>.
+    /// </summary>
+    private static async Task RunStepAsync(
+        RhpChildConnection child,
+        ScriptLineBuffer buffer,
+        List<string> transcript,
+        ConnectScriptStep rawStep,
+        TimeSpan responseWait,
+        TimeProvider time,
+        ILogger logger,
+        bool isLast,
+        CancellationToken cancellationToken)
+    {
+        if (rawStep is not ExpectSendStep step)
+        {
+            throw new InvalidOperationException($"Unknown step type {rawStep.GetType().Name}.");
+        }
+
+        // The per-step Timeout overrides the partner ConTimeout for this wait; Match/IgnoreCase/ExpectAny
+        // pick how the prompt is matched. An explicit expect gates the send on the node prompt.
+        TimeSpan wait = step.Timeout ?? responseWait;
+        bool hasWait = step.Expect.Length > 0 || step.ExpectAny is { Count: > 0 };
+        string matched = string.Empty;
+        if (hasWait)
+        {
+            matched = await ExpectAsync(child, buffer, transcript, step, wait, time, cancellationToken).ConfigureAwait(false);
+        }
+
+        if (step.Send.Length > 0)
+        {
+            LogScriptSend(logger, child.RemoteCallsign, step.Send, null);
+            transcript.Add("> " + StepLabel(step) + step.Send);
+            string payload = step.Raw ? ExpandEscapes(step.Send) : step.Send;
+            await child.SendAsync(Encoding.Latin1.GetBytes(payload + EolBytes(step.Eol)), cancellationToken)
+                .ConfigureAwait(false);
+            if (hasWait)
+            {
+                LogScriptMatched(logger, child.RemoteCallsign, matched, step.Send, null);
+            }
+        }
+
+        // A send-only step (no expect) has no standardised prompt to wait for, so it goes out verbatim;
+        // between such steps (not the last) make a best-effort wait for node progress before the next.
+        if (!hasWait && step.Send.Length > 0 && !isLast)
+        {
+            await WaitForAsync(
+                child, buffer, transcript, IsProgress, "node progress",
+                wait, time, logger, cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// Runs the plan's steps up to (but not including) <paramref name="stopBefore"/>, then STREAMS every
+    /// byte the node emits at that point live via <paramref name="emit"/> — so the sysop step editor can
+    /// show the dialogue and let the operator judge, by eye, when the prompt has settled (auto-detecting
+    /// "the far end has finished sending" is unreliable on packet RF). The prefix dialogue is emitted as
+    /// <c>line</c> events; the live capture as <c>chunk</c> events; a prefix failure as an <c>error</c>
+    /// event; the cap or link-drop as <c>end</c>. Streaming continues until <paramref name="cancellationToken"/>
+    /// (the operator closed the stream / pressed the button) or <paramref name="maxHold"/>. Moves no mail.
+    /// </summary>
+    public static async Task ProbeStreamAsync(
+        RhpChildConnection child,
+        ConnectPlan plan,
+        int stopBefore,
+        TimeSpan responseWait,
+        TimeProvider time,
+        ILogger logger,
+        List<string> transcript,
+        Func<ProbeEvent, Task> emit,
+        TimeSpan maxHold,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(child);
+        ArgumentNullException.ThrowIfNull(plan);
+        ArgumentNullException.ThrowIfNull(time);
+        ArgumentNullException.ThrowIfNull(logger);
+        ArgumentNullException.ThrowIfNull(transcript);
+        ArgumentNullException.ThrowIfNull(emit);
+
+        var buffer = new ScriptLineBuffer();
+        int upto = Math.Clamp(stopBefore, 0, plan.Steps.Count);
+        int emitted = 0;
+        for (int i = 0; i < upto; i++)
+        {
+            try
+            {
+                await RunStepAsync(child, buffer, transcript, plan.Steps[i], responseWait, time, logger, i == upto - 1, cancellationToken).ConfigureAwait(false);
+            }
+            catch (ConnectScriptException ex)
+            {
+                for (; emitted < transcript.Count; emitted++)
+                {
+                    await emit(new ProbeEvent("line", transcript[emitted])).ConfigureAwait(false);
+                }
+
+                await emit(new ProbeEvent("error", ex.Message)).ConfigureAwait(false);
+                return;
+            }
+
+            for (; emitted < transcript.Count; emitted++)
+            {
+                await emit(new ProbeEvent("line", transcript[emitted])).ConfigureAwait(false);
+            }
+        }
+
+        // The live capture — every byte the node emits here is streamed so the operator can WATCH and
+        // decide when the prompt has settled (the awaited prompt has no expect yet, so nothing can gate it).
+        byte[] leftover = buffer.TakeRemaining();
+        if (leftover.Length > 0)
+        {
+            await emit(new ProbeEvent("chunk", Encoding.Latin1.GetString(leftover))).ConfigureAwait(false);
+        }
+
+        using var holdCts = new CancellationTokenSource(maxHold, time);
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, holdCts.Token);
+        try
+        {
+            while (true)
+            {
+                byte[]? data = await child.ReceiveAsync(linked.Token).ConfigureAwait(false);
+                if (data is null)
+                {
+                    break; // link dropped
+                }
+
+                await emit(new ProbeEvent("chunk", Encoding.Latin1.GetString(data))).ConfigureAwait(false);
+            }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            return; // the operator closed the stream (pressed the button / cancelled) — nothing more to say
+        }
+        catch (OperationCanceledException)
+        {
+            // maxHold reached — fall through to end.
+        }
+
+        await emit(new ProbeEvent("end", "")).ConfigureAwait(false);
     }
 
     /// <summary>

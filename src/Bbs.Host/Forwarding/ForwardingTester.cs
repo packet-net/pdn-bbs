@@ -28,6 +28,10 @@ public sealed record ConnectTestResult(
     IReadOnlyList<string> Warnings,
     IReadOnlyList<string> Notes);
 
+/// <summary>One event of the live "test to here" probe stream (the SSE payload): a transcript <c>line</c>,
+/// a live received <c>chunk</c>, a prefix <c>error</c>, or the <c>end</c> of the hold window.</summary>
+public sealed record ProbeEvent(string Type, string Text);
+
 /// <summary>
 /// The sysop "test connect" tool: VALIDATE a partner connection — reachability AND the real peer
 /// prompt — WITHOUT forwarding any mail. It reuses the exact dial path the
@@ -138,6 +142,68 @@ public sealed class ForwardingTester
         finally
         {
             // Close the child WITHOUT ever having run an FBB caller session — this tool cannot move mail.
+            await child.CloseAsync(CancellationToken.None).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// The live "test to here" probe (step editor): dial the DRAFT script's target, replay its steps up to
+    /// <paramref name="stopBefore"/>, then STREAM every byte the node emits at that point via
+    /// <paramref name="emit"/> so the operator can watch and judge when the prompt has settled. Uses the
+    /// UNSAVED <paramref name="draftSteps"/> (so it works mid-edit); the stored partner supplies only the
+    /// ConTimeout (default 60 if not yet saved). Moves no mail. Streaming ends when the operator closes the
+    /// stream (<paramref name="cancellationToken"/>) or the hold window lapses; the child is always closed.
+    /// </summary>
+    public async Task ProbeStreamToAsync(
+        string partnerCall,
+        IReadOnlyList<ConnectStep> draftSteps,
+        int stopBefore,
+        Func<ProbeEvent, Task> emit,
+        CancellationToken cancellationToken)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(partnerCall);
+        ArgumentNullException.ThrowIfNull(draftSteps);
+        ArgumentNullException.ThrowIfNull(emit);
+
+        Partner? partner = _store.GetPartner(partnerCall);
+        int conTimeout = partner?.ConTimeoutSeconds ?? 60;
+        Partner probePartner = (partner ?? new Partner { Call = partnerCall }) with { ConnectScript = [.. draftSteps] };
+        ConnectPlan plan = ConnectScript.Resolve(probePartner);
+        TimeSpan wait = TimeSpan.FromSeconds(Math.Max(1, conTimeout));
+        var transcript = new List<string>();
+
+        if (plan.Target is null)
+        {
+            await emit(new ProbeEvent("error", "no dial target — add an open step (the call/alias to connect to) at the top of the script before probing")).ConfigureAwait(false);
+            return;
+        }
+
+        RhpChildConnection child;
+        try
+        {
+            child = await _link.OpenAsync(plan.Target, plan.Port, cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            return; // operator closed the stream during the dial
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            await emit(new ProbeEvent("error", ex.Message)).ConfigureAwait(false);
+            return;
+        }
+
+        try
+        {
+            // A generous hold so the operator can deliberate; they close the stream (press the button) once
+            // the prompt has settled, otherwise it auto-closes after this.
+            TimeSpan maxHold = TimeSpan.FromSeconds(Math.Clamp(conTimeout * 2, 30, 120));
+            await ConnectScriptRunner
+                .ProbeStreamAsync(child, plan, stopBefore, wait, _time, _logger, transcript, emit, maxHold, cancellationToken)
+                .ConfigureAwait(false);
+        }
+        finally
+        {
             await child.CloseAsync(CancellationToken.None).ConfigureAwait(false);
         }
     }

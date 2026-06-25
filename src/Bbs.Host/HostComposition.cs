@@ -307,6 +307,8 @@ public static class HostComposition
             OnForwardNow = scheduler.Nudge,
             // Sysop "test connect": validate a partner WITHOUT moving mail (no FBB session, no queue).
             TestConnect = forwardingTester.TestConnectAsync,
+            // The live "test to here" step-editor probe (SSE) — dial the draft, replay to a step, stream.
+            ProbeStream = forwardingTester.ProbeStreamToAsync,
             // The same per-user settings singleton the console session uses — a webmail
             // interface-mode flip is the persisted choice the next console connect reads.
             Settings = app.Services.GetRequiredService<IUserSettingsStore>(),

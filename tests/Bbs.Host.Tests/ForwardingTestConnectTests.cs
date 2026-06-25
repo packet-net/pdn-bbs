@@ -60,6 +60,7 @@ public sealed class ForwardingTestConnectTests : IAsyncDisposable
             StationCallsign = HostHarness.OwnCall,
             SysopCallsign = Sysop,
             TestConnect = tester.TestConnectAsync,
+            ProbeStream = tester.ProbeStreamToAsync,
         });
         await _app.StartAsync();
 
@@ -136,6 +137,83 @@ public sealed class ForwardingTestConnectTests : IAsyncDisposable
 
         // And the child was closed (no lingering session) — the host closed its end.
         await peer.WaitForHostCloseAsync();
+    }
+
+    [Fact]
+    public async Task ProbeToHere_ReplaysThePrefix_ThenStreamsTheLivePrompt()
+    {
+        // The step-editor "test to here": dial the draft's target, replay the steps ABOVE the one being
+        // authored, then stream what the node emits so the operator can capture the prompt by eye.
+        _host.Store.UpsertPartner(new Partner { Call = "GB7WEM" });
+        var tester = new ForwardingTester(_host.Link, _host.Store, _host.Time, NullLogger<ForwardingTester>.Instance);
+        await _host.StartLinkAsync();
+
+        ConnectStep[] draft =
+        [
+            new() { Open = "GB7RDG" },
+            new() { Expect = "GB7RDG}", Send = "C 3 !GB7WEM-7" }, // step above the one being authored
+            new() { Send = "BBS" },                                // the step whose Wait-for we're probing
+        ];
+
+        var events = new List<ProbeEvent>();
+        var gotPrompt = new TaskCompletionSource();
+        Task Emit(ProbeEvent ev)
+        {
+            lock (events)
+            {
+                events.Add(ev);
+            }
+
+            if (ev.Type == "chunk" && ev.Text.Contains("=>", StringComparison.Ordinal))
+            {
+                gotPrompt.TrySetResult();
+            }
+
+            return Task.CompletedTask;
+        }
+
+        using var cts = new CancellationTokenSource();
+        Task probe = tester.ProbeStreamToAsync("GB7WEM", draft, stopBefore: 1, Emit, cts.Token);
+
+        FakeRhpPeer peer = await _host.Server.NextOpenAsync();
+        Assert.Equal("GB7RDG", peer.Remote);
+        await peer.SendTextAsync("READNG:GB7RDG}");                  // the prefix step's prompt
+        Assert.Equal("C 3 !GB7WEM-7", await peer.ReadLineAsync());   // …releases the prefix send
+        await peer.SendTextAsync("URONode GB7WEM\r=> ");             // then the node's live prompt
+        await gotPrompt.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        await cts.CancelAsync();   // the operator pressed "Use as Wait-for" / closed the stream
+        await probe;               // …the probe returns and the child is closed
+
+        // The prefix dialogue streamed as line events; the live "=> " prompt streamed as a chunk.
+        Assert.Contains(events, e => e.Type == "line" && e.Text.Contains("C 3 !GB7WEM-7", StringComparison.Ordinal));
+        Assert.Contains(events, e => e.Type == "chunk" && e.Text.Contains("=>", StringComparison.Ordinal));
+        // No mail moved (the probe never runs an FBB session).
+        Assert.Empty(_host.Store.GetForwardQueue("GB7WEM"));
+    }
+
+    [Fact]
+    public async Task ProbeToHere_NoOpenStep_EmitsAnError()
+    {
+        _host.Store.UpsertPartner(new Partner { Call = "GB7WEM" });
+        var tester = new ForwardingTester(_host.Link, _host.Store, _host.Time, NullLogger<ForwardingTester>.Instance);
+        await _host.StartLinkAsync();
+
+        ConnectStep[] draft = [new() { Expect = "x", Send = "y" }]; // no open step → nothing to dial
+        var events = new List<ProbeEvent>();
+        await tester.ProbeStreamToAsync("GB7WEM", draft, stopBefore: 0, ev => { events.Add(ev); return Task.CompletedTask; }, CancellationToken.None);
+
+        ProbeEvent e = Assert.Single(events);
+        Assert.Equal("error", e.Type);
+        Assert.Contains("open step", e.Text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ProbeEndpoint_NonSysop_Is403()
+    {
+        using HttpClient client = await StartWebAsync("nonsysop", "G7XYZ");
+        HttpResponseMessage res = await client.GetAsync(new Uri("/forwarding/test-connect/probe?partner=GB7BPQ&stopBefore=0&steps=%5B%5D", UriKind.Relative));
+        Assert.Equal(HttpStatusCode.Forbidden, res.StatusCode);
     }
 
     [Fact]
