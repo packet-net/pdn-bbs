@@ -352,7 +352,7 @@ public sealed class ForwardingTestConnectTests : IAsyncDisposable
         await done.Task.WaitAsync(TimeSpan.FromSeconds(5));
         await run;
 
-        // The dialogue streamed line-by-line (the "> BBS" send), then a final result verdict.
+        // Our send streamed as a "> BBS" line (the node's own output streams as chunks), then a result verdict.
         Assert.Contains(events, e => e.Type == "line" && e.Text.Contains("BBS", StringComparison.Ordinal));
         ProbeEvent result = events.Last(e => e.Type == "result");
         using JsonDocument doc = JsonDocument.Parse(result.Text);
@@ -362,13 +362,57 @@ public sealed class ForwardingTestConnectTests : IAsyncDisposable
     }
 
     [Fact]
+    public async Task TestConnectStream_StreamsNodeChatterConsumedByAnExpect_AsLiveChunks()
+    {
+        // The reported gap: node output an expect SWALLOWS (e.g. the greeting before the awaited prompt) must
+        // still reach the live transcript — as `chunk` events, exactly like the ⤓ probe — not vanish behind a
+        // terse "(matched …)" marker. Our sends stay as "> …" lines; the node markers are no longer emitted.
+        _host.Store.UpsertPartner(new Partner { Call = "GB7BPQ" });
+        var tester = new ForwardingTester(_host.Link, _host.Store, _host.Time, NullLogger<ForwardingTester>.Instance);
+        await _host.StartLinkAsync();
+
+        ConnectStep[] draft = [new() { Open = "GB7BPQ-1" }, new() { Expect = "Help", Send = "BBS" }];
+        var events = new List<ProbeEvent>();
+        var done = new TaskCompletionSource();
+        Task Emit(ProbeEvent ev)
+        {
+            lock (events)
+            {
+                events.Add(ev);
+            }
+
+            if (ev.Type == "result")
+            {
+                done.TrySetResult();
+            }
+
+            return Task.CompletedTask;
+        }
+
+        Task run = tester.TestConnectStreamAsync("GB7BPQ", draft, Emit, CancellationToken.None);
+
+        FakeRhpPeer peer = await _host.Server.NextOpenAsync();
+        await peer.SendTextAsync("Welcome to GB7BPQ\rType ? for Help\r");   // greeting CONSUMED by the "Help" expect
+        Assert.Equal("BBS", await peer.ReadLineAsync());
+        await peer.SendLineAsync(PeerSid);
+        await peer.SendTextAsync("de GB7BPQ-1>\r");
+        await done.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await run;
+
+        // The greeting the expect consumed surfaced as a live chunk; our send as a line; no terse marker.
+        Assert.Contains(events, e => e.Type == "chunk" && e.Text.Contains("Welcome to GB7BPQ", StringComparison.Ordinal));
+        Assert.Contains(events, e => e.Type == "line" && e.Text.Contains("> BBS", StringComparison.Ordinal));
+        Assert.DoesNotContain(events, e => e.Type == "line" && e.Text.Contains("(matched", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public async Task TestConnectStream_SteplessDial_StreamsGreetingLinesLive_BeforeThePrompt()
     {
         // The lab exposed this: a stepless dial (a bare open with no steps) puts the WHOLE dialogue inside
-        // the hand-to-FBB wait. That wait must emit each line LIVE as it arrives — not buffer them until it
-        // resolves — or the operator watching a stepless "test connect" sees nothing until the very end. The
-        // assertion below would HANG under the old buffer-then-flush behaviour: the greeting line only
-        // surfaces once the prompt has been awaited, which happens after we send it.
+        // the hand-to-FBB wait. That wait must stream the node's bytes LIVE as they arrive (as `chunk`
+        // events) — not buffer them until it resolves — or the operator watching a stepless "test connect"
+        // sees nothing until the very end. The assertion below would HANG under buffer-then-flush: the
+        // greeting only surfaces once the prompt has been awaited, which happens after we send it.
         _host.Store.UpsertPartner(new Partner { Call = "GB7BPQ" });
         var tester = new ForwardingTester(_host.Link, _host.Store, _host.Time, NullLogger<ForwardingTester>.Instance);
         await _host.StartLinkAsync();
@@ -384,7 +428,7 @@ public sealed class ForwardingTestConnectTests : IAsyncDisposable
                 events.Add(ev);
             }
 
-            if (ev.Type == "line" && ev.Text.Contains("Welcome to the node", StringComparison.Ordinal))
+            if (ev.Type == "chunk" && ev.Text.Contains("Welcome to the node", StringComparison.Ordinal))
             {
                 greeted.TrySetResult();
             }
@@ -402,7 +446,7 @@ public sealed class ForwardingTestConnectTests : IAsyncDisposable
         FakeRhpPeer peer = await _host.Server.NextOpenAsync();
         Assert.Equal("GB7BPQ-1", peer.Remote);
 
-        // A greeting line that is NOT the prompt — it must surface as a live "line" event BEFORE we send the
+        // A greeting line that is NOT the prompt — it must surface as a live "chunk" event BEFORE we send the
         // prompt that resolves the wait. If the wait buffered, this await would time out.
         await peer.SendLineAsync("Welcome to the node");
         await greeted.Task.WaitAsync(TimeSpan.FromSeconds(5));

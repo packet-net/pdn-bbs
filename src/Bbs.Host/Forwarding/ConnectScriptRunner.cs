@@ -140,7 +140,9 @@ public static class ConnectScriptRunner
         TimeProvider time,
         ILogger logger,
         bool isLast,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        Func<byte[], Task>? onReceive = null,
+        Func<string, Task>? onSend = null)
     {
         if (rawStep is not ExpectSendStep step)
         {
@@ -154,13 +156,18 @@ public static class ConnectScriptRunner
         string matched = string.Empty;
         if (hasWait)
         {
-            matched = await ExpectAsync(child, buffer, transcript, step, wait, time, cancellationToken).ConfigureAwait(false);
+            matched = await ExpectAsync(child, buffer, transcript, step, wait, time, cancellationToken, onReceive).ConfigureAwait(false);
         }
 
         if (step.Send.Length > 0)
         {
             LogScriptSend(logger, child.RemoteCallsign, step.Send, null);
             transcript.Add("> " + StepLabel(step) + step.Send);
+            if (onSend is not null)
+            {
+                await onSend("> " + StepLabel(step) + step.Send).ConfigureAwait(false);
+            }
+
             string payload = step.Raw ? ExpandEscapes(step.Send) : step.Send;
             await child.SendAsync(Encoding.Latin1.GetBytes(payload + EolBytes(step.Eol)), cancellationToken)
                 .ConfigureAwait(false);
@@ -176,7 +183,7 @@ public static class ConnectScriptRunner
         {
             await WaitForAsync(
                 child, buffer, transcript, IsProgress, "node progress",
-                wait, time, logger, cancellationToken).ConfigureAwait(false);
+                wait, time, logger, cancellationToken, onReceive).ConfigureAwait(false);
         }
     }
 
@@ -294,36 +301,31 @@ public static class ConnectScriptRunner
         ArgumentNullException.ThrowIfNull(emit);
 
         var buffer = new ScriptLineBuffer();
-        int emitted = 0;
-        async Task Flush()
-        {
-            for (; emitted < transcript.Count; emitted++)
-            {
-                await emit(new ProbeEvent("line", transcript[emitted])).ConfigureAwait(false);
-            }
-        }
+
+        // The live transcript: the node's raw output streams as `chunk` events the instant it arrives — so the
+        // operator watches the real dialogue (exactly like the ⤓ probe), including the chatter an expect
+        // consumes, not just terse "matched" markers — and our own sends stream as `line` events in order. The
+        // transcript list is still accumulated for the failure-message Render; it is no longer the emit channel.
+        Func<byte[], Task> onReceive = data => emit(new ProbeEvent("chunk", Encoding.Latin1.GetString(data)));
+        Func<string, Task> onSend = line => emit(new ProbeEvent("line", line));
 
         int lastStep = plan.Steps.Count - 1;
         try
         {
             for (int i = 0; i < plan.Steps.Count; i++)
             {
-                await RunStepAsync(child, buffer, transcript, plan.Steps[i], responseWait, time, logger, i == lastStep, cancellationToken).ConfigureAwait(false);
-                await Flush().ConfigureAwait(false);
+                await RunStepAsync(child, buffer, transcript, plan.Steps[i], responseWait, time, logger, i == lastStep, cancellationToken, onReceive, onSend).ConfigureAwait(false);
             }
-
         }
         catch (ConnectScriptException ex)
         {
-            await Flush().ConfigureAwait(false);
             return (false, null, ex.Message);
         }
 
-        // The hand-to-FBB SID wait, emitting each line LIVE as it arrives (the verbose node chatter before
-        // the SID is the bulk of what the operator wants to watch — buffering it until the wait completes
-        // would defeat the live view, especially for a stepless test where it is the whole dialogue). A plan
-        // WITH steps holds out for a real FBB SID (never a bare ">" gateway banner); a STEPLESS plan accepts
-        // the SID-or-prompt the answerer sends.
+        // The hand-to-FBB SID wait: the node's bytes stream as `chunk` events live (the verbose chatter before
+        // the SID — the whole dialogue for a stepless test — is what the operator wants to watch); the SID
+        // itself is detected from the line buffer. A plan WITH steps holds out for a real FBB SID (never a
+        // bare ">" gateway banner); a STEPLESS plan accepts the SID-or-prompt the answerer sends.
         bool stepless = plan.Steps.Count == 0;
         using var sidTimeout = new CancellationTokenSource(responseWait, time);
         using var sidLinked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, sidTimeout.Token);
@@ -337,7 +339,6 @@ public static class ConnectScriptRunner
                 }
 
                 transcript.Add("< " + line);
-                await emit(new ProbeEvent("line", "< " + line)).ConfigureAwait(false);
                 if (IsFailure(line))
                 {
                     return (false, null, $"node said \"{line}\"");
@@ -364,6 +365,7 @@ public static class ConnectScriptRunner
                 return (false, null, "the link dropped");
             }
 
+            await onReceive(data).ConfigureAwait(false);
             buffer.Feed(data);
         }
     }
@@ -411,7 +413,8 @@ public static class ConnectScriptRunner
         ExpectSendStep step,
         TimeSpan wait,
         TimeProvider time,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        Func<byte[], Task>? onReceive = null)
     {
         IReadOnlyList<string> wants = step.ExpectAny is { Count: > 0 } any ? any : [step.Expect];
         Regex[]? regexes = null;
@@ -487,6 +490,11 @@ public static class ConnectScriptRunner
             {
                 throw new ConnectScriptException(
                     $"the link dropped while waiting for {desc}{StepSuffix(step)}{Render(transcript)}");
+            }
+
+            if (onReceive is not null)
+            {
+                await onReceive(data).ConfigureAwait(false);
             }
 
             buffer.Feed(data);
@@ -612,7 +620,8 @@ public static class ConnectScriptRunner
         TimeSpan wait,
         TimeProvider time,
         ILogger logger,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        Func<byte[], Task>? onReceive = null)
     {
         using var timeout = new CancellationTokenSource(wait, time);
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeout.Token);
@@ -654,6 +663,11 @@ public static class ConnectScriptRunner
             {
                 throw new ConnectScriptException(
                     $"the link dropped while waiting for {expectation}{Render(transcript)}");
+            }
+
+            if (onReceive is not null)
+            {
+                await onReceive(data).ConfigureAwait(false);
             }
 
             buffer.Feed(data);

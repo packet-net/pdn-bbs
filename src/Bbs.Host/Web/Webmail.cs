@@ -2077,25 +2077,24 @@ public static class Webmail
             out.hidden=false; out.className='tc-result'; out.textContent='';
             var tpc=partnerCall();
             if(!tpc){ out.className='tc-result fail'; out.append(el('div','dim','Enter the partner callsign (the field at the top) before testing.')); return; }
-            var thead=el('div','dim','Connecting & running the script…'), tlines=el('div','cs-probe-lines'), tdone=false;
-            out.append(thead,tlines);
+            // The whole-script transcript LIVE: the node's raw output streams into cs-probe-raw as it arrives
+            // (exactly like the ⤓ probe), and our own sends land as marked "> …" lines in order. Node output
+            // arrives as `chunk`; our sends/warnings as `line`; the verdict as `result`.
+            var thead=el('div','dim','Connecting & running the script…'), live=el('pre','cs-probe-raw'), tdone=false;
+            out.append(thead,live);
             var tq='partner='+encodeURIComponent(tpc)+'&steps='+encodeURIComponent(jsonEl.value);
             probeSrc=new EventSource(ed.dataset.teststream+(ed.dataset.teststream.indexOf('?')<0?'?':'&')+tq);
             probeSrc.onmessage=function(e){
               var d; try{d=JSON.parse(e.data);}catch(err){return;}
-              if(d.type==='line'){
-                // Test connect VALIDATES the whole script: its lines are a read-only transcript, not build
-                // material, so (unlike the ⤓ probe) they carry NO "use" button — "use" appends a step, which
-                // makes no sense on a script you are checking end-to-end (esp. one that just succeeded).
-                var ln=el('div','cs-tline'); ln.append(el('span',null,d.text));
-                tlines.append(ln);
-              } else if(d.type==='result'){ tdone=true; var r; try{r=JSON.parse(d.text);}catch(err){r={};}
+              if(d.type==='chunk'){ live.append(document.createTextNode(d.text.replace(/\r\n?/g,'\n'))); live.scrollTop=live.scrollHeight; }
+              else if(d.type==='line'){ var s=el('span','cs-tx'); s.textContent=d.text+'\n'; live.append(s); live.scrollTop=live.scrollHeight; }
+              else if(d.type==='result'){ tdone=true; var r; try{r=JSON.parse(d.text);}catch(err){r={};}
                 out.className='tc-result '+(r.ok?'ok':'fail');
                 thead.textContent=(r.ok?'✓ OK':'✗ FAILED')+' — '+((r.target||tpc)+(r.port?(' (port '+r.port+')'):''))+(r.sid?(' — SID: '+r.sid):'')+(r.error?(' — '+r.error):'');
                 closeProbe();
               } else if(d.type==='error'){ tdone=true; out.className='tc-result fail'; thead.textContent='Error: '+d.text; closeProbe(); }
             };
-            probeSrc.onerror=function(){ closeProbe(); if(!tdone){ tdone=true; out.className='tc-result fail'; thead.textContent=tlines.children.length?'Connection lost mid-stream.':'Couldn’t start the test — check you’re still signed in as sysop, and the node host / RHP link is up.'; } };
+            probeSrc.onerror=function(){ closeProbe(); if(!tdone){ tdone=true; out.className='tc-result fail'; thead.textContent=live.textContent.length?'Connection lost mid-stream.':'Couldn’t start the test — check you’re still signed in as sysop, and the node host / RHP link is up.'; } };
           }); }
           function closeProbe(){ if(probeSrc){ try{probeSrc.close();}catch(e){} probeSrc=null; } }
           function tailOf(t){
@@ -3005,6 +3004,7 @@ public static class Webmail
         .tc-result.fail{background:#b9261515;border-color:#b9261540}
         .cs-probe-lines{margin:.3rem 0}
         .cs-probe-raw{white-space:pre-wrap;word-break:break-all;background:hsl(var(--background));border:1px solid hsl(var(--border));border-radius:4px;padding:.4rem;margin:.2rem 0;max-height:12rem;overflow:auto;font-family:"JetBrains Mono",ui-monospace,monospace;font-size:.8rem}
+        .cs-probe-raw .cs-tx{font-weight:700}
         .cs-probe-prompt{margin:.35rem 0}
         .cs-probe-tail{font-family:"JetBrains Mono",ui-monospace,monospace;background:hsl(var(--primary)/.14);border:1px solid hsl(var(--primary)/.4);border-radius:4px;padding:.05rem .35rem}
         button{
