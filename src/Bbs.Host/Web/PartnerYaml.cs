@@ -17,6 +17,7 @@ internal static class PartnerYaml
     /// <summary>The deserializer — camelCase keys, unknown keys ignored — IDENTICAL to <see cref="BbsHostConfigFile.Parse"/>.</summary>
     private static readonly IDeserializer Deserializer = new DeserializerBuilder()
         .WithNamingConvention(CamelCaseNamingConvention.Instance)
+        .WithTypeConverter(new ConnectScriptYamlConverter())
         .IgnoreUnmatchedProperties()
         .Build();
 
@@ -32,6 +33,7 @@ internal static class PartnerYaml
     /// </summary>
     private static readonly ISerializer Serializer = new SerializerBuilder()
         .WithNamingConvention(CamelCaseNamingConvention.Instance)
+        .WithTypeConverter(new ConnectScriptYamlConverter())
         .ConfigureDefaultValuesHandling(DefaultValuesHandling.OmitNull)
         .Build();
 
@@ -140,6 +142,7 @@ internal static class PartnerYaml
     {
         Call = p.Call,
         ConnectScript = [.. p.ConnectScript],
+        // ConnectScript is List<ConnectStep> on both sides — a straight copy of the structured steps.
         ConTimeoutSeconds = p.ConTimeoutSeconds,
         IntervalMinutes = Math.Max(1, p.ForwardIntervalSeconds / 60),
         SendImmediately = p.ForwardNewImmediately,

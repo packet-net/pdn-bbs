@@ -1765,7 +1765,7 @@ public static class Webmail
 
         string connect = p.ConnectScript.Count == 0
             ? """<span class="dim">none</span>"""
-            : H(string.Join("  ·  ", p.ConnectScript));
+            : H(RenderConnectSummary(p.ConnectScript));
 
         string schedule = Inv($"every {Math.Max(1, p.ForwardIntervalSeconds / 60)} min")
             + (p.ForwardNewImmediately ? ", and as soon as a message is queued" : "")
@@ -1813,10 +1813,166 @@ public static class Webmail
     }
 
     /// <summary>
+    /// The structured connect-script step editor (v2): a Dial block (open + optional port) over a list
+    /// of expect/send step cards with an Advanced disclosure (timeout/match/ignoreCase/eol/raw/name/
+    /// expectAny), plus — when editing — a Test-connect probe whose transcript lines can be clicked
+    /// straight into a Wait-for step. The whole step list is serialised to the hidden
+    /// <c>connectScript</c> JSON field on submit (small-JS island, like the list-page test-connect).
+    /// </summary>
+    private static string ConnectScriptEditor(string call, bool editing, string json, string testUrl)
+    {
+        string testButton = editing
+            ? """ <button type="button" class="btn" id="cs-testbtn">Test connect</button>"""
+            : "";
+        return $"""
+            <div class="cs-help dim">Each step waits for text from the link, then sends a line. Type prompts exactly — a trailing space (shown below as <code>␣</code>) is significant. The Dial is the one hop we make; the steps below are typed at the remote node prompts. Advanced fields (regex, timeout, line-ending, raw bytes, alternatives) are per step; the YAML tab has the full reference.</div>
+            <div id="cs-editor" data-script="{H(json)}" data-call="{H(call)}" data-test="{H(testUrl)}">
+              <div class="cs-dial"><strong>Dial</strong>
+                <input id="cs-open" placeholder="e.g. GB7RDG" autocomplete="off">
+                <label class="dim">port <input id="cs-port" class="cs-port" placeholder="any" autocomplete="off"></label>
+                <span class="dim">— the one hop we make</span>
+              </div>
+              <div id="cs-steps"></div>
+              <div class="cs-toolbar"><button type="button" class="btn" id="cs-add">+ Add step</button>{testButton}</div>
+              <div class="tc-result" id="cs-test" hidden></div>
+            </div>
+            <input type="hidden" name="connectScript" id="cs-json" value="{H(json)}">
+            {EditorScript}
+            """;
+    }
+
+    /// <summary>The vanilla-JS island that drives <see cref="ConnectScriptEditor"/> (hydrate, add/remove/reorder, serialise to the hidden field, and the interactive test-connect transcript). Static — it reads everything from data-attributes.</summary>
+    private const string EditorScript = """
+        <script>
+        (function(){
+          var ed=document.getElementById('cs-editor'); if(!ed) return;
+          var stepsEl=document.getElementById('cs-steps');
+          var openEl=document.getElementById('cs-open');
+          var portEl=document.getElementById('cs-port');
+          var jsonEl=document.getElementById('cs-json');
+          var form=ed.closest('form');
+          var MATCH=['substring','exact-line','regex'], EOL=['cr','lf','crlf','none'];
+          function el(t,c,x){var e=document.createElement(t); if(c)e.className=c; if(x!=null)e.textContent=x; return e;}
+          function inp(v,p){var e=el('input'); e.type='text'; e.autocomplete='off'; if(v!=null)e.value=v; if(p)e.placeholder=p; return e;}
+          function lbl(t,ctl){var l=el('label','cs-adv-item'); l.append(el('span','dim',t),ctl); return l;}
+          function sel(opts,cur){var s=el('select'); opts.forEach(function(o){var op=el('option',null,o); op.value=o; if(o===cur)op.selected=true; s.append(op);}); return s;}
+          function ws(input,span){var v=input.value; if(v.length && (/^\s/.test(v)||/\s$/.test(v))){span.textContent='“'+v.replace(/ /g,'␣')+'”'; span.hidden=false;} else {span.hidden=true;}}
+          function renumber(){var i=1; stepsEl.querySelectorAll('.cs-step').forEach(function(r){r.querySelector('.cs-num').textContent=(i++)+'.';});}
+          function makeRow(step){
+            step=step||{};
+            var row=el('div','cs-step'), main=el('div','cs-step-main');
+            var num=el('span','cs-num','');
+            var hasAny=step.expectAny&&step.expectAny.length;
+            var expect=inp(hasAny?'':(step.expect||''),'Wait for…'); expect.className='cs-expect';
+            var send=inp(step.send||'','Send…'); send.className='cs-send';
+            var up=el('button','btn cs-mini','↑'); up.type='button';
+            var dn=el('button','btn cs-mini','↓'); dn.type='button';
+            var rm=el('button','btn cs-mini','✕'); rm.type='button';
+            main.append(num,expect,send,up,dn,rm);
+            var wsp=el('span','cs-ws'); wsp.hidden=true;
+            expect.addEventListener('input',function(){ws(expect,wsp);}); ws(expect,wsp);
+            var det=el('details','cs-adv'); det.append(el('summary',null,'Advanced'));
+            var grid=el('div','cs-adv-grid');
+            var matchSel=sel(MATCH, step.match||'substring');
+            var ic=el('input'); ic.type='checkbox'; ic.checked=step.ignoreCase!==false;
+            var eolSel=sel(EOL, step.eol||'cr');
+            var raw=el('input'); raw.type='checkbox'; raw.checked=!!step.raw;
+            var to=el('input'); to.type='number'; to.min='1'; if(step.timeoutSeconds)to.value=step.timeoutSeconds;
+            var nm=inp(step.name||'','label');
+            var any=el('textarea'); any.rows=2; any.placeholder='one alternative per line'; if(step.expectAny&&step.expectAny.length)any.value=step.expectAny.join('\n');
+            grid.append(lbl('Match',matchSel),lbl('Ignore case',ic),lbl('Line ending',eolSel),lbl('Raw escapes',raw),lbl('Timeout (s)',to),lbl('Name',nm),lbl('Or wait for any of',any));
+            det.append(grid); row.append(main,wsp,det);
+            row._get=function(){
+              var o={}, ev=expect.value, sv=send.value;
+              var alts=any.value.split('\n').filter(function(s){return s.length>0;});
+              if(alts.length)o.expectAny=alts; else if(ev.length)o.expect=ev;
+              if(sv.length)o.send=sv;
+              if(matchSel.value!=='substring')o.match=matchSel.value;
+              if(!ic.checked)o.ignoreCase=false;
+              if(eolSel.value!=='cr')o.eol=eolSel.value;
+              if(raw.checked)o.raw=true;
+              var t=parseInt(to.value,10); if(t>0)o.timeoutSeconds=t;
+              if(nm.value.trim().length)o.name=nm.value.trim();
+              return o;
+            };
+            up.onclick=function(){var p=row.previousElementSibling; if(p)stepsEl.insertBefore(row,p); renumber();};
+            dn.onclick=function(){var n=row.nextElementSibling; if(n)stepsEl.insertBefore(n,row); renumber();};
+            rm.onclick=function(){row.remove(); renumber();};
+            return row;
+          }
+          function addStep(s){stepsEl.append(makeRow(s)); renumber();}
+          function serialize(){
+            var arr=[], ov=openEl.value.trim();
+            if(ov.length){var o={open:ov}; var pv=portEl.value.trim(); if(pv.length)o.port=pv; arr.push(o);}
+            stepsEl.querySelectorAll('.cs-step').forEach(function(r){var s=r._get(); if(Object.keys(s).length)arr.push(s);});
+            jsonEl.value=JSON.stringify(arr);
+          }
+          var initial=[]; try{initial=JSON.parse(ed.dataset.script||'[]');}catch(e){initial=[];}
+          initial.forEach(function(s){ if(s && s.open!=null && s.open!==''){ openEl.value=s.open; portEl.value=s.port||''; } else { addStep(s); } });
+          if(!stepsEl.children.length) addStep({});
+          document.getElementById('cs-add').addEventListener('click',function(){addStep({});});
+          if(form)form.addEventListener('submit',serialize);
+          var tb=document.getElementById('cs-testbtn'), out=document.getElementById('cs-test');
+          if(tb){ tb.addEventListener('click',function(){
+            out.hidden=false; out.className='tc-result'; out.textContent='Testing…';
+            var fd=new FormData(); fd.append('partner', ed.dataset.call);
+            fetch(ed.dataset.test,{method:'POST',body:fd,headers:{'Accept':'application/json'}})
+              .then(function(r){return r.json();}).then(function(d){render(d);})
+              .catch(function(e){out.textContent='Test failed: '+e; out.className='tc-result fail';});
+          }); }
+          function render(d){
+            out.className='tc-result '+(d.ok?'ok':'fail'); out.textContent='';
+            out.append(el('div',null,(d.ok?'✓ OK':'✗ FAILED')+' — '+((d.target||'')+(d.port?(' (port '+d.port+')'):''))));
+            if(d.sid)out.append(el('div',null,'SID: '+d.sid));
+            if(d.error)out.append(el('div',null,'Error: '+d.error));
+            if(d.transcript&&d.transcript.length){
+              out.append(el('div','dim','— transcript — click “use” to add a Wait-for step —'));
+              d.transcript.forEach(function(line){
+                var ln=el('div','cs-tline'); ln.append(el('span',null,line));
+                if(line.indexOf('< ')===0 && line.indexOf('< (matched')!==0){
+                  var use=el('button','btn cs-mini','use'); use.type='button';
+                  use.onclick=function(){ addStep({expect:line.slice(2)}); };
+                  ln.append(use);
+                }
+                out.append(ln);
+              });
+            }
+          }
+        })();
+        </script>
+        """;
+
+    /// <summary>One-line readable summary of a structured connect script for the partner card.</summary>
+    private static string RenderConnectSummary(IReadOnlyList<ConnectStep> steps)
+    {
+        var parts = new List<string>();
+        foreach (ConnectStep s in steps)
+        {
+            if (!string.IsNullOrEmpty(s.Open))
+            {
+                parts.Add("dial " + s.Open + (string.IsNullOrEmpty(s.Port) ? "" : " :" + s.Port));
+                continue;
+            }
+
+            string wait = s.ExpectAny is { Count: > 0 } any ? string.Join("/", any) : s.Expect ?? "";
+            string seg = wait.Length > 0 ? $"wait \"{wait}\"" : "";
+            if (!string.IsNullOrEmpty(s.Send))
+            {
+                seg += seg.Length > 0 ? $" → \"{s.Send}\"" : $"send \"{s.Send}\"";
+            }
+
+            parts.Add(seg.Length > 0 ? seg : "(no-op)");
+        }
+
+        return string.Join("  ▸  ", parts);
+    }
+
+    /// <summary>
     /// The add/edit partner form — EVERY <see cref="PartnerConfig"/> field with a plain-language label.
     /// When <paramref name="partner"/> is non-null it's the edit form (the call is read-only, the key);
     /// null is the Add form. List fields (to/at/hr) are space-separated text inputs; the connect script
-    /// is a textarea, one line each; bools are checkboxes. Posts to <c>/forwarding/partner</c>.
+    /// is the structured step editor (<see cref="ConnectScriptEditor"/>); bools are checkboxes. Posts to
+    /// <c>/forwarding/partner</c>.
     /// </summary>
     private static string PartnerForm(string prefix, bool embed, Partner? partner)
     {
@@ -1826,7 +1982,8 @@ public static class Webmail
             ? Inv($"""<input type="hidden" name="call" value="{H(partner!.Call)}"><b>{H(partner.Call)}</b> <span class="dim">— the partner's callsign can't be changed; delete and re-add to rename.</span>""")
             : """<input name="call" placeholder="e.g. GB7AAA" maxlength="9" required>""";
 
-        string script = editing ? string.Join("\n", partner!.ConnectScript) : "";
+        string csJson = editing && partner!.ConnectScript.Count > 0 ? ConnectScriptJson.Serialize(partner.ConnectScript) : "[]";
+        string csEditor = ConnectScriptEditor(editing ? partner!.Call : "", editing, csJson, U(prefix, "/forwarding/test-connect", embed));
         string to = editing ? string.Join(" ", partner!.ToCalls) : "";
         string at = editing ? string.Join(" ", partner!.AtCalls) : "";
         string hr = editing ? string.Join(" ", partner!.HRoutes) : "";
@@ -1849,8 +2006,8 @@ public static class Webmail
             <fieldset>
             <legend>{H(title)}</legend>
             <p><label>Partner callsign<br>{callField}</label></p>
-            <p><label>Connect script <span class="dim">— one line each. The first line names the dial (e.g. <code>C GB7AAA</code>). Later lines are <code>EXPECT=SEND</code> steps: wait for the text before the <code>=</code> on the link, then send the text after it — e.g. <code>GB7RDG&gt;=BBS</code> waits for the node prompt, then sends <code>BBS</code>. A line with no <code>=</code> is send-only (no wait), e.g. <code>BBS</code></span><br>
-            <textarea name="connectScript" rows="3" cols="48" placeholder="C GB7AAA">{H(script)}</textarea></label></p>
+            <p><label>Connect script</label></p>
+            {csEditor}
             <p><label>@ addresses <span class="dim">— routes this partner serves; <code>*</code> is the catch-all default uplink (space-separated)</span><br>
             <input name="at" size="48" value="{H(at)}" placeholder="* or GB7AAA"></label></p>
             <p><label>Specific recipients <span class="dim">— send mail addressed TO any of these callsigns out via this partner: a per-user override for when a particular person's mail should always take this link. Usually left empty — the @ address and areas below do the routing. Space-separated.</span><br>
@@ -1915,10 +2072,21 @@ public static class Webmail
                 noticeError: true, status: StatusCodes.Status400BadRequest);
         }
 
+        List<ConnectStep> connectSteps;
+        try
+        {
+            connectSteps = [.. ConnectScriptJson.Parse(form["connectScript"].ToString())];
+        }
+        catch (System.Text.Json.JsonException)
+        {
+            return Forwarding(o, prefix, call, tab: null, editCall: editing ? partnerCall : null, embed, theme,
+                notice: "The connect script couldn't be read — please re-enter it.", noticeError: true, status: StatusCodes.Status400BadRequest);
+        }
+
         var config = new PartnerConfig
         {
             Call = partnerCall,
-            ConnectScript = SplitLines(form["connectScript"].ToString()),
+            ConnectScript = connectSteps,
             To = SplitTokens(form["to"].ToString()),
             At = SplitTokens(form["at"].ToString()),
             Hr = SplitTokens(form["hr"].ToString()),
@@ -2063,10 +2231,6 @@ public static class Webmail
         char sep = (embed || already) ? '&' : '?';
         return sep + "notice=" + Uri.EscapeDataString(message);
     }
-
-    /// <summary>Splits a connect-script textarea into trimmed, non-empty lines.</summary>
-    private static List<string> SplitLines(string text) =>
-        [.. text.ReplaceLineEndings("\n").Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)];
 
     /// <summary>Splits a space-separated (or comma-separated) list field into trimmed, non-empty tokens.</summary>
     private static List<string> SplitTokens(string text) =>
@@ -2602,6 +2766,27 @@ public static class Webmail
         input:focus,select:focus,textarea:focus{
           outline:none;border-color:hsl(var(--ring));box-shadow:0 0 0 2px hsl(var(--ring)/.35);
         }
+        .cs-help{margin:.2rem 0 .5rem;font-size:.8rem}
+        .cs-dial{display:flex;gap:.5rem;align-items:center;flex-wrap:wrap;margin-bottom:.5rem}
+        .cs-dial input{flex:0 1 12rem}
+        .cs-port{width:5rem;flex:0 0 auto}
+        .cs-step{border:1px solid hsl(var(--border));border-radius:calc(var(--radius) - 2px);padding:.5rem;margin-bottom:.45rem;background:hsl(var(--muted)/.4)}
+        .cs-step-main{display:flex;gap:.4rem;align-items:center;flex-wrap:wrap}
+        .cs-step-main .cs-expect,.cs-step-main .cs-send{flex:1 1 12rem;font-family:"JetBrains Mono",ui-monospace,monospace}
+        .cs-num{color:hsl(var(--muted-foreground));font-size:.8rem;min-width:1.5rem}
+        .cs-mini{padding:.25rem .5rem;font-size:.8rem}
+        .cs-ws{display:block;margin:.3rem 0 0 1.5rem;font-family:"JetBrains Mono",ui-monospace,monospace;font-size:.8rem;color:hsl(var(--muted-foreground))}
+        .cs-adv{margin-top:.4rem}
+        .cs-adv>summary{cursor:pointer;color:hsl(var(--primary));font-size:.8rem}
+        .cs-adv-grid{display:flex;flex-wrap:wrap;gap:.5rem;margin-top:.4rem}
+        .cs-adv-item{display:flex;flex-direction:column;font-size:.78rem;gap:.15rem}
+        .cs-adv-item input[type=number]{width:6rem}
+        .cs-adv-item textarea{min-width:14rem;rows:2}
+        .cs-toolbar{display:flex;gap:.5rem;margin:.3rem 0}
+        .cs-tline{display:flex;justify-content:space-between;gap:.5rem;align-items:flex-start}
+        .tc-result{white-space:pre-wrap;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:.85em;margin:.4rem 0 0;padding:.5rem .6rem;border-radius:6px;background:hsl(var(--muted)/.5);border:1px solid hsl(var(--border))}
+        .tc-result.ok{background:#14803115;border-color:#14803140}
+        .tc-result.fail{background:#b9261515;border-color:#b9261540}
         button{
           font:inherit;font-weight:500;font-size:.875rem;cursor:pointer;
           padding:.45rem 1rem;border-radius:calc(var(--radius) - 2px);border:1px solid transparent;

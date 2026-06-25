@@ -24,7 +24,7 @@ public class ConnectScriptRunnerTests
         {
             Call = "GB7BPQ",
             AtCalls = ["*"],
-            ConnectScript = ["C GB7BPQ-1", "BBS"],
+            ConnectScript = [new() { Open = "GB7BPQ-1" }, new() { Send = "BBS" }],
             ForwardNewImmediately = true,
         });
         await host.StartLinkAsync();
@@ -79,7 +79,7 @@ public class ConnectScriptRunnerTests
             Call = "GB7BPQ",
             AtCalls = ["*"],
             // EXPECT=SEND: wait for the node's prompt, THEN send "BBS" (spec §4.4 / bpqchat).
-            ConnectScript = ["C GB7BPQ", "GB7BPQ>=BBS"],
+            ConnectScript = [new() { Open = "GB7BPQ" }, new() { Expect = "GB7BPQ>", Send = "BBS" }],
             ForwardNewImmediately = true,
         });
         await host.StartLinkAsync();
@@ -107,7 +107,7 @@ public class ConnectScriptRunnerTests
         {
             Call = "GB7BPQ",
             AtCalls = ["*"],
-            ConnectScript = ["C GB7BPQ", "NEVER-COMES=BBS"],
+            ConnectScript = [new() { Open = "GB7BPQ" }, new() { Expect = "NEVER-COMES", Send = "BBS" }],
             ForwardNewImmediately = true,
             ForwardIntervalSeconds = 3600,
         });
@@ -136,7 +136,7 @@ public class ConnectScriptRunnerTests
             Call = "GB7BPQ",
             AtCalls = ["*"],
             // The expect is upper-case; the node emits lower-case — the match is still made.
-            ConnectScript = ["C GB7BPQ", "GB7BPQ>=BBS"],
+            ConnectScript = [new() { Open = "GB7BPQ" }, new() { Expect = "GB7BPQ>", Send = "BBS" }],
             ForwardNewImmediately = true,
         });
         await host.StartLinkAsync();
@@ -156,7 +156,7 @@ public class ConnectScriptRunnerTests
         {
             Call = "GB7BPQ",
             AtCalls = ["*"],
-            ConnectScript = ["C GB7BPQ-1", "GB7BPQ-1>=BBS"],
+            ConnectScript = [new() { Open = "GB7BPQ-1" }, new() { Expect = "GB7BPQ-1>", Send = "BBS" }],
             ForwardNewImmediately = true,
         });
         await host.StartLinkAsync();
@@ -204,7 +204,7 @@ public class ConnectScriptRunnerTests
         {
             Call = "GB7BPQ",
             AtCalls = ["*"],
-            ConnectScript = ["C GB7BPQ", "C GB7RDG", "BBS"],
+            ConnectScript = [new() { Open = "GB7BPQ" }, new() { Send = "C GB7RDG" }, new() { Send = "BBS" }],
             ForwardNewImmediately = true,
         });
         await host.StartLinkAsync();
@@ -241,7 +241,7 @@ public class ConnectScriptRunnerTests
         {
             Call = "GB7CIP",
             AtCalls = ["*"],
-            ConnectScript = ["C 3 GB7WEM-7", "C uhf gb7cip"],
+            ConnectScript = [new() { Open = "GB7WEM-7", Port = "3" }, new() { Send = "C uhf gb7cip" }],
             ForwardNewImmediately = true,
         });
         await host.StartLinkAsync();
@@ -279,7 +279,7 @@ public class ConnectScriptRunnerTests
         {
             Call = "GB7BPQ",
             AtCalls = ["*"],
-            ConnectScript = ["C GB7BPQ", "C GB7RDG", "BBS"],
+            ConnectScript = [new() { Open = "GB7BPQ" }, new() { Send = "C GB7RDG" }, new() { Send = "BBS" }],
             ForwardNewImmediately = true,
             ForwardIntervalSeconds = 3600,
         });
@@ -309,7 +309,7 @@ public class ConnectScriptRunnerTests
         {
             Call = "GB7BPQ",
             AtCalls = ["*"],
-            ConnectScript = ["C GB7BPQ", "C GB7RDG", "BBS"],
+            ConnectScript = [new() { Open = "GB7BPQ" }, new() { Send = "C GB7RDG" }, new() { Send = "BBS" }],
             ForwardNewImmediately = true,
             ForwardIntervalSeconds = 3600,
         });
@@ -336,7 +336,7 @@ public class ConnectScriptRunnerTests
         {
             Call = "GB7BPQ",
             AtCalls = ["*"],
-            ConnectScript = ["C 2 GB7BPQ-1"],
+            ConnectScript = [new() { Open = "GB7BPQ-1", Port = "2" }],
             ForwardNewImmediately = true,
         });
         await host.StartLinkAsync();
@@ -353,6 +353,256 @@ public class ConnectScriptRunnerTests
         await peer.SendLineAsync(PeerSid);
         await peer.SendTextAsync("de GB7BPQ-1>\r");
         Assert.Equal(OwnSid, await peer.ReadLineAsync());
+    }
+
+    [Fact]
+    public async Task RegexExpect_ReleasesTheSendOnAPatternMatch()
+    {
+        await using var host = new HostHarness();
+        host.Store.UpsertPartner(new Partner
+        {
+            Call = "GB7BPQ",
+            AtCalls = ["*"],
+            ConnectScript = [new() { Open = "GB7BPQ" }, new() { Expect = "GB7[A-Z]+>", Send = "BBS", Match = "regex" }],
+            ForwardNewImmediately = true,
+        });
+        await host.StartLinkAsync();
+        host.StartScheduler();
+        QueueOne(host);
+
+        FakeRhpPeer peer = await host.Server.NextOpenAsync();
+        await Task.Delay(200);
+        Assert.False(peer.TryReadLine(out _)); // nothing until the pattern matches
+        await peer.SendTextAsync("GB7BPQ>");   // matches GB7[A-Z]+>
+        Assert.Equal("BBS", await peer.ReadLineAsync());
+    }
+
+    [Fact]
+    public async Task ExpectAny_ReleasesTheSendOnTheFirstAlternativeToArrive()
+    {
+        await using var host = new HostHarness();
+        host.Store.UpsertPartner(new Partner
+        {
+            Call = "GB7BPQ",
+            AtCalls = ["*"],
+            ConnectScript = [new() { Open = "GB7BPQ" }, new() { ExpectAny = ["NOPE", "GB7BPQ>"], Send = "BBS" }],
+            ForwardNewImmediately = true,
+        });
+        await host.StartLinkAsync();
+        host.StartScheduler();
+        QueueOne(host);
+
+        FakeRhpPeer peer = await host.Server.NextOpenAsync();
+        await peer.SendTextAsync("welcome GB7BPQ>"); // the second alternative appears
+        Assert.Equal("BBS", await peer.ReadLineAsync());
+    }
+
+    [Fact]
+    public async Task ExactLineExpect_RequiresAWholeLineNotASubstring()
+    {
+        await using var host = new HostHarness();
+        host.Store.UpsertPartner(new Partner
+        {
+            Call = "GB7BPQ",
+            AtCalls = ["*"],
+            ConnectScript = [new() { Open = "GB7BPQ" }, new() { Expect = "OK", Send = "BBS", Match = "exact-line" }],
+            ForwardNewImmediately = true,
+        });
+        await host.StartLinkAsync();
+        host.StartScheduler();
+        QueueOne(host);
+
+        FakeRhpPeer peer = await host.Server.NextOpenAsync();
+        await peer.SendLineAsync("OKAY");   // a line CONTAINING OK, but not equal to it
+        await Task.Delay(200);
+        Assert.False(peer.TryReadLine(out string early), $"exact-line matched a substring: \"{early}\"");
+        await peer.SendLineAsync("OK");     // the exact line
+        Assert.Equal("BBS", await peer.ReadLineAsync());
+    }
+
+    [Fact]
+    public async Task RegexThatCanMatchEmpty_DoesNotFireBeforeData()
+    {
+        await using var host = new HostHarness();
+        host.Store.UpsertPartner(new Partner
+        {
+            Call = "GB7BPQ",
+            AtCalls = ["*"],
+            ConnectScript = [new() { Open = "GB7BPQ" }, new() { Expect = ".*", Send = "BBS", Match = "regex" }],
+            ForwardNewImmediately = true,
+        });
+        await host.StartLinkAsync();
+        host.StartScheduler();
+        QueueOne(host);
+
+        FakeRhpPeer peer = await host.Server.NextOpenAsync();
+        await Task.Delay(200);
+        Assert.False(peer.TryReadLine(out string early), $"a zero-length regex match fired before any prompt: \"{early}\"");
+        await peer.SendTextAsync("GB7BPQ>"); // a non-empty match
+        Assert.Equal("BBS", await peer.ReadLineAsync());
+    }
+
+    [Fact]
+    public async Task FailureMarkerBatchedAheadOfThePrompt_FailsTheCycle()
+    {
+        await using var host = new HostHarness();
+        host.Store.UpsertPartner(new Partner
+        {
+            Call = "GB7BPQ",
+            AtCalls = ["*"],
+            ConnectScript = [new() { Open = "GB7BPQ" }, new() { Expect = "READY>", Send = "BBS", Match = "exact-line" }],
+            ForwardNewImmediately = true,
+            ForwardIntervalSeconds = 3600,
+        });
+        await host.StartLinkAsync();
+        host.StartScheduler();
+        Message stored = QueueOne(host);
+
+        FakeRhpPeer peer = await host.Server.NextOpenAsync();
+        // A benign head line, then a BUSY failure marker, then the awaited prompt — all consumed
+        // reaching the match. The failure that arrived BEFORE the prompt must fail the cycle, not be swallowed.
+        await peer.SendTextAsync("hello\rBUSY from GB7XYZ\rREADY>\r");
+        await peer.WaitForHostCloseAsync();
+        Assert.False(peer.TryReadLine(out _)); // BBS never sent
+        Assert.Equal(stored.Number, Assert.Single(host.Store.GetForwardQueue("GB7BPQ")).Number);
+    }
+
+    [Fact]
+    public async Task InvalidRegexPattern_FailsTheCycleGracefully()
+    {
+        await using var host = new HostHarness();
+        host.Store.UpsertPartner(new Partner
+        {
+            Call = "GB7BPQ",
+            AtCalls = ["*"],
+            ConnectScript = [new() { Open = "GB7BPQ" }, new() { Expect = "GB7[", Send = "BBS", Match = "regex" }],
+            ForwardNewImmediately = true,
+            ForwardIntervalSeconds = 3600,
+        });
+        await host.StartLinkAsync();
+        host.StartScheduler();
+        Message stored = QueueOne(host);
+
+        // A malformed pattern surfaces as a clean cycle failure (caught + retried), never an uncaught throw.
+        FakeRhpPeer peer = await host.Server.NextOpenAsync();
+        await host.AdvanceUntilAsync(TimeSpan.FromSeconds(30), () => Task.FromResult(host.Server.OpenAttempts >= 2));
+        await peer.WaitForHostCloseAsync();
+        Assert.False(peer.TryReadLine(out _));
+        Assert.Equal(stored.Number, Assert.Single(host.Store.GetForwardQueue("GB7BPQ")).Number);
+    }
+
+    [Fact]
+    public async Task PerStepTimeout_FiresWellBeforeThePartnerConTimeout()
+    {
+        await using var host = new HostHarness();
+        host.Store.UpsertPartner(new Partner
+        {
+            Call = "GB7BPQ",
+            AtCalls = ["*"],
+            // Partner ConTimeout is an hour, but the step caps its own wait at 5s.
+            ConnectScript = [new() { Open = "GB7BPQ" }, new() { Expect = "NEVER", Send = "BBS", TimeoutSeconds = 5 }],
+            ForwardNewImmediately = true,
+            ForwardIntervalSeconds = 3600,
+            ConTimeoutSeconds = 3600,
+        });
+        await host.StartLinkAsync();
+        host.StartScheduler();
+        Message stored = QueueOne(host);
+
+        FakeRhpPeer peer = await host.Server.NextOpenAsync();
+        // 10s virtual steps × 200 max = 2000s < the 3600s partner ConTimeout: this only reaches a
+        // second dial if the per-step 5s timeout fired (otherwise AdvanceUntilAsync throws).
+        await host.AdvanceUntilAsync(TimeSpan.FromSeconds(10), () => Task.FromResult(host.Server.OpenAttempts >= 2));
+        await peer.WaitForHostCloseAsync();
+        Assert.Equal(stored.Number, Assert.Single(host.Store.GetForwardQueue("GB7BPQ")).Number);
+    }
+
+    [Fact]
+    public async Task RawSendWithEolNone_PutsExactControlBytesOnTheWire()
+    {
+        await using var host = new HostHarness();
+        host.Store.UpsertPartner(new Partner
+        {
+            Call = "GB7BPQ",
+            AtCalls = ["*"],
+            ConnectScript = [new() { Open = "GB7BPQ" }, new() { Expect = "GB7BPQ>", Send = @"\x1a", Raw = true, Eol = "none" }],
+            ForwardNewImmediately = true,
+        });
+        await host.StartLinkAsync();
+        host.StartScheduler();
+        QueueOne(host);
+
+        FakeRhpPeer peer = await host.Server.NextOpenAsync();
+        await peer.SendTextAsync("GB7BPQ>");
+        byte[] sent = await peer.ReadChunkRawAsync();
+        Assert.Equal(new byte[] { 0x1A }, sent); // Ctrl-Z, no trailing CR
+    }
+
+    [Fact]
+    public async Task EolCrlf_TerminatesTheSendWithCrLf()
+    {
+        await using var host = new HostHarness();
+        host.Store.UpsertPartner(new Partner
+        {
+            Call = "GB7BPQ",
+            AtCalls = ["*"],
+            ConnectScript = [new() { Open = "GB7BPQ" }, new() { Expect = "GB7BPQ>", Send = "BBS", Eol = "crlf" }],
+            ForwardNewImmediately = true,
+        });
+        await host.StartLinkAsync();
+        host.StartScheduler();
+        QueueOne(host);
+
+        FakeRhpPeer peer = await host.Server.NextOpenAsync();
+        await peer.SendTextAsync("GB7BPQ>");
+        byte[] sent = await peer.ReadChunkRawAsync();
+        Assert.Equal(Encoding.Latin1.GetBytes("BBS\r\n"), sent);
+    }
+
+    [Fact]
+    public async Task ExpectAny_FailureMarkerFirst_AbortsBeforeAnyAlternative()
+    {
+        await using var host = new HostHarness();
+        host.Store.UpsertPartner(new Partner
+        {
+            Call = "GB7BPQ",
+            AtCalls = ["*"],
+            ConnectScript = [new() { Open = "GB7BPQ" }, new() { ExpectAny = ["GB7BPQ>", "TRY LATER"], Send = "BBS" }],
+            ForwardNewImmediately = true,
+            ForwardIntervalSeconds = 3600,
+        });
+        await host.StartLinkAsync();
+        host.StartScheduler();
+        Message stored = QueueOne(host);
+
+        FakeRhpPeer peer = await host.Server.NextOpenAsync();
+        await peer.SendLineAsync("BUSY from GB7XYZ"); // a hard failure before either alternative
+        await peer.WaitForHostCloseAsync();
+        Assert.False(peer.TryReadLine(out _)); // BBS never sent
+        Assert.Equal(stored.Number, Assert.Single(host.Store.GetForwardQueue("GB7BPQ")).Number);
+    }
+
+    [Fact]
+    public async Task ExactLineExpect_DoesNotMatchAnUnterminatedPrompt()
+    {
+        await using var host = new HostHarness();
+        host.Store.UpsertPartner(new Partner
+        {
+            Call = "GB7BPQ",
+            AtCalls = ["*"],
+            ConnectScript = [new() { Open = "GB7BPQ" }, new() { Expect = "=> ", Send = "BBS", Match = "exact-line" }],
+            ForwardNewImmediately = true,
+        });
+        await host.StartLinkAsync();
+        host.StartScheduler();
+        QueueOne(host);
+
+        FakeRhpPeer peer = await host.Server.NextOpenAsync();
+        await peer.SendTextAsync("=> ");   // the prompt text, but with no CR/LF
+        await Task.Delay(200);
+        Assert.False(peer.TryReadLine(out string early), $"exact-line matched without a terminator: \"{early}\"");
+        await peer.SendTextAsync("\r");    // now it's a complete line
+        Assert.Equal("BBS", await peer.ReadLineAsync());
     }
 
     /// <summary>Stores + routes one personal message so the partner queue is non-empty (nudges the scheduler).</summary>

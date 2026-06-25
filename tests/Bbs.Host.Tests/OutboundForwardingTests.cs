@@ -23,7 +23,7 @@ public class OutboundForwardingTests
         {
             Call = "GB7NEW",
             AtCalls = ["*"],
-            ConnectScript = ["C GB7NEW-1"],
+            ConnectScript = [new() { Open = "GB7NEW-1" }],
             ForwardNewImmediately = true,
         });
         Message stored = host.Store.AddMessage(new MessageDraft
@@ -53,7 +53,7 @@ public class OutboundForwardingTests
         {
             Call = "GB7BPQ",
             AtCalls = ["*"],
-            ConnectScript = ["C GB7BPQ-1"], // the connect target, not the partner call
+            ConnectScript = [new() { Open = "GB7BPQ-1" }], // the connect target, not the partner call
             ForwardNewImmediately = true,
         });
         await host.StartLinkAsync();
@@ -116,7 +116,7 @@ public class OutboundForwardingTests
         {
             Call = "GB7BPQ",
             AtCalls = ["*"],
-            ConnectScript = ["C GB7BPQ"],
+            ConnectScript = [new() { Open = "GB7BPQ" }],
             ForwardIntervalSeconds = 3600,
             ForwardNewImmediately = false, // timer only
         });
@@ -149,7 +149,7 @@ public class OutboundForwardingTests
         {
             Call = "GB7BPQ",
             AtCalls = ["*"],
-            ConnectScript = ["C GB7BPQ"],
+            ConnectScript = [new() { Open = "GB7BPQ" }],
             ForwardNewImmediately = true,
         });
         await host.StartLinkAsync();
@@ -190,7 +190,7 @@ public class OutboundForwardingTests
         {
             Call = "GB7BPQ",
             AtCalls = ["*"],
-            ConnectScript = ["C GB7BPQ"],
+            ConnectScript = [new() { Open = "GB7BPQ" }],
             ForwardNewImmediately = true,
             ForwardIntervalSeconds = 3600,
         });
@@ -238,7 +238,7 @@ public class OutboundForwardingTests
         {
             Call = "GB7BPQ",
             AtCalls = ["*"],
-            ConnectScript = ["C GB7BPQ"],
+            ConnectScript = [new() { Open = "GB7BPQ" }],
             ForwardNewImmediately = true,
         });
         await host.StartLinkAsync();
@@ -314,7 +314,7 @@ public class OutboundForwardingTests
         {
             Call = "GB7CIP",
             AtCalls = ["*"],
-            ConnectScript = ["C GB7CIP"],
+            ConnectScript = [new() { Open = "GB7CIP" }],
             Collect = true,
             ForwardIntervalSeconds = 3600,
             ForwardNewImmediately = false,
@@ -370,7 +370,7 @@ public class OutboundForwardingTests
         {
             Call = "GB7CIP",
             AtCalls = ["*"],
-            ConnectScript = ["C GB7CIP"],
+            ConnectScript = [new() { Open = "GB7CIP" }],
             Collect = true,
             ForwardIntervalSeconds = 3600,
             ForwardNewImmediately = false,
@@ -402,7 +402,7 @@ public class OutboundForwardingTests
         {
             Call = "GB7BPQ",
             AtCalls = ["*"],
-            ConnectScript = ["C GB7BPQ"],
+            ConnectScript = [new() { Open = "GB7BPQ" }],
             ForwardIntervalSeconds = 3600,
             ForwardNewImmediately = false,
         });

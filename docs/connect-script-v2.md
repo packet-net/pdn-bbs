@@ -1,6 +1,6 @@
 # Connect scripts v2 — structured steps
 
-**Status:** design, approved to build (Tom, 2026-06-25). Supersedes the flat `EXPECT=SEND` string form (compat spec §4.4 as implemented in `ConnectScript.cs`).
+**Status:** implemented (2026-06-25). Supersedes the flat `EXPECT=SEND` string form (compat spec §4.4 as it was implemented in `ConnectScript.cs`). The store, runner, config/YAML round-trip, the forwarding editor's step UI, and the BPQ importer are all on the structured `ConnectStep` model.
 
 Read alongside [`forwarding.md`](forwarding.md) — this design lives inside its ethos: §4.4 (connect-script semantics), the "warts" list (esp. wart 1 "typed YAML that explains" and wart 4 "scripts aren't write-only"), and the "vocabulary: the jargon goes away" table. It is the connect-script-shaped instance of all three.
 
@@ -16,7 +16,7 @@ The fix is not a cleverer string mini-language (an escape syntax was designed an
 
 ## Decisions (Tom, 2026-06-25)
 
-- **Structured-only.** The flat `EXPECT=SEND` string form is removed, not extended. Node operators convert their scripts to the structured form (a one-time, mechanical change; we auto-upgrade existing config — see "Migration").
+- **Structured-only, no legacy converter.** The flat `EXPECT=SEND` string form is removed and understood nowhere — there is no flat→structured auto-upgrade. A legacy store blob (or any non-JSON `connect_script` value) reads as a **blank** script, and the BPQ importer imports a **blank** script. The sysop authors a structured script in the forwarding editor before enabling the partner (a blank script is inbound-only, so it never dials regardless). This is deliberate (Tom, 2026-06-25): "a reasonable ask to get node operators to convert their scripts." See "Migration".
 - **One key.** We keep the existing `connectScript:` key name; its items are now structured step maps exclusively. The simple `connect: <call>` shorthand stays for the no-navigation case.
 - **regex in v1**, behind `match: regex` (default `substring`).
 - **UI in the same pass.** The Forms-tab editor gets a small-JS structured step editor; the test-connect transcript becomes interactive; the YAML tab round-trips the structured maps. See "UI".
@@ -44,7 +44,7 @@ A script with no `open` step is INBOUND-ONLY (the partner dials us; we never dia
   send:   "C 3 !GB7WEM-7"      # text to send after the match (the remote node's own dialect)
 - expect: "=> "               # the URONode prompt — the space and the '=' are just characters
   send:   "BBS"
-  timeout: 30                  # optional per-step override of conTimeoutSeconds
+  timeoutSeconds: 30           # optional per-step override of conTimeoutSeconds
 ```
 
 Fields:
@@ -53,7 +53,7 @@ Fields:
 |---|---|---|
 | `expect` | *(absent ⇒ don't wait)* | substring to wait for; opaque bytes |
 | `send` | *(absent ⇒ don't send)* | text to send after the match |
-| `timeout` | `conTimeoutSeconds` | per-step wait override (seconds) — wart 4 |
+| `timeoutSeconds` | `conTimeoutSeconds` | per-step wait override (seconds) — wart 4 |
 | `match` | `substring` | `substring` \| `exact-line` \| `regex` |
 | `ignoreCase` | `true` | matches today's case-insensitive scan; set `false` for case-sensitive |
 | `eol` | `cr` | send terminator: `cr` \| `lf` \| `crlf` \| `none` |
@@ -103,13 +103,13 @@ An earlier draft kept the flat `EXPECT=SEND` string and added backslash escapes 
 
 ## Migration
 
-The flat form is gone from the *authored* surface, but existing config must not break.
+The flat form is retired everywhere, with **no auto-upgrade** — a legacy script becomes blank and the operator rebuilds it. This is safe because:
 
-- **On load**, the host auto-upgrades each partner's flat `List<string>` to structured steps once: `C [port] <target>` → `open`; `A=B` → `{ expect: A, send: B }`; a bare line → `{ send: <line> }`. The legacy directive handling (`PAUSE`/`INTERLOCK`/unsupported, today in `ConnectScript.Resolve`) is applied during this upgrade and its warnings/notes preserved.
-- **The BPQ importer** (`docs/bpq-import.md`) emits structured steps directly.
-- **YAML-tab paste** of a legacy flat `connectScript:` is auto-upgraded on parse and the upgraded YAML re-rendered with a notice ("upgraded 2 connect-script lines to the step form") rather than rejected — wart 1, "YAML that explains". The runtime parser itself is structured-only.
+- **Store reads** (`ConnectScriptJson.Deserialize`): the `connect_script` column now holds a JSON array of steps; any non-JSON value (a legacy newline-joined blob) reads as an empty list. An upgraded node's existing partners come up inbound-only until a structured script is authored — they never dial with a stale/misread script.
+- **The BPQ importer** writes a **blank** `connect_script` and imports every partner **disabled** (its existing controlled-cutover default). So a freshly-migrated node dials no one until the sysop authors each script and enables the partner via test-connect. (The old `BpqConnectScript.Translate` line-normaliser is removed — there is no flat script to normalise.)
+- **YAML / config parse**: `connectScript:` binds a sequence of step maps. A legacy flat `connectScript:` (a sequence of scalar strings) is not the structured shape; it is not silently honoured. Because `bbs.yaml` partners are a first-boot **seed only** (the store is the source of truth once populated), a live node is unaffected.
 
-Net: no operator is stranded; the runtime accepts exactly one form.
+Net: nothing dials on a misread script; the cost is that operators re-author connect scripts once, in the new editor.
 
 ## Runner changes (`ConnectScriptRunner`)
 
@@ -163,7 +163,7 @@ The test-connect probe (`POST /forwarding/test-connect` → `ForwardingTester`) 
 
 ## Scope
 
-**v1 (this design):** `open` step; expect/send with `timeout`/`match`/`ignoreCase`/`eol`/`raw`/`name`/`expectAny`; structured-only parse; auto-upgrade migration; canonical map emit; the Forms-tab step editor, interactive test-connect transcript, and rewritten help/validation.
+**v1 (this design):** `open` step; expect/send with `timeoutSeconds`/`match`/`ignoreCase`/`eol`/`raw`/`name`/`expectAny`; structured-only parse; legacy reads-as-blank (no auto-upgrade); canonical map emit; the Forms-tab step editor, interactive test-connect transcript, and rewritten help/validation.
 
 **Deferred — the model leaves room:**
 - Branching / labels / goto (conditional walks). The step list is ordered today; a future `goto`/`when` would extend the step record, not replace it.

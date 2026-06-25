@@ -98,7 +98,7 @@ public sealed class ForwardingTestConnectTests : IAsyncDisposable
     [Fact]
     public async Task SidPartner_ReturnsOkWithSidAndTranscript_AndMovesNoMail()
     {
-        _host.Store.UpsertPartner(new Partner { Call = "GB7BPQ", ConnectScript = ["C GB7BPQ-1"] });
+        _host.Store.UpsertPartner(new Partner { Call = "GB7BPQ", ConnectScript = [new() { Open = "GB7BPQ-1" }] });
         long queued = QueueAMessageTo("GB7BPQ");
         int queuedBefore = _host.Store.GetForwardQueue("GB7BPQ").Count;
         (int totalBefore, _) = _host.Store.MessageCounts();
@@ -139,9 +139,31 @@ public sealed class ForwardingTestConnectTests : IAsyncDisposable
     }
 
     [Fact]
+    public async Task NamedStepFailure_NamesTheStepInTheError()
+    {
+        // wart 4: a failed cycle names the step (the step's Name threaded into the error message).
+        _host.Store.UpsertPartner(new Partner
+        {
+            Call = "GB7BPQ",
+            ConnectScript = [new() { Open = "GB7BPQ-1" }, new() { Expect = "GB7BPQ-1>", Send = "BBS", Name = "enter-bbs" }],
+        });
+        await _host.StartLinkAsync();
+
+        using HttpClient client = await StartWebAsync("tom", Sysop);
+        Task<HttpResponseMessage> post = PostTestConnectAsync(client, "GB7BPQ");
+
+        FakeRhpPeer peer = await _host.Server.NextOpenAsync();
+        await peer.SendLineAsync("Sorry, UNABLE TO CONNECT"); // fails while waiting for the named step
+
+        JsonElement json = await ReadJsonAsync(await post);
+        Assert.False(json.GetProperty("ok").GetBoolean());
+        Assert.Contains("enter-bbs", json.GetProperty("error").GetString()!, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task PartnerReturnsError_ReturnsOkFalseWithError_AndMovesNoMail()
     {
-        _host.Store.UpsertPartner(new Partner { Call = "GB7BPQ", ConnectScript = ["C GB7BPQ-1"] });
+        _host.Store.UpsertPartner(new Partner { Call = "GB7BPQ", ConnectScript = [new() { Open = "GB7BPQ-1" }] });
         long queued = QueueAMessageTo("GB7BPQ");
         int queuedBefore = _host.Store.GetForwardQueue("GB7BPQ").Count;
         await _host.StartLinkAsync();
@@ -172,7 +194,7 @@ public sealed class ForwardingTestConnectTests : IAsyncDisposable
     {
         // A stepless dial script (a bare "C <call>" open with no post-connect steps): the probe waits
         // out the prompt (the runner returns nothing for a stepless plan — WaitForPeerSidAsync surfaces it).
-        _host.Store.UpsertPartner(new Partner { Call = "GB7BPQ", ConnectScript = ["C GB7BPQ"] });
+        _host.Store.UpsertPartner(new Partner { Call = "GB7BPQ", ConnectScript = [new() { Open = "GB7BPQ" }] });
         await _host.StartLinkAsync();
 
         using HttpClient client = await StartWebAsync("tom", Sysop);
@@ -219,9 +241,8 @@ public sealed class ForwardingTestConnectTests : IAsyncDisposable
     [Fact]
     public async Task PortAndTarget_DialledFromTheOpenLine()
     {
-        // A partner's stored script is pdn-normalised at import (NC->C, "!" stripped — see
-        // BpqConnectScriptTests), so test-connect sees a clean "C <port> <call>" open and dials it.
-        _host.Store.UpsertPartner(new Partner { Call = "GB7BPQ", ConnectScript = ["C 3 GB7BPQ"] });
+        // A structured open step with a port: test-connect dials "C <port> <call>" on the RHP open.
+        _host.Store.UpsertPartner(new Partner { Call = "GB7BPQ", ConnectScript = [new() { Open = "GB7BPQ", Port = "3" }] });
         await _host.StartLinkAsync();
 
         using HttpClient client = await StartWebAsync("tom", Sysop);
@@ -243,7 +264,7 @@ public sealed class ForwardingTestConnectTests : IAsyncDisposable
     [Fact]
     public async Task NonSysop_Returns403()
     {
-        _host.Store.UpsertPartner(new Partner { Call = "GB7BPQ", ConnectScript = ["C GB7BPQ-1"] });
+        _host.Store.UpsertPartner(new Partner { Call = "GB7BPQ", ConnectScript = [new() { Open = "GB7BPQ-1" }] });
         await _host.StartLinkAsync();
 
         // A mapped-but-not-sysop user.

@@ -2163,7 +2163,7 @@ public sealed class WebmailTests : IAsyncDisposable
             AtCalls = ["*"],                 // → "default uplink (catch-all)"
             HRoutes = ["GBR.EURO"],          // → "Areas"
             BbsHa = "GB7BPQ.#23.GBR.EURO",   // → "Partner address"
-            ConnectScript = ["C GB7BPQ"],
+            ConnectScript = [new() { Open = "GB7BPQ" }],
             ForwardIntervalSeconds = 1800,   // → "every 30 min"
             ForwardNewImmediately = true,    // → "and as soon as a message is queued"
         });
@@ -2189,7 +2189,7 @@ public sealed class WebmailTests : IAsyncDisposable
         Assert.Contains("GB7BPQ", page, StringComparison.Ordinal);
         Assert.Contains(">enabled</span>", page, StringComparison.Ordinal);          // the per-partner gate badge
         Assert.Contains("Test connect", page, StringComparison.Ordinal);             // the cutover pre-flight button
-        Assert.Contains("C GB7BPQ", page, StringComparison.Ordinal);                 // connect script
+        Assert.Contains("dial GB7BPQ", page, StringComparison.Ordinal);              // connect script summary
         Assert.Contains("every 30 min", page, StringComparison.Ordinal);             // schedule
         Assert.Contains("as soon as a message is queued", page, StringComparison.Ordinal);
         Assert.Contains("Default uplink", page, StringComparison.Ordinal);           // at:* translated
@@ -2330,7 +2330,7 @@ public sealed class WebmailTests : IAsyncDisposable
 
         HttpResponseMessage post = await client.PostAsync(new Uri("/forwarding/partner", UriKind.Relative), Form(
             ("call", "gb7bpq"),
-            ("connectScript", "C GB7BPQ\nBBS"),
+            ("connectScript", """[{"open":"GB7BPQ"},{"send":"BBS"}]"""),
             ("at", "*"),
             ("hr", "GBR.EURO"),
             ("bbsHa", "GB7BPQ.#23.GBR.EURO"),
@@ -2345,7 +2345,7 @@ public sealed class WebmailTests : IAsyncDisposable
 
         Partner? p = _store.GetPartner("GB7BPQ");
         Assert.NotNull(p);
-        Assert.Equal(["C GB7BPQ", "BBS"], p!.ConnectScript);
+        Assert.Equal(new ConnectStep[] { new() { Open = "GB7BPQ" }, new() { Send = "BBS" } }, p!.ConnectScript);
         Assert.Equal(["*"], p.AtCalls);
         Assert.Equal(["GBR.EURO"], p.HRoutes);
         Assert.Equal("GB7BPQ.#23.GBR.EURO", p.BbsHa);
@@ -2358,6 +2358,42 @@ public sealed class WebmailTests : IAsyncDisposable
         Assert.True(p.AllowB2F);
         Assert.False(p.Collect); // checkbox unchecked → not posted → false
         Assert.Equal(1, _partnersChanged);
+    }
+
+    [Fact]
+    public async Task Editor_NoJsSave_PreservesTheExistingScript()
+    {
+        // With JS disabled (or a hydration failure), the step editor's hidden field keeps its
+        // server-rendered value — the current script JSON — so a submit re-posts it unchanged rather
+        // than wiping the script to inbound-only (the v1 textarea safety net, restored).
+        ClaimCallsign("tom", "G0SYS");
+        _store.UpsertPartner(new Partner { Call = "GB7BPQ", Enabled = true, ConnectScript = [new() { Open = "GB7RDG" }, new() { Expect = "=> ", Send = "BBS" }] });
+        using HttpClient client = await StartAsync(pdnUser: "tom", autoRedirect: false);
+
+        string currentJson = Bbs.Core.ConnectScriptJson.Serialize(_store.GetPartner("GB7BPQ")!.ConnectScript);
+        HttpResponseMessage post = await client.PostAsync(new Uri("/forwarding/partner", UriKind.Relative), Form(
+            ("call", "GB7BPQ"), ("connectScript", currentJson), ("enabled", "1")));
+        Assert.Equal(HttpStatusCode.Redirect, post.StatusCode);
+
+        Partner p = _store.GetPartner("GB7BPQ")!;
+        Assert.Equal(2, p.ConnectScript.Count);
+        Assert.Equal("GB7RDG", p.ConnectScript[0].Open);
+        Assert.Equal("=> ", p.ConnectScript[1].Expect);
+        Assert.Equal("BBS", p.ConnectScript[1].Send);
+    }
+
+    [Fact]
+    public async Task Editor_MalformedConnectScriptJson_IsRejected_WithNoStoreChange()
+    {
+        // A bracket-leading but malformed connectScript value reaches the JSON parse and is caught:
+        // the form 400s with a notice and nothing is written.
+        ClaimCallsign("tom", "G0SYS");
+        using HttpClient client = await StartAsync(pdnUser: "tom", autoRedirect: false);
+        HttpResponseMessage post = await client.PostAsync(new Uri("/forwarding/partner", UriKind.Relative), Form(
+            ("call", "GB7BPQ"), ("connectScript", "[{\"open\":")));
+        Assert.Equal(HttpStatusCode.BadRequest, post.StatusCode);
+        Assert.Null(_store.GetPartner("GB7BPQ"));
+        Assert.Equal(0, _partnersChanged);
     }
 
     [Fact]
@@ -2446,7 +2482,7 @@ public sealed class WebmailTests : IAsyncDisposable
             HRoutes = ["GBR.EURO"],
             HRoutesP = ["GBR.EURO"],
             BbsHa = "GB7BPQ.#23.GBR.EURO",
-            ConnectScript = ["C GB7BPQ"],
+            ConnectScript = [new() { Open = "GB7BPQ" }],
         });
         using HttpClient client = await StartAsync(pdnUser: "tom");
 
@@ -2561,7 +2597,7 @@ public sealed class WebmailTests : IAsyncDisposable
             Enabled = false,
             ForwardNewImmediately = false,
             Collect = true,
-            ConnectScript = ["C GB7BPQ", "BBS"],
+            ConnectScript = [new() { Open = "GB7BPQ" }, new() { Send = "BBS" }],
             AtCalls = ["*", "GB7XYZ"],
             ToCalls = ["SYSOP"],
             HRoutes = ["GBR.EURO"],
@@ -2583,7 +2619,7 @@ public sealed class WebmailTests : IAsyncDisposable
         Assert.False(p.Enabled);
         Assert.False(p.ForwardNewImmediately);
         Assert.True(p.Collect);
-        Assert.Equal(["C GB7BPQ", "BBS"], p.ConnectScript);
+        Assert.Equal(new ConnectStep[] { new() { Open = "GB7BPQ" }, new() { Send = "BBS" } }, p.ConnectScript);
         Assert.Equal(["*", "GB7XYZ"], p.AtCalls);
         Assert.Equal(["SYSOP"], p.ToCalls);
         Assert.Equal(45 * 60, p.ForwardIntervalSeconds);

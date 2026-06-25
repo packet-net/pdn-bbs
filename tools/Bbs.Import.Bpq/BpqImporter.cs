@@ -471,7 +471,12 @@ internal static class BpqImporter
             pEnabled.Value = 0;
             pInterval.Value = Math.Max(1, p.FwdInterval);
             pNewImm.Value = p.FwdNewImmediately ? 1 : 0;
-            pScript.Value = string.Join('\n', p.ConnectScript.Select(BpqConnectScript.Translate));
+            // v2: the flat EXPECT=SEND connect-script form is retired (docs/connect-script-v2.md), so we
+            // do NOT translate the BPQ script. Imported partners get a BLANK connect script — the sysop
+            // authors a structured one in the forwarding editor before enabling each partner. Combined
+            // with the import-disabled default above, a migrated node dials no one until each script is
+            // rebuilt and verified via test-connect.
+            pScript.Value = "";
             pTo.Value = string.Join(' ', p.ToCalls);
             pAt.Value = string.Join(' ', p.AtCalls);
             pHr.Value = string.Join(' ', p.HRoutes);

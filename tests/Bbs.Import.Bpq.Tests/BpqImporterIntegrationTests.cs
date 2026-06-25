@@ -178,12 +178,10 @@ public sealed class BpqImporterIntegrationTests : IDisposable
         Assert.Equal(0, ScalarLong(c, "SELECT enabled FROM partners WHERE call='GB7BSK';"));
         Assert.Equal(1, ScalarLong(c, "SELECT allow_b2f FROM partners WHERE call='GB7CIP';"));
         Assert.Equal(0, ScalarLong(c, "SELECT allow_b2f FROM partners WHERE call='GB7BSK';"));
-        Assert.Equal("C 3 GB7BSK", ScalarString(c, "SELECT connect_script FROM partners WHERE call='GB7BSK';"));
-        // The connect script is BPQ-normalised at import (BpqConnectScript.Translate): the "!"
-        // direct-flag on the via target is stripped (NC->C too, though this fixture uses C).
-        Assert.Equal(
-            "INTERLOCK 3\nC 3 GB7WEM-7\nC uhf gb7cip",
-            ScalarString(c, "SELECT connect_script FROM partners WHERE call='GB7CIP';"));
+        // v2: the flat connect-script form is retired — every partner imports with a BLANK connect
+        // script (the sysop authors a structured one before enabling). See docs/connect-script-v2.md.
+        Assert.Equal("", ScalarString(c, "SELECT connect_script FROM partners WHERE call='GB7BSK';"));
+        Assert.Equal("", ScalarString(c, "SELECT connect_script FROM partners WHERE call='GB7CIP';"));
     }
 
     [Fact]
