@@ -263,6 +263,62 @@ public sealed class ForwardingTestConnectTests : IAsyncDisposable
     }
 
     [Fact]
+    public async Task TestConnectStream_SteplessDial_StreamsGreetingLinesLive_BeforeThePrompt()
+    {
+        // The lab exposed this: a stepless dial (a bare open with no steps) puts the WHOLE dialogue inside
+        // the hand-to-FBB wait. That wait must emit each line LIVE as it arrives — not buffer them until it
+        // resolves — or the operator watching a stepless "test connect" sees nothing until the very end. The
+        // assertion below would HANG under the old buffer-then-flush behaviour: the greeting line only
+        // surfaces once the prompt has been awaited, which happens after we send it.
+        _host.Store.UpsertPartner(new Partner { Call = "GB7BPQ" });
+        var tester = new ForwardingTester(_host.Link, _host.Store, _host.Time, NullLogger<ForwardingTester>.Instance);
+        await _host.StartLinkAsync();
+
+        ConnectStep[] draft = [new() { Open = "GB7BPQ-1" }];
+        var events = new List<ProbeEvent>();
+        var greeted = new TaskCompletionSource();
+        var done = new TaskCompletionSource();
+        Task Emit(ProbeEvent ev)
+        {
+            lock (events)
+            {
+                events.Add(ev);
+            }
+
+            if (ev.Type == "line" && ev.Text.Contains("Welcome to the node", StringComparison.Ordinal))
+            {
+                greeted.TrySetResult();
+            }
+
+            if (ev.Type == "result")
+            {
+                done.TrySetResult();
+            }
+
+            return Task.CompletedTask;
+        }
+
+        Task run = tester.TestConnectStreamAsync("GB7BPQ", draft, Emit, CancellationToken.None);
+
+        FakeRhpPeer peer = await _host.Server.NextOpenAsync();
+        Assert.Equal("GB7BPQ-1", peer.Remote);
+
+        // A greeting line that is NOT the prompt — it must surface as a live "line" event BEFORE we send the
+        // prompt that resolves the wait. If the wait buffered, this await would time out.
+        await peer.SendLineAsync("Welcome to the node");
+        await greeted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        await peer.SendLineAsync("GB7BPQ-1>");   // a ">"-terminated line closes a stepless dial
+        await done.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await run;
+
+        ProbeEvent result = events.Last(e => e.Type == "result");
+        using JsonDocument doc = JsonDocument.Parse(result.Text);
+        Assert.True(doc.RootElement.GetProperty("ok").GetBoolean());
+        Assert.Equal("GB7BPQ-1>", doc.RootElement.GetProperty("sid").GetString());
+    }
+
+    [Fact]
     public async Task TestConnect_UsesThePostedDraft_NotTheSavedScript()
     {
         // A partner saved with a BLANK script (post-migration) is inbound-only; the editor posts its

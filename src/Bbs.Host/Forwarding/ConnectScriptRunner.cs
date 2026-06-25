@@ -312,18 +312,59 @@ public static class ConnectScriptRunner
                 await Flush().ConfigureAwait(false);
             }
 
-            // The hand-to-FBB wait: a plan WITH steps holds out for a real FBB SID (never a bare ">"
-            // gateway banner); a STEPLESS plan (a bare open) surfaces the SID-or-prompt the answerer sends.
-            string sid = plan.Steps.Count == 0
-                ? await WaitForAsync(child, buffer, transcript, line => Sid.IsSidShaped(line) || line.TrimEnd().EndsWith('>'), "the partner SID (or prompt)", responseWait, time, logger, cancellationToken).ConfigureAwait(false)
-                : await WaitForAsync(child, buffer, transcript, Sid.IsSidShaped, "the partner SID", responseWait, time, logger, cancellationToken).ConfigureAwait(false);
-            await Flush().ConfigureAwait(false);
-            return (true, sid, null);
         }
         catch (ConnectScriptException ex)
         {
             await Flush().ConfigureAwait(false);
             return (false, null, ex.Message);
+        }
+
+        // The hand-to-FBB SID wait, emitting each line LIVE as it arrives (the verbose node chatter before
+        // the SID is the bulk of what the operator wants to watch — buffering it until the wait completes
+        // would defeat the live view, especially for a stepless test where it is the whole dialogue). A plan
+        // WITH steps holds out for a real FBB SID (never a bare ">" gateway banner); a STEPLESS plan accepts
+        // the SID-or-prompt the answerer sends.
+        bool stepless = plan.Steps.Count == 0;
+        using var sidTimeout = new CancellationTokenSource(responseWait, time);
+        using var sidLinked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, sidTimeout.Token);
+        while (true)
+        {
+            while (buffer.TryTakeLine(out string line))
+            {
+                if (line.Length == 0)
+                {
+                    continue;
+                }
+
+                transcript.Add("< " + line);
+                await emit(new ProbeEvent("line", "< " + line)).ConfigureAwait(false);
+                if (IsFailure(line))
+                {
+                    return (false, null, $"node said \"{line}\"");
+                }
+
+                if (Sid.IsSidShaped(line) || (stepless && line.TrimEnd().EndsWith('>')))
+                {
+                    return (true, line, null);
+                }
+            }
+
+            byte[]? data;
+            try
+            {
+                data = await child.ReceiveAsync(sidLinked.Token).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (sidTimeout.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
+            {
+                return (false, null, $"timed out after {responseWait.TotalSeconds:0}s waiting for {(stepless ? "the partner SID or prompt" : "the partner SID")}");
+            }
+
+            if (data is null)
+            {
+                return (false, null, "the link dropped");
+            }
+
+            buffer.Feed(data);
         }
     }
 
