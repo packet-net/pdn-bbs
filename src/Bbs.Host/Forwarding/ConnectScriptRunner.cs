@@ -270,6 +270,64 @@ public static class ConnectScriptRunner
     }
 
     /// <summary>
+    /// Runs the WHOLE plan (every step, then the hand-to-FBB SID wait) for the sysop "test connect" tool,
+    /// emitting each transcript line LIVE via <paramref name="emit"/> as it happens, and returns the
+    /// verdict (Ok + the observed SID, or the failure reason). A plan with steps waits for a real FBB SID
+    /// (never a bare prompt — the multi-hop wrong-banner guard); a STEPLESS plan accepts the SID-or-prompt.
+    /// Moves no mail (no FBB session, no queue). Like <see cref="ProbeStreamAsync"/> but for the full test.
+    /// </summary>
+    public static async Task<(bool Ok, string? Sid, string? Error)> RunStreamAsync(
+        RhpChildConnection child,
+        ConnectPlan plan,
+        TimeSpan responseWait,
+        TimeProvider time,
+        ILogger logger,
+        List<string> transcript,
+        Func<ProbeEvent, Task> emit,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(child);
+        ArgumentNullException.ThrowIfNull(plan);
+        ArgumentNullException.ThrowIfNull(time);
+        ArgumentNullException.ThrowIfNull(logger);
+        ArgumentNullException.ThrowIfNull(transcript);
+        ArgumentNullException.ThrowIfNull(emit);
+
+        var buffer = new ScriptLineBuffer();
+        int emitted = 0;
+        async Task Flush()
+        {
+            for (; emitted < transcript.Count; emitted++)
+            {
+                await emit(new ProbeEvent("line", transcript[emitted])).ConfigureAwait(false);
+            }
+        }
+
+        int lastStep = plan.Steps.Count - 1;
+        try
+        {
+            for (int i = 0; i < plan.Steps.Count; i++)
+            {
+                await RunStepAsync(child, buffer, transcript, plan.Steps[i], responseWait, time, logger, i == lastStep, cancellationToken).ConfigureAwait(false);
+                await Flush().ConfigureAwait(false);
+            }
+
+            // The hand-to-FBB wait: a plan WITH steps holds out for a real FBB SID (never a bare ">"
+            // gateway banner); a STEPLESS plan (a bare open) surfaces the SID-or-prompt the answerer sends.
+            string sid = plan.Steps.Count == 0
+                ? await WaitForAsync(child, buffer, transcript, line => Sid.IsSidShaped(line) || line.TrimEnd().EndsWith('>'), "the partner SID (or prompt)", responseWait, time, logger, cancellationToken).ConfigureAwait(false)
+                : await WaitForAsync(child, buffer, transcript, Sid.IsSidShaped, "the partner SID", responseWait, time, logger, cancellationToken).ConfigureAwait(false);
+            await Flush().ConfigureAwait(false);
+            return (true, sid, null);
+        }
+        catch (ConnectScriptException ex)
+        {
+            await Flush().ConfigureAwait(false);
+            return (false, null, ex.Message);
+        }
+    }
+
+    /// <summary>
     /// Waits for the peer's SID-or-prompt line on a freshly-opened child, returning it (the same
     /// "after the last line BPQ waits for a SID or &gt;" wait the step runner does, spec §4.4). Used
     /// by the sysop test-connect tool for a STEPLESS plan (a bare open dialling the partner/BBS call

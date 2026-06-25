@@ -56,6 +56,14 @@ public sealed record WebmailOptions
     public Func<string, IReadOnlyList<Bbs.Core.ConnectStep>, int, Func<Bbs.Host.Forwarding.ProbeEvent, Task>, CancellationToken, Task>? ProbeStream { get; init; }
 
     /// <summary>
+    /// The streaming whole-script "Test connect" (<c>GET /forwarding/test-connect/stream</c>, an SSE
+    /// stream): validate the UNSAVED draft (or stored script), emitting the dialogue line-by-line live then
+    /// a final <c>result</c> verdict. Wired to
+    /// <see cref="Bbs.Host.Forwarding.ForwardingTester.TestConnectStreamAsync"/>. Null when no RHP link is available.
+    /// </summary>
+    public Func<string, IReadOnlyList<Bbs.Core.ConnectStep>?, Func<Bbs.Host.Forwarding.ProbeEvent, Task>, CancellationToken, Task>? TestConnectStream { get; init; }
+
+    /// <summary>
     /// The per-user console preferences store (the same singleton the console session uses —
     /// <c>HostComposition</c> wires the <see cref="Bbs.Host.Sessions.JsonUserSettingsStore"/>).
     /// Backs the <c>/settings</c> interface-mode toggle so a webmail flip is the same persisted
@@ -471,7 +479,50 @@ public static class Webmail
                 return;
             }
 
-            await ProbeStreamHandler(options, partner, steps, stopBefore, ctx).ConfigureAwait(false);
+            await StreamSseAsync(ctx, emit => options.ProbeStream!(partner, steps, stopBefore, emit, ctx.RequestAborted)).ConfigureAwait(false);
+        });
+
+        // The streaming whole-script "Test connect" — an SSE stream (EventSource GET): validate the UNSAVED
+        // draft (or stored script), emitting the dialogue live then a final `result` verdict. Sysop-gated;
+        // moves no mail.
+        app.MapGet("/forwarding/test-connect/stream", async (HttpContext ctx) =>
+        {
+            string? call = FindCallsign(options.Store, PdnUser(ctx));
+            if (call is null || !IsSysop(options, call))
+            {
+                ctx.Response.StatusCode = StatusCodes.Status403Forbidden;
+                return;
+            }
+
+            if (options.TestConnectStream is null)
+            {
+                ctx.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
+                return;
+            }
+
+            string partner = ctx.Request.Query["partner"].ToString().Trim();
+            if (partner.Length == 0)
+            {
+                ctx.Response.StatusCode = StatusCodes.Status400BadRequest;
+                return;
+            }
+
+            IReadOnlyList<ConnectStep>? draft = null;
+            string stepsRaw = ctx.Request.Query["steps"].ToString();
+            if (stepsRaw.Length > 0)
+            {
+                try
+                {
+                    draft = ConnectScriptJson.Parse(stepsRaw);
+                }
+                catch (System.Text.Json.JsonException)
+                {
+                    ctx.Response.StatusCode = StatusCodes.Status400BadRequest;
+                    return;
+                }
+            }
+
+            await StreamSseAsync(ctx, emit => options.TestConnectStream!(partner, draft, emit, ctx.RequestAborted)).ConfigureAwait(false);
         });
 
         // ---- Observability (machine-readable) ----
@@ -1064,12 +1115,13 @@ public static class Webmail
     }
 
     /// <summary>
-    /// Streams the live "test to here" probe as Server-Sent Events: each <see cref="ProbeEvent"/> is written
-    /// as one <c>data: {json}</c> frame and flushed, so the browser EventSource renders the dialogue live and
-    /// the operator presses "Use as Wait-for" (closing the stream, which closes the RHP child) once the prompt
-    /// has settled. Sysop + null-link are already checked by the route.
+    /// Runs an SSE stream: sets the event-stream headers, opens the stream, and drives <paramref name="run"/>
+    /// with an <c>emit</c> that writes each <see cref="ProbeEvent"/> as one <c>data: {json}</c> frame and
+    /// flushes — so a browser EventSource renders events live. The request-abort token closing the RHP child
+    /// is the caller's responsibility (passed into <paramref name="run"/>). Shared by the step-editor probe
+    /// and the streaming whole-script test.
     /// </summary>
-    private static async Task ProbeStreamHandler(WebmailOptions o, string partnerCall, IReadOnlyList<ConnectStep> steps, int stopBefore, HttpContext ctx)
+    private static async Task StreamSseAsync(HttpContext ctx, Func<Func<ProbeEvent, Task>, Task> run)
     {
         HttpResponse res = ctx.Response;
         res.Headers.ContentType = "text/event-stream";
@@ -1085,13 +1137,13 @@ public static class Webmail
 
         try
         {
-            await res.WriteAsync(": probe open\n\n", ctx.RequestAborted).ConfigureAwait(false);
+            await res.WriteAsync(": stream open\n\n", ctx.RequestAborted).ConfigureAwait(false);
             await res.Body.FlushAsync(ctx.RequestAborted).ConfigureAwait(false);
-            await o.ProbeStream!(partnerCall.Trim(), steps, stopBefore, Emit, ctx.RequestAborted).ConfigureAwait(false);
+            await run(Emit).ConfigureAwait(false);
         }
         catch (OperationCanceledException)
         {
-            // The operator closed the stream (EventSource.close / navigated away) — the normal end of a probe.
+            // The client closed the stream (EventSource.close / navigated away) — the normal end of an SSE stream.
         }
     }
 
@@ -1917,14 +1969,14 @@ public static class Webmail
     /// straight into a Wait-for step. The whole step list is serialised to the hidden
     /// <c>connectScript</c> JSON field on submit (small-JS island, like the list-page test-connect).
     /// </summary>
-    private static string ConnectScriptEditor(string call, bool editing, string json, string testUrl, string probeUrl)
+    private static string ConnectScriptEditor(string call, bool editing, string json, string testStreamUrl, string probeUrl)
     {
         string testButton = editing
             ? """ <button type="button" class="btn" id="cs-testbtn">Test connect</button>"""
             : "";
         return $"""
             <div class="cs-help dim">Each step waits for text from the link, then sends a line. Type prompts exactly — a trailing space (shown below as <code>␣</code>) is significant. The Dial is the one hop we make; the steps below are typed at the remote node prompts. {(editing ? "On a step's Wait-for, <b>⤓ test to here</b> dials and replays the steps above it, then streams the node live so you can capture the prompt by eye. " : "")}Advanced fields (regex, timeout, line-ending, raw bytes, alternatives) are per step; the YAML tab has the full reference.</div>
-            <div id="cs-editor" data-script="{H(json)}" data-call="{H(call)}" data-test="{H(testUrl)}" data-probe="{H(probeUrl)}" data-editing="{(editing ? "1" : "")}">
+            <div id="cs-editor" data-script="{H(json)}" data-call="{H(call)}" data-teststream="{H(testStreamUrl)}" data-probe="{H(probeUrl)}" data-editing="{(editing ? "1" : "")}">
               <div class="cs-dial"><strong>Dial</strong>
                 <input id="cs-open" placeholder="e.g. GB7RDG" autocomplete="off">
                 <label class="dim">port <input id="cs-port" class="cs-port" placeholder="any" autocomplete="off"></label>
@@ -2015,11 +2067,24 @@ public static class Webmail
           var tb=document.getElementById('cs-testbtn'), out=document.getElementById('cs-test');
           if(tb){ tb.addEventListener('click',function(){
             closeProbe(); serialize();
-            out.hidden=false; out.className='tc-result'; out.textContent='Testing…';
-            var fd=new FormData(); fd.append('partner', ed.dataset.call); fd.append('steps', jsonEl.value);
-            fetch(ed.dataset.test,{method:'POST',body:fd,headers:{'Accept':'application/json'}})
-              .then(function(r){return r.json();}).then(function(d){render(d);})
-              .catch(function(e){out.textContent='Test failed: '+e; out.className='tc-result fail';});
+            out.hidden=false; out.className='tc-result'; out.textContent='';
+            var thead=el('div','dim','Connecting & running the script…'), tlines=el('div','cs-probe-lines'), tdone=false;
+            out.append(thead,tlines);
+            var tq='partner='+encodeURIComponent(ed.dataset.call)+'&steps='+encodeURIComponent(jsonEl.value);
+            probeSrc=new EventSource(ed.dataset.teststream+(ed.dataset.teststream.indexOf('?')<0?'?':'&')+tq);
+            probeSrc.onmessage=function(e){
+              var d; try{d=JSON.parse(e.data);}catch(err){return;}
+              if(d.type==='line'){
+                var ln=el('div','cs-tline'); ln.append(el('span',null,d.text));
+                if(d.text.indexOf('< ')===0 && d.text.indexOf('< (matched')!==0){ var u=el('button','btn cs-mini','use'); u.type='button'; u.onclick=function(){ addStep({expect:d.text.slice(2)}); }; ln.append(u); }
+                tlines.append(ln);
+              } else if(d.type==='result'){ tdone=true; var r; try{r=JSON.parse(d.text);}catch(err){r={};}
+                out.className='tc-result '+(r.ok?'ok':'fail');
+                thead.textContent=(r.ok?'✓ OK':'✗ FAILED')+' — '+((r.target||ed.dataset.call)+(r.port?(' (port '+r.port+')'):''))+(r.sid?(' — SID: '+r.sid):'')+(r.error?(' — '+r.error):'');
+                closeProbe();
+              } else if(d.type==='error'){ tdone=true; out.className='tc-result fail'; thead.textContent='Error: '+d.text; closeProbe(); }
+            };
+            probeSrc.onerror=function(){ closeProbe(); if(!tdone){ tdone=true; out.className='tc-result fail'; thead.textContent=tlines.children.length?'Connection lost mid-stream.':'Test failed to start (node host unreachable or RHP link down).'; } };
           }); }
           function closeProbe(){ if(probeSrc){ try{probeSrc.close();}catch(e){} probeSrc=null; } }
           function tailOf(t){
@@ -2072,24 +2137,6 @@ public static class Webmail
             // one-shot: never auto-reconnect (would re-dial). A drop before we finished is a real failure.
             probeSrc.onerror=function(){ closeProbe(); if(!finished){ finished=true; out.className='tc-result fail'; head.textContent=(raw||lines.children.length)?'Connection lost mid-stream.':'Probe failed to start (node host unreachable or RHP link down).'; } };
           }
-          function render(d){
-            out.className='tc-result '+(d.ok?'ok':'fail'); out.textContent='';
-            out.append(el('div',null,(d.ok?'✓ OK':'✗ FAILED')+' — '+((d.target||'')+(d.port?(' (port '+d.port+')'):''))));
-            if(d.sid)out.append(el('div',null,'SID: '+d.sid));
-            if(d.error)out.append(el('div',null,'Error: '+d.error));
-            if(d.transcript&&d.transcript.length){
-              out.append(el('div','dim','— transcript — click “use” to add a Wait-for step —'));
-              d.transcript.forEach(function(line){
-                var ln=el('div','cs-tline'); ln.append(el('span',null,line));
-                if(line.indexOf('< ')===0 && line.indexOf('< (matched')!==0){
-                  var use=el('button','btn cs-mini','use'); use.type='button';
-                  use.onclick=function(){ addStep({expect:line.slice(2)}); };
-                  ln.append(use);
-                }
-                out.append(ln);
-              });
-            }
-          }
         })();
         </script>
         """;
@@ -2135,7 +2182,7 @@ public static class Webmail
             : """<input name="call" placeholder="e.g. GB7AAA" maxlength="9" required>""";
 
         string csJson = editing && partner!.ConnectScript.Count > 0 ? ConnectScriptJson.Serialize(partner.ConnectScript) : "[]";
-        string csEditor = ConnectScriptEditor(editing ? partner!.Call : "", editing, csJson, U(prefix, "/forwarding/test-connect", embed), U(prefix, "/forwarding/test-connect/probe", embed));
+        string csEditor = ConnectScriptEditor(editing ? partner!.Call : "", editing, csJson, U(prefix, "/forwarding/test-connect/stream", embed), U(prefix, "/forwarding/test-connect/probe", embed));
         string to = editing ? string.Join(" ", partner!.ToCalls) : "";
         string at = editing ? string.Join(" ", partner!.AtCalls) : "";
         string hr = editing ? string.Join(" ", partner!.HRoutes) : "";
