@@ -1,4 +1,5 @@
 using System.Text;
+using System.Text.RegularExpressions;
 using Bbs.Fbb;
 using Bbs.Host.Rhp;
 using Microsoft.Extensions.Logging;
@@ -110,38 +111,41 @@ public static class ConnectScriptRunner
                 throw new InvalidOperationException($"Unknown step type {plan.Steps[i].GetType().Name}.");
             }
 
-            // Expect/send (bpqchat ScriptStep): an explicit EXPECT= waits for that substring BEFORE
+            // Expect/send (bpqchat ScriptStep): an explicit expect waits for that prompt BEFORE
             // sending — the ONLY reliable way to gate on a node prompt, since prompts are not
             // standardised across BPQ/URONode/XRouter/etc. THIS is how a multi-hop walk confirms each
-            // hop (its prompt seen) before issuing the next command.
-            if (step.Expect.Length > 0)
+            // hop (its prompt seen) before issuing the next command. The per-step Timeout overrides the
+            // partner ConTimeout for this wait; Match/IgnoreCase/ExpectAny pick how the prompt is matched.
+            TimeSpan wait = step.Timeout ?? responseWait;
+            bool hasWait = step.Expect.Length > 0 || step.ExpectAny is { Count: > 0 };
+            string matched = string.Empty;
+            if (hasWait)
             {
-                await ExpectAsync(
-                    child, buffer, transcript, step.Expect,
-                    responseWait, time, cancellationToken).ConfigureAwait(false);
+                matched = await ExpectAsync(child, buffer, transcript, step, wait, time, cancellationToken).ConfigureAwait(false);
             }
 
             if (step.Send.Length > 0)
             {
                 LogScriptSend(logger, child.RemoteCallsign, step.Send, null);
-                transcript.Add("> " + step.Send);
-                await child.SendAsync(Encoding.Latin1.GetBytes(step.Send + "\r"), cancellationToken)
+                transcript.Add("> " + StepLabel(step) + step.Send);
+                string payload = step.Raw ? ExpandEscapes(step.Send) : step.Send;
+                await child.SendAsync(Encoding.Latin1.GetBytes(payload + EolBytes(step.Eol)), cancellationToken)
                     .ConfigureAwait(false);
-                if (step.Expect.Length > 0)
+                if (hasWait)
                 {
-                    LogScriptMatched(logger, child.RemoteCallsign, step.Expect, step.Send, null);
+                    LogScriptMatched(logger, child.RemoteCallsign, matched, step.Send, null);
                 }
             }
 
-            // A bare send-only step (no EXPECT=, the legacy verbatim form) has no standardised prompt
-            // to wait for, so it goes out verbatim; between bare steps (not the last) we make a
-            // best-effort wait for node progress — a " CONNECTED"/"OK"/">" line — before the next. For
-            // a node whose prompt does not fit that shape, set an explicit EXPECT= for that step.
-            if (step.Expect.Length == 0 && step.Send.Length > 0 && i != lastStep)
+            // A send-only step (no expect) has no standardised prompt to wait for, so it goes out
+            // verbatim; between such steps (not the last) we make a best-effort wait for node progress —
+            // a " CONNECTED"/"OK"/">" line — before the next. For a node whose prompt does not fit that
+            // shape, set an explicit expect for that step.
+            if (!hasWait && step.Send.Length > 0 && i != lastStep)
             {
                 await WaitForAsync(
                     child, buffer, transcript, IsProgress, "node progress",
-                    responseWait, time, logger, cancellationToken).ConfigureAwait(false);
+                    wait, time, logger, cancellationToken).ConfigureAwait(false);
             }
         }
 
@@ -190,39 +194,79 @@ public static class ConnectScriptRunner
     }
 
     /// <summary>
-    /// Reads inbound bytes until the case-insensitive substring <paramref name="want"/> appears
-    /// in the accumulated stream (a node prompt carries no line terminator — bpqchat's
-    /// byte-window expect). Bytes up to and including the match are consumed (any complete lines
-    /// within them are logged and failure-checked); the remainder stays buffered for the next
-    /// step or the SID wait. Failure text or an empty <paramref name="wait"/> window fail the
-    /// cycle, carrying the attempt transcript.
+    /// Reads inbound bytes until the step's prompt appears in the accumulated stream (a node prompt
+    /// carries no line terminator — bpqchat's byte-window expect). The match honours the step's
+    /// <see cref="ExpectSendStep.Match"/> (substring / exact-line / regex), <see cref="ExpectSendStep.IgnoreCase"/>,
+    /// and <see cref="ExpectSendStep.ExpectAny"/> (first alternative to appear wins). Bytes up to and
+    /// including the match are consumed; the remainder stays buffered for the next step or the SID wait.
+    /// Failure text or an empty <paramref name="wait"/> window fail the cycle, carrying the attempt transcript.
     /// </summary>
-    private static async Task ExpectAsync(
+    private static async Task<string> ExpectAsync(
         RhpChildConnection child,
         ScriptLineBuffer buffer,
         List<string> transcript,
-        string want,
+        ExpectSendStep step,
         TimeSpan wait,
         TimeProvider time,
         CancellationToken cancellationToken)
     {
+        IReadOnlyList<string> wants = step.ExpectAny is { Count: > 0 } any ? any : [step.Expect];
+        Regex[]? regexes = null;
+        if (step.Match == "regex")
+        {
+            RegexOptions options = step.IgnoreCase ? RegexOptions.IgnoreCase : RegexOptions.None;
+            try
+            {
+                // A bounded match timeout caps catastrophic backtracking from an operator-supplied
+                // pattern — a synchronous Regex.Match cannot be cancelled, so without this a pathological
+                // pattern would wedge the forwarding loop with the link held open, immune to ConTimeout.
+                regexes = [.. wants.Select(w => new Regex(w, options, TimeSpan.FromSeconds(2)))];
+            }
+            catch (ArgumentException ex)
+            {
+                throw new ConnectScriptException(
+                    $"connect script{StepSuffix(step)}: invalid regex — {ex.Message}{Render(transcript)}");
+            }
+        }
+
+        string desc = WantDescription(step);
         using var timeout = new CancellationTokenSource(wait, time);
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeout.Token);
         while (true)
         {
-            // Failure text anywhere in the complete lines seen so far fails the cycle, even if
-            // the awaited prompt would otherwise be matched later.
+            // A failure marker at the head of the buffer fails the cycle before we wait further.
             while (buffer.TryPeekFailingLine(out string failing))
             {
                 transcript.Add("< " + failing);
                 throw new ConnectScriptException(
-                    $"connect script failed: node said \"{failing}\"{Render(transcript)}");
+                    $"connect script failed{StepSuffix(step)}: node said \"{failing}\"{Render(transcript)}");
             }
 
-            if (buffer.TryConsumeThrough(want))
+            bool ok;
+            string matched, before;
+            try
             {
-                transcript.Add("< (matched \"" + want + "\")");
-                return;
+                ok = TryMatch(buffer, step, wants, regexes, out matched, out before);
+            }
+            catch (RegexMatchTimeoutException)
+            {
+                throw new ConnectScriptException(
+                    $"connect script{StepSuffix(step)}: regex match timed out — the pattern is too costly{Render(transcript)}");
+            }
+
+            if (ok)
+            {
+                // A failure marker among the lines consumed BEFORE the awaited prompt (e.g. a BUSY line
+                // batched ahead of the prompt in one read) fails the cycle rather than being swallowed.
+                if (FirstFailingLine(before) is { } failingBefore)
+                {
+                    transcript.Add("< " + failingBefore);
+                    throw new ConnectScriptException(
+                        $"connect script failed{StepSuffix(step)}: node said \"{failingBefore}\"{Render(transcript)}");
+                }
+
+                transcript.Add("< (matched " + StepLabel(step) + "\"" + matched + "\")");
+                return matched;
             }
 
             byte[]? data;
@@ -233,18 +277,123 @@ public static class ConnectScriptRunner
             catch (OperationCanceledException) when (timeout.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
             {
                 throw new ConnectScriptException(
-                    $"connect script timed out after {wait.TotalSeconds:0}s waiting for \"{want}\"{Render(transcript)}");
+                    $"connect script timed out after {wait.TotalSeconds:0}s waiting for {desc}{StepSuffix(step)}{Render(transcript)}");
             }
 
             if (data is null)
             {
                 throw new ConnectScriptException(
-                    $"the link dropped while waiting for \"{want}\"{Render(transcript)}");
+                    $"the link dropped while waiting for {desc}{StepSuffix(step)}{Render(transcript)}");
             }
 
             buffer.Feed(data);
         }
     }
+
+    /// <summary>
+    /// Tries each want against the buffer per the step's match mode; consumes through the first that
+    /// matches. <paramref name="before"/> receives the text consumed BEFORE the match (for a failure scan).
+    /// </summary>
+    private static bool TryMatch(ScriptLineBuffer buffer, ExpectSendStep step, IReadOnlyList<string> wants, Regex[]? regexes, out string matched, out string before)
+    {
+        before = string.Empty;
+        for (int i = 0; i < wants.Count; i++)
+        {
+            bool ok = step.Match switch
+            {
+                "regex" => buffer.TryConsumeRegex(regexes![i], out before),
+                "exact-line" => buffer.TryConsumeExactLine(wants[i], step.IgnoreCase, out before),
+                _ => buffer.TryConsumeThrough(wants[i], step.IgnoreCase, out before),
+            };
+            if (ok)
+            {
+                matched = wants[i];
+                return true;
+            }
+        }
+
+        matched = string.Empty;
+        return false;
+    }
+
+    /// <summary>The first complete line within <paramref name="text"/> that contains a failure marker, or null.</summary>
+    private static string? FirstFailingLine(string text)
+    {
+        foreach (string line in text.Split('\r', '\n'))
+        {
+            if (line.Length > 0 && IsFailure(line))
+            {
+                return line;
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>The send terminator bytes for the step's <see cref="ExpectSendStep.Eol"/> (default CR).</summary>
+    internal static string EolBytes(string eol) => eol switch
+    {
+        "lf" => "\n",
+        "crlf" => "\r\n",
+        "none" => "",
+        _ => "\r",
+    };
+
+    /// <summary>Expands C-style escapes (<c>\r \n \t \xNN \\</c>) so raw control bytes (e.g. Ctrl-Z = <c>\x1a</c>) can be sent. Lenient: an unrecognised escape keeps the following character verbatim.</summary>
+    internal static string ExpandEscapes(string send)
+    {
+        var sb = new StringBuilder(send.Length);
+        for (int i = 0; i < send.Length; i++)
+        {
+            char c = send[i];
+            if (c != '\\' || i + 1 >= send.Length)
+            {
+                sb.Append(c);
+                continue;
+            }
+
+            char next = send[++i];
+            switch (next)
+            {
+                case 'r': sb.Append('\r'); break;
+                case 'n': sb.Append('\n'); break;
+                case 't': sb.Append('\t'); break;
+                case '\\': sb.Append('\\'); break;
+                case 'x':
+                case 'X':
+                    int start = i + 1;
+                    int len = 0;
+                    while (len < 2 && start + len < send.Length && Uri.IsHexDigit(send[start + len]))
+                    {
+                        len++;
+                    }
+
+                    if (len > 0)
+                    {
+                        sb.Append((char)Convert.ToInt32(send.Substring(start, len), 16));
+                        i = start + len - 1;
+                    }
+                    else
+                    {
+                        sb.Append(next);
+                    }
+
+                    break;
+                default: sb.Append(next); break;
+            }
+        }
+
+        return sb.ToString();
+    }
+
+    private static string StepLabel(ExpectSendStep step) => step.Name is null ? string.Empty : $"[{step.Name}] ";
+
+    private static string StepSuffix(ExpectSendStep step) => step.Name is null ? string.Empty : $" at step \"{step.Name}\"";
+
+    private static string WantDescription(ExpectSendStep step) =>
+        step.ExpectAny is { Count: > 0 } any
+            ? "one of " + string.Join(", ", any.Select(w => $"\"{w}\""))
+            : $"\"{step.Expect}\"";
 
     /// <summary>
     /// Consumes inbound lines until <paramref name="accept"/> matches one (returned);
@@ -363,28 +512,98 @@ public static class ConnectScriptRunner
         }
 
         /// <summary>
-        /// If the accumulated bytes contain <paramref name="want"/> (case-insensitive), consumes
+        /// If the accumulated bytes contain <paramref name="want"/> as a substring, consumes
         /// everything up to AND including the match and returns true; the bytes after the match
         /// stay buffered. Otherwise leaves the buffer untouched and returns false.
         /// </summary>
-        public bool TryConsumeThrough(string want)
+        public bool TryConsumeThrough(string want, bool ignoreCase, out string before)
         {
+            before = string.Empty;
             if (want.Length == 0)
             {
                 return true;
             }
 
             string haystack = Encoding.Latin1.GetString([.. _buffer]);
-            int at = haystack.IndexOf(want, StringComparison.OrdinalIgnoreCase);
+            int at = haystack.IndexOf(want, ignoreCase ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal);
             if (at < 0)
             {
                 return false;
             }
 
-            int through = at + want.Length;
-            _buffer.RemoveRange(0, through);
-            _skipNextLf = false;
+            before = haystack[..at];
+            ConsumeBytes(at + want.Length);
             return true;
+        }
+
+        /// <summary>
+        /// If <paramref name="pattern"/> matches anywhere in the accumulated bytes, consumes through the
+        /// end of the match and returns true; otherwise leaves the buffer untouched and returns false. A
+        /// zero-length match is NOT accepted (a degenerate pattern must not fire the gate before any data).
+        /// </summary>
+        public bool TryConsumeRegex(Regex pattern, out string before)
+        {
+            before = string.Empty;
+            string haystack = Encoding.Latin1.GetString([.. _buffer]);
+            System.Text.RegularExpressions.Match m = pattern.Match(haystack);
+            if (!m.Success || m.Length == 0)
+            {
+                return false;
+            }
+
+            before = haystack[..m.Index];
+            ConsumeBytes(m.Index + m.Length);
+            return true;
+        }
+
+        /// <summary>
+        /// If a complete line whose text equals <paramref name="want"/> is buffered, consumes everything
+        /// up to AND including that line (its terminator) and returns true; otherwise leaves the buffer
+        /// untouched and returns false. Unlike the substring/regex matches, this requires a full line
+        /// (so the prompt must end in CR/LF). <paramref name="before"/> receives the lines preceding the match.
+        /// </summary>
+        public bool TryConsumeExactLine(string want, bool ignoreCase, out string before)
+        {
+            before = string.Empty;
+            StringComparison cmp = ignoreCase ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+            int pos = 0;
+            while (true)
+            {
+                int term = -1;
+                for (int i = pos; i < _buffer.Count; i++)
+                {
+                    if (_buffer[i] is 0x0D or 0x0A)
+                    {
+                        term = i;
+                        break;
+                    }
+                }
+
+                if (term < 0)
+                {
+                    return false;
+                }
+
+                string line = Encoding.Latin1.GetString([.. _buffer.GetRange(pos, term - pos)]);
+                if (line.Equals(want, cmp))
+                {
+                    before = Encoding.Latin1.GetString([.. _buffer.GetRange(0, pos)]);
+                    ConsumeLineAt(term);
+                    return true;
+                }
+
+                pos = term + 1;
+                if (_buffer[term] == 0x0D && pos < _buffer.Count && _buffer[pos] == 0x0A)
+                {
+                    pos++;
+                }
+            }
+        }
+
+        private void ConsumeBytes(int count)
+        {
+            _buffer.RemoveRange(0, count);
+            _skipNextLf = false;
         }
 
         public bool TryTakeLine(out string line)

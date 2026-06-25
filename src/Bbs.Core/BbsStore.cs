@@ -1835,7 +1835,7 @@ public sealed class BbsStore : IDisposable
             cmd.Parameters.AddWithValue("$en", partner.Enabled ? 1 : 0);
             cmd.Parameters.AddWithValue("$int", partner.ForwardIntervalSeconds);
             cmd.Parameters.AddWithValue("$imm", partner.ForwardNewImmediately ? 1 : 0);
-            cmd.Parameters.AddWithValue("$script", string.Join('\n', partner.ConnectScript));
+            cmd.Parameters.AddWithValue("$script", ConnectScriptJson.Serialize(partner.ConnectScript));
             cmd.Parameters.AddWithValue("$to", string.Join(' ', partner.ToCalls));
             cmd.Parameters.AddWithValue("$at", string.Join(' ', partner.AtCalls));
             cmd.Parameters.AddWithValue("$hr", string.Join(' ', partner.HRoutes));
@@ -2777,7 +2777,7 @@ public sealed class BbsStore : IDisposable
             Enabled = reader.GetInt64(1) != 0,
             ForwardIntervalSeconds = (int)reader.GetInt64(2),
             ForwardNewImmediately = reader.GetInt64(3) != 0,
-            ConnectScript = SplitLines(reader.GetString(4)),
+            ConnectScript = ConnectScriptJson.Deserialize(reader.GetString(4)),
             ToCalls = SplitList(reader.GetString(5)),
             AtCalls = SplitList(reader.GetString(6)),
             HRoutes = SplitList(reader.GetString(7)),
@@ -2790,9 +2790,6 @@ public sealed class BbsStore : IDisposable
             ConTimeoutSeconds = (int)reader.GetInt64(14),
         };
     }
-
-    private static string[] SplitLines(string joined) =>
-        joined.Length == 0 ? [] : joined.Split('\n');
 
     private static string[] SplitList(string joined) =>
         joined.Length == 0 ? [] : joined.Split(' ', StringSplitOptions.RemoveEmptyEntries);

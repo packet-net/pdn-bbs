@@ -408,13 +408,15 @@ public sealed record PartnerConfig
     public string? Connect { get; init; }
 
     /// <summary>
-    /// Full connect script (compat spec §4.4): an optional first <c>C [port] &lt;target&gt;</c>
-    /// names the RHP open; later lines are sent verbatim once connected (e.g. <c>BBS</c> at a
-    /// node prompt), each followed by a response wait; <c>PAUSE n</c> delays. When set, it
-    /// takes precedence over <see cref="Connect"/>.
+    /// Full connect script (compat spec §4.4; <c>docs/connect-script-v2.md</c>): a sequence of
+    /// structured <see cref="ConnectStep"/> maps. The first step may be the OPEN (<c>open:</c> +
+    /// optional <c>port:</c>) naming the RHP dial; later steps are <c>expect:</c>/<c>send:</c> pairs
+    /// (with optional <c>timeout</c>/<c>match</c>/<c>ignoreCase</c>/<c>eol</c>/<c>raw</c>/<c>name</c>/<c>expectAny</c>).
+    /// When set, takes precedence over <see cref="Connect"/>. The retired flat <c>EXPECT=SEND</c>
+    /// string form is no longer accepted.
     /// </summary>
     /// <remarks>Concrete <see cref="List{T}"/> because YamlDotNet binds collections, not read-only interfaces.</remarks>
-    public List<string> ConnectScript { get; init; } = [];
+    public List<ConnectStep> ConnectScript { get; init; } = [];
 
     /// <summary>
     /// Connect handshake timeout in seconds (compat spec §4.1 ConTimeout, default 60) —
@@ -490,10 +492,11 @@ public sealed record PartnerConfig
         ForwardNewImmediately = SendImmediately,
         Collect = Collect,
 
-        // The full script wins over the simple form (documented in DefaultYaml).
+        // The full script wins over the simple form (documented in DefaultYaml). The simple connect
+        // form is a one-step open.
         ConnectScript = ConnectScript.Count > 0
             ? [.. ConnectScript]
-            : string.IsNullOrWhiteSpace(Connect) ? [] : [$"C {Connect.Trim()}"],
+            : string.IsNullOrWhiteSpace(Connect) ? [] : [new ConnectStep { Open = Connect.Trim() }],
         ConTimeoutSeconds = Math.Max(1, ConTimeoutSeconds),
         ToCalls = [.. To],
         AtCalls = [.. At],
@@ -596,6 +599,7 @@ public static class BbsHostConfigFile
         ArgumentNullException.ThrowIfNull(yaml);
         IDeserializer deserializer = new DeserializerBuilder()
             .WithNamingConvention(CamelCaseNamingConvention.Instance)
+            .WithTypeConverter(new ConnectScriptYamlConverter())
             .IgnoreUnmatchedProperties()
             .Build();
         return deserializer.Deserialize<BbsHostConfig>(yaml) ?? new BbsHostConfig();
@@ -904,14 +908,25 @@ public static class BbsHostConfigFile
         #   connect:         simple connect form — the callsign/alias outbound cycles
         #                    dial (default: call). Equivalent to a one-line script
         #                    "C <call>".
-        #   connectScript:   full connect script (compat spec §4.4) for node navigation;
-        #                    takes precedence over connect when both are set. An optional
-        #                    FIRST "C [port] <target>" line names the dial; every later
-        #                    line is sent verbatim once connected (e.g. BBS at a node
-        #                    prompt), each followed by a response wait; "PAUSE n" waits n
-        #                    seconds. Node failure text (BUSY/FAILURE/...) or a response
-        #                    wait exceeding conTimeoutSeconds fails the cycle (retried
-        #                    with backoff).
+        #   connectScript:   full connect script for node navigation — a sequence of STRUCTURED
+        #                    steps (the flat "EXPECT=SEND" string form is retired). Takes
+        #                    precedence over connect when both are set. The first step may be the
+        #                    OPEN (`open: <call>` + optional `port:`) naming the dial; every later
+        #                    step waits for a node prompt then sends a line:
+        #                      - open: GB7RDG          # the one hop we make (the RHP dial)
+        #                      - expect: "GB7RDG}"     # wait for the node prompt (a substring)
+        #                        send: BBS             #   then send this line
+        #                    A step's prompt is matched verbatim — a trailing space in "=> " is
+        #                    significant; quote the value. Per-step options (all optional):
+        #                      expectAny: [..]  wait for the first of several prompts
+        #                      match: substring|exact-line|regex   (default substring)
+        #                      ignoreCase: true|false              (default true)
+        #                      eol: cr|lf|crlf|none                (send terminator; default cr)
+        #                      raw: true         expand \r \n \t \xNN \\ escapes in send
+        #                      timeoutSeconds: <n>  per-step wait override
+        #                      name: <label>     names the step in the transcript/errors
+        #                    Node failure text (BUSY/FAILURE/...) or a wait exceeding
+        #                    conTimeoutSeconds fails the cycle (retried with backoff).
         #   conTimeoutSeconds: per-response-wait timeout for the script + the final SID
         #                    wait (compat spec §4.1 ConTimeout; default 60)
         #   intervalMinutes: retry cadence for queued-but-undelivered mail (default 60;
@@ -947,8 +962,9 @@ public static class BbsHostConfigFile
         #    bbsHa: GB7AAA.#23.GBR.EURO
         #  - call: GB7RDG
         #    connectScript:        # dial the node, then enter its BBS application
-        #      - C GB7RDG
-        #      - BBS
+        #      - open: GB7RDG
+        #      - expect: "GB7RDG}"
+        #        send: BBS
         #    at: ["*"]
         #  - call: GB7CIP          # an asymmetric partner that never dials us:
         #    connect: GB7CIP       # POLL it to collect the mail it holds for us

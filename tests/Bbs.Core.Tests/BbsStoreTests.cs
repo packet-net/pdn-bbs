@@ -461,7 +461,7 @@ public sealed class BbsStoreTests : IDisposable
             Enabled = false,
             ForwardIntervalSeconds = 120,
             ForwardNewImmediately = true,
-            ConnectScript = ["NETROM", "C GB7BPQ-1"],
+            ConnectScript = [new() { Open = "GB7BPQ-1" }, new() { Expect = "=> ", Send = "BBS", Match = "regex", IgnoreCase = false }],
             ToCalls = ["WANT", "!SALE*"],
             AtCalls = ["GB7BPQ", "*"],
             HRoutes = ["WW"],
@@ -482,7 +482,9 @@ public sealed class BbsStoreTests : IDisposable
         Assert.False(loaded.Enabled);
         Assert.Equal(120, loaded.ForwardIntervalSeconds);
         Assert.True(loaded.ForwardNewImmediately);
-        Assert.Equal(["NETROM", "C GB7BPQ-1"], loaded.ConnectScript);
+        Assert.Equal(
+            new ConnectStep[] { new() { Open = "GB7BPQ-1" }, new() { Expect = "=> ", Send = "BBS", Match = "regex", IgnoreCase = false } },
+            loaded.ConnectScript);
         Assert.Equal(["WANT", "!SALE*"], loaded.ToCalls);
         Assert.Equal(["GB7BPQ", "*"], loaded.AtCalls);
         Assert.Equal(["WW"], loaded.HRoutes);

@@ -105,7 +105,7 @@ public sealed class ConfigTests : IDisposable
         Partner mapped = partner.ToPartner();
         Assert.Equal(30 * 60, mapped.ForwardIntervalSeconds);
         Assert.True(mapped.ForwardNewImmediately);
-        Assert.Equal(["C GB7BPQ-1"], mapped.ConnectScript);
+        Assert.Equal(new ConnectStep[] { new() { Open = "GB7BPQ-1" } }, mapped.ConnectScript);
         Assert.Equal(["SYSOP"], mapped.ToCalls);
         Assert.Equal(["GB7BPQ", "*"], mapped.AtCalls);
         Assert.Equal(["GBR.EURO"], mapped.HRoutes);
@@ -124,18 +124,94 @@ public sealed class ConfigTests : IDisposable
             partners:
               - call: GB7BPQ
                 connectScript:
-                  - C GB7BPQ
-                  - BBS
+                  - open: GB7BPQ
+                  - send: BBS
                 conTimeoutSeconds: 30
             """);
 
         PartnerConfig partner = Assert.Single(config.Partners);
-        Assert.Equal(["C GB7BPQ", "BBS"], partner.ConnectScript);
+        ConnectStep[] expected = [new() { Open = "GB7BPQ" }, new() { Send = "BBS" }];
+        Assert.Equal(expected, partner.ConnectScript);
         Assert.Equal(30, partner.ConTimeoutSeconds);
 
         Partner mapped = partner.ToPartner();
-        Assert.Equal(["C GB7BPQ", "BBS"], mapped.ConnectScript);
+        Assert.Equal(expected, mapped.ConnectScript);
         Assert.Equal(30, mapped.ConTimeoutSeconds);
+    }
+
+    [Fact]
+    public void LegacyFlatConnectScript_DoesNotCrashStartup_ReadsAsBlank()
+    {
+        // An upgraded node may have a bbs.yaml whose connectScript is the RETIRED flat string form.
+        // It must NOT crash config parse (which would brick node startup) — it degrades to a blank
+        // script (the partner is then inbound-only until the sysop authors a structured one).
+        BbsHostConfig config = BbsHostConfigFile.Parse("""
+            callsign: GB7PDN
+            partners:
+              - call: GB7BPQ
+                connectScript:
+                  - C GB7BPQ
+                  - BBS
+            """);
+        PartnerConfig partner = Assert.Single(config.Partners);
+        Assert.Empty(partner.ConnectScript);
+        Assert.Empty(partner.ToPartner().ConnectScript);
+    }
+
+    [Fact]
+    public void MixedStructuredAndScalarConnectScript_DegradesToBlank()
+    {
+        // A stray legacy scalar among structured maps blanks the WHOLE script (no partial honouring) —
+        // the documented, no-silent-widening behaviour. Pinned so it stays intentional.
+        BbsHostConfig config = BbsHostConfigFile.Parse("""
+            callsign: GB7PDN
+            partners:
+              - call: GB7BPQ
+                connectScript:
+                  - open: GB7RDG
+                  - C LEGACY
+                  - expect: ">"
+                    send: BBS
+            """);
+        Assert.Empty(Assert.Single(config.Partners).ConnectScript);
+    }
+
+    [Fact]
+    public void StructuredConnectScript_BindsEveryOptionFieldFromDocumentedKeys()
+    {
+        // Pins the YAML key→property binding for every per-step option using the keys the operator
+        // docs (bbs.yaml comment + connect-script-v2.md) actually publish — guards the timeoutSeconds
+        // key in particular (a camelCase mismatch would silently drop the override).
+        BbsHostConfig config = BbsHostConfigFile.Parse("""
+            callsign: GB7PDN
+            partners:
+              - call: GB7BPQ
+                connectScript:
+                  - open: GB7RDG
+                    port: "2"
+                  - expect: "=> "
+                    send: BBS
+                    timeoutSeconds: 30
+                    match: regex
+                    ignoreCase: false
+                    eol: crlf
+                    raw: true
+                    name: enter-bbs
+                    expectAny: [CONNECTED, "BUSY from"]
+            """);
+        ConnectStep[] steps = [.. Assert.Single(config.Partners).ConnectScript];
+        Assert.Equal("GB7RDG", steps[0].Open);
+        Assert.Equal("2", steps[0].Port);
+        ConnectStep s = steps[1];
+        Assert.Equal("=> ", s.Expect);          // trailing space preserved through YAML
+        Assert.Equal("BBS", s.Send);
+        Assert.Equal(30, s.TimeoutSeconds);
+        Assert.Equal("regex", s.Match);
+        Assert.False(s.IgnoreCase);
+        Assert.Equal("crlf", s.Eol);
+        Assert.True(s.Raw);
+        Assert.Equal("enter-bbs", s.Name);
+        Assert.Equal(["CONNECTED", "BUSY from"], s.ExpectAny);
     }
 
     [Fact]
@@ -184,13 +260,13 @@ public sealed class ConfigTests : IDisposable
               - call: GB7BPQ
                 connect: GB7BPQ-1
                 connectScript:
-                  - C GB7RDG
-                  - BBS
+                  - open: GB7RDG
+                  - send: BBS
             """);
 
         // Both forms set → the full script wins (documented in DefaultYaml).
         Partner mapped = Assert.Single(config.Partners).ToPartner();
-        Assert.Equal(["C GB7RDG", "BBS"], mapped.ConnectScript);
+        Assert.Equal(new ConnectStep[] { new() { Open = "GB7RDG" }, new() { Send = "BBS" } }, mapped.ConnectScript);
     }
 
     [Fact]

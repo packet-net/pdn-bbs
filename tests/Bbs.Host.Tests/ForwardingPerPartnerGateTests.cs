@@ -21,7 +21,7 @@ public class ForwardingPerPartnerGateTests
         Call = call,
         Enabled = enabled,
         AtCalls = ["*"],
-        ConnectScript = [$"C {call}-1"],
+        ConnectScript = [new() { Open = $"{call}-1" }],
         ForwardNewImmediately = true,
     };
 

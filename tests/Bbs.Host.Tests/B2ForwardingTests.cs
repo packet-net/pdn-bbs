@@ -247,7 +247,7 @@ public class B2ForwardingTests
             Call = "GB7BPQ",
             AllowB2F = true,
             AtCalls = ["*"],
-            ConnectScript = ["C GB7BPQ-1"],
+            ConnectScript = [new() { Open = "GB7BPQ-1" }],
             ForwardNewImmediately = true,
         });
         await host.StartLinkAsync();
@@ -326,7 +326,7 @@ public class B2ForwardingTests
             Call = "GB7BPQ",
             AllowB2F = true,
             AtCalls = ["*"],
-            ConnectScript = ["C GB7BPQ-1"],
+            ConnectScript = [new() { Open = "GB7BPQ-1" }],
             ForwardNewImmediately = true,
         });
         await host.StartLinkAsync();
@@ -391,7 +391,7 @@ public class B2ForwardingTests
             Call = "GB7BPQ",
             AllowB2F = true,
             AtCalls = ["*"],
-            ConnectScript = ["C GB7BPQ-1"],
+            ConnectScript = [new() { Open = "GB7BPQ-1" }],
             ForwardNewImmediately = true,
         });
         await host.StartLinkAsync();
@@ -481,7 +481,7 @@ public class B2ForwardingTests
             Call = "GB7BPQ",
             AllowB2F = true,
             AtCalls = ["*"],
-            ConnectScript = ["C GB7BPQ-1"],
+            ConnectScript = [new() { Open = "GB7BPQ-1" }],
             ForwardNewImmediately = true,
         });
         await host.StartLinkAsync();

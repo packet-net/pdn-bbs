@@ -47,10 +47,13 @@ public sealed record Partner
     public bool Collect { get; init; }
 
     /// <summary>
-    /// Connect-script lines, replayed verbatim by the Host ("Script lines are sent verbatim to
-    /// the node" — compat spec §4.4; <c>C &lt;target&gt;</c> semantics belong to the Host).
+    /// Structured connect script (compat spec §4.4; <c>docs/connect-script-v2.md</c>): an ordered list
+    /// of <see cref="ConnectStep"/>. The first step may be the OPEN (the one RHP dial); every later step
+    /// is an expect/send typed verbatim at a remote node prompt. An empty list is INBOUND-ONLY (the
+    /// partner dials us; we never dial it). This replaced the flat <c>EXPECT=SEND</c> string form, which
+    /// is retired: a legacy store blob reads as a blank script (see <see cref="ConnectScriptJson"/>).
     /// </summary>
-    public IReadOnlyList<string> ConnectScript { get; init; } = [];
+    public IReadOnlyList<ConnectStep> ConnectScript { get; init; } = [];
 
     /// <summary>
     /// Connect handshake timeout, seconds (compat spec §4.1 ConTimeout, default 60). The

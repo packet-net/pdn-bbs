@@ -28,7 +28,7 @@ public class ForwardingHoldTests
         {
             Call = "GB7HLD",
             AtCalls = ["*"],
-            ConnectScript = ["C GB7HLD-1"],
+            ConnectScript = [new() { Open = "GB7HLD-1" }],
             ForwardNewImmediately = true,
         });
         Message stored = host.Store.AddMessage(new MessageDraft
@@ -91,7 +91,7 @@ public class ForwardingHoldTests
         {
             Call = "GB7XYZ",
             AtCalls = ["*"],
-            ConnectScript = ["C GB7XYZ-1"],
+            ConnectScript = [new() { Open = "GB7XYZ-1" }],
             ForwardNewImmediately = true,
         });
         Message stored = host.Store.AddMessage(new MessageDraft
