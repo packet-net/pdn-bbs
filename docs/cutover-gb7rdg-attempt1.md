@@ -4,6 +4,8 @@
 
 This is the write-up of the first live GB7RDG LinBPQ→pdn cutover attempt. It records what was done, the one blocker that stopped it, the bugs found along the way, what shipped, and the checklist to clear before going again. Read [`cutover-gb7rdg.md`](cutover-gb7rdg.md) (the runbook) alongside this.
 
+> **Correction (2026-06-29, M0LTE).** The mod-128 / broken-fallback diagnosis in this retrospective was **wrong** — it was propagation-confounded on-air. The **actual** blocker was a functional miss in *connect-script* support: the flat `EXPECT=SEND` form split on the first `=` and trimmed both sides, so an intermediate hop's prompt (URONode's `=> ` — `=` is the field delimiter, the trailing space is eaten) was unrepresentable, and **GB7CIP / GB7LOX could never be authored or brought up in `connect-test`**. Fixed by **connect-scripts v2** (structured steps — [`connect-script-v2.md`](connect-script-v2.md), released 0.2.52). Verified 2026-06-29: the node's SABME→SABM fallback **is** present and default-on (live LinBPQ + XRouter interop tests), and real BPQ *rejects* SABME with FRMR (it is never silent), so the fallback engages cleanly — there was no node-side blocker. The "## The blocker" section and re-attempt item 1 below are kept as the original record but are **superseded**; the updated procedure is in [`cutover-gb7rdg.md`](cutover-gb7rdg.md).
+
 ## TL;DR
 
 The phased cutover ran cleanly through `freeze → sync → baseline → network → verify` — GB7RDG came up on-air as the pdn node, fully held (no forwarding). The Tom-owned `connect-test` phase then surfaced **the blocker: pdn dials AX.25 with SABME (mod-128) only, and the mod-128→mod-8 fallback is broken**, while every partner (and the original BPQ config) is mod-8. Because AX.25 connection-mode behaviour must be validated against deterministic peers (not live-RF propagation luck), the call was to **roll back to LinBPQ and fix the node in the lab**. `abort` restored LinBPQ on-air and stopped the CT. The lab box (`packetdotnet`) was then upgraded to the latest node + bbs for that focused testing. The connect-script SID-capture fix that was found and shipped during the attempt (pdn-bbs v0.2.44) is good and kept.
@@ -23,6 +25,8 @@ The phased cutover ran cleanly through `freeze → sync → baseline → network
 A re-cutover **must start fresh from `freeze`** (never reuse a stale import).
 
 ## The blocker (fix before re-attempt): pdn dials mod-128 only, fallback broken
+
+> **Superseded (2026-06-29) — see the Correction at the top.** The SABME→SABM fallback was already present and default-on; mod-8 was never the blocker (the real one was connect-script support). Kept below verbatim as the original record.
 
 This is the thing that actually stopped the cutover.
 
@@ -58,7 +62,7 @@ This is the thing that actually stopped the cutover.
 
 ## Re-attempt checklist
 
-- [ ] **Fix + ship the node mod-8/fallback** (the blocker) — lab-tested against controlled mod-8 / mod-128 / silent peers.
+- [x] ~~**Fix + ship the node mod-8/fallback** (the blocker) — lab-tested against controlled mod-8 / mod-128 / silent peers.~~ **Superseded (2026-06-29):** the SABME→SABM fallback was already present + default-on (verified; live LinBPQ/XRouter interop tests) and BPQ FRMRs SABME, so mod-8 was never the blocker. See the Correction at the top.
 - [ ] **Land the cutover-runbook fixes** (the 7 bugs + the abort-start-held wart).
 - [ ] **Fix the pdn-app.yaml version stamping** (next bbs release).
 - [ ] **Re-run focused connect-script testing on the lab** — per-partner `EXPECT=` tuning for the multi-hop partners (GB7CIP `C 3 GB7WEM-7`→`C uhf gb7cip`; GB7LOX `C 3 GB7LOX-2`→`bbs`), using the real prompt the test-connect transcript surfaces.
