@@ -61,7 +61,16 @@ Validate at **T+15 m** (takeover + no immediate re-flood), **T+1 h** (drain + li
 
 **1. Takeover & single identity** *(RF, MCP)* — TX from GB7RDG (+ -1/-2/-4 SSIDs) appears within ~15 min on the bands that were active (esp. 40m + 70cm), ID/BEACON/NODES resume (~15 min cadence), and there is **exactly one** GB7RDG on air (the old LinBPQ is stopped — no dual-claim).
 
-**2. No duplicate re-flood — the critical one** *(logs + MCP)* — outbound mail volume per RF partner stays in the baseline band (~100–200 frames/24 h each), **not** an order-of-magnitude spike. `validate` reports the log signal (bodies forwarded vs partner BID-rejects on the drain); a healthy drain rejects the backlog dups. The `forwarding ACTIVE: N partners, M queued` line shows M = the pre-marked queue, not the whole mailbox.
+**2. No duplicate re-flood — the critical one** *(logs + MCP)* — outbound mail volume to each RF forwarding partner stays within **that partner's own baseline band** (captured at the `baseline` phase from the kiss-collector — they differ by an order of magnitude, so there is **no** single flat threshold), **not** an order-of-magnitude spike above it. The live RF partners (from 24 h of traffic, snapshot 2026-06-29 — re-measure fresh at `baseline`) and where to watch each:
+
+  - **GB7BEX** — direct FBB-over-AX.25 on **70cm** (`[BPQ-…-B2F…$]` SID exchange both ways); ~480 frames/24 h.
+  - **GB7BSK** — on **70cm** but over **NET/ROM** (PID 0xCF I-frames, to GB7BSK-1 behind the node), not raw AX.25 FBB; ~600 frames/24 h.
+  - **GB7OXF** — **40m HF**, slow + XID-heavy; the partner most likely to misbehave post-cutover (watch its pre-SABM XID/SREJ negotiation); ~250 frames/24 h.
+  - **GB7CIP** — **no callsign of its own on air**: reached `C 3 !GB7WEM-7` → `C uhf gb7cip`, so its wire signature **is the GB7WEM-7 link** (~2,200 frames/24 h of bulk compressed B2F — that volume is *normal* for the relay, not a re-flood). **Watch GB7WEM-7, not GB7CIP.**
+
+  (The kiss-collector is RF-only, so any AXUDP/internet forwarding partners won't appear here — validate those separately via criterion 4 + the BBS forwarding stats. GB7LOX, the other attempt-1 multi-hop, showed zero 24 h traffic — treat as inactive.)
+
+  `validate` reports the log signal (bodies forwarded vs partner BID-rejects on the drain); a healthy drain rejects the backlog dups. The `forwarding ACTIVE: N partners, M queued` line shows M = the pre-marked queue, not the whole mailbox.
 
 **3. Mail flows + no loss** *(bbs.db, `validate`)* — queue **draining** (queued ≤ baseline), **BID store not collapsing** (≥ 90 % of baseline — it churns: new BIDs arrive while 60-day-expired orphans prune, so it doesn't grow monotonically, but it must never be wiped), high-water carried (≥ baseline), message count not collapsing (≥ 80 % of baseline).
 
