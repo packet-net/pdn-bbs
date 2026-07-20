@@ -1,6 +1,6 @@
 # GB7RDG cutover — state of play
 
-**Banked:** 2026-07-01 · **Status:** CT staged + `preflight` GREEN; GB7RDG still LIVE on old LinBPQ. Next phase = `freeze` (off-air, awaiting explicit go).
+**Banked:** 2026-07-01 · **Re-prepped:** 2026-07-20 (re-staged to `node-v0.35.0` after a node release) · **Status:** CT staged + `preflight` GREEN; GB7RDG still LIVE on old LinBPQ. Next phase = `freeze` (off-air, awaiting explicit go).
 
 Living operational snapshot of the in-progress GB7RDG LinBPQ→pdn cutover. Read alongside [`cutover-gb7rdg.md`](cutover-gb7rdg.md) (the runbook) and [`cutover-gb7rdg-attempt1.md`](cutover-gb7rdg-attempt1.md) (attempt-1 retrospective + the corrected diagnosis). Update this in place as phases complete.
 
@@ -8,8 +8,8 @@ Living operational snapshot of the in-progress GB7RDG LinBPQ→pdn cutover. Read
 
 `preflight ✅ → freeze ⬜ → sync ⬜ → baseline ⬜ → network ⬜ → verify ⬜ → connect-test ⬜ → golive ⬜ → validate ⬜`
 
-- **CT 129 (`gb7rdg.lan` / 10.45.0.87) is staged**: `packetnet` **0.26.0** + `pdn-bbs` **0.2.52** installed (canonical release debs, checksum-verified). Node held — all 7 ports `enabled=false` (4 RF + 3 AXUDP), `oarc.enabled=false`, healthz 200. Off-air; no dual-claim.
-- **`preflight` GREEN** (2026-06-30): all `[ok]`, one expected non-blocking warning (no tailscale key — M7TAW is dead).
+- **CT 129 (`gb7rdg.lan` / 10.45.0.87) is staged**: `packetnet` **0.35.0** + `pdn-bbs` **0.2.52** installed (canonical release debs, checksum-verified). Node held — all 7 ports `enabled=false` (4 RF + 3 AXUDP), `oarc.enabled=false`, healthz 200. Off-air; no dual-claim. Node 0.35.0 pulls a new `libhamlib-utils` dependency (resolved by `apt-get -f install`) and migrates the persisted config schema **v1→v2** on first start; the held `schemaVersion: 1` YAML was re-imported cleanly under 0.35.0 (validated — so `network`'s `ct_apply` import is de-risked).
+- **`preflight` GREEN** (re-confirmed 2026-07-20 on node 0.35.0): all `[ok]`, one expected non-blocking warning (no tailscale key — M7TAW is dead).
 - **GB7RDG is still LIVE on the old LinBPQ** node (`gb7rdg-node`, 10.45.0.121; `linbpq` active). Nothing has moved. Fully reversible — no mail forwarded, `golive` not reached.
 
 ## Execution environment (IMPORTANT — not claude-code)
@@ -47,7 +47,7 @@ GB7LOX (the other attempt-1 multi-hop) shows zero 24h traffic → inactive. AXUD
 
 - **Real attempt-1 blocker was connect-script support, not mod-128.** Fixed by connect-scripts v2 (structured steps, `docs/connect-script-v2.md`, shipped 0.2.52). The mod-8/SABME fallback was verified present + default-on and is a non-blocker. See the attempt-1 retrospective's Correction.
 - **The BPQ importer imports every partner DISABLED with a BLANK connect script** (v2 retired auto-translate). At `connect-test`, each partner to forward to must have its structured script **authored by Tom** (his step; do not pre-author). "kinder import" (auto-derive direct dials) is parked (would revise a deliberate decision).
-- **AXUDP peer-set reconciliation pending** (not needed until `network`, those ports are held): the held config's peer list (GB7OUK/MB7NPW/GB7BDH/GB7NDH/M7TAW, dated 2026-06-23, flagged "not confirmed") should be diffed against the current live `bpq32.cfg` port-8 MAP before `network`.
+- **AXUDP peer-set reconciliation OUTSTANDING** (not needed until `network` — those ports are held — but must be resolved before it): the held config's peer list (GB7OUK/MB7NPW/GB7BDH/GB7NDH/M7TAW, dated 2026-06-23, flagged "not confirmed") no longer matches the live node. A 2026-07-20 read of `gb7rdg-node:/opt/oarc/bpq/bpq32.cfg` shows **no MAP/AXUDP/10.66.66 lines at all** — the AXIP peers have moved to an include (likely `axipcache8.cfg`) or the port changed. Find the current AXIP peer set and update the held config before `network`.
 - `golive` is the point of no return (one-way; typed `GB7RDG GO`, ≥1 partner enabled). `abort` is valid only before `golive`. A re-cut always starts fresh from `freeze`.
 
 ## Resume from here (studybox)
@@ -64,5 +64,5 @@ Env defaults already match this deployment (PVE `root@10.45.0.10`, CTID 129, `tf
 
 ## Immediate next actions
 
-1. (optional, read-only) AXUDP peer-set diff: held config vs live `bpq32.cfg` port-8 MAP.
+1. (read-only) AXUDP peer-set reconciliation: the live `bpq32.cfg` no longer carries the MAP peers — find the current AXIP peer set (check `axipcache8.cfg` + the live BPQ AXIP port) and update the held config before `network`.
 2. `freeze` — **off-air; requires explicit go + timing.**
