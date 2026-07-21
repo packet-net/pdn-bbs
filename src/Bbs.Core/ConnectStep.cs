@@ -26,8 +26,9 @@ public sealed record ConnectStep
     public string? Open { get; init; }
 
     /// <summary>
-    /// Optional node port for the open (the <c>&lt;port&gt;</c> in BPQ's <c>C &lt;port&gt; &lt;call&gt;</c>),
-    /// digits only. Null = any. Only meaningful together with <see cref="Open"/>.
+    /// Optional node port id for the open (the operator-defined port name, e.g. <c>"hf-40m"</c>).
+    /// Passed verbatim to the node, which validates it against its configured ports.
+    /// Null = any. Only meaningful together with <see cref="Open"/>.
     /// </summary>
     public string? Port { get; init; }
 

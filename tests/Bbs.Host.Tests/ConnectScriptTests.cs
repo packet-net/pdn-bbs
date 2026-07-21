@@ -177,16 +177,14 @@ public class ConnectScriptTests
     }
 
     [Fact]
-    public void NonNumericPort_IsWarnedAndDropped()
+    public void PortId_PassesThroughVerbatim()
     {
-        // Port is documented digits-only; a non-numeric port is dropped with a warning rather than
-        // sent verbatim over the RHP open.
+        // Port is the node's port id (e.g. "hf-40m"); the BBS passes it through and the node validates.
         ConnectPlan plan = ConnectScript.Resolve(PartnerWith(
-            new ConnectStep { Open = "GB7BPQ-1", Port = "abc" }));
+            new ConnectStep { Open = "GB7BPQ-1", Port = "hf-40m" }));
         Assert.Equal("GB7BPQ-1", plan.Target);
-        Assert.Null(plan.Port);
-        string warning = Assert.Single(plan.Warnings);
-        Assert.Contains("not numeric", warning, StringComparison.Ordinal);
+        Assert.Equal("hf-40m", plan.Port);
+        Assert.Empty(plan.Warnings);
     }
 
     [Fact]
