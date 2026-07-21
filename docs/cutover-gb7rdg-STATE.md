@@ -47,7 +47,7 @@ GB7LOX (the other attempt-1 multi-hop) shows zero 24h traffic → inactive. AXUD
 
 - **Real attempt-1 blocker was connect-script support, not mod-128.** Fixed by connect-scripts v2 (structured steps, `docs/connect-script-v2.md`, shipped 0.2.52). The mod-8/SABME fallback was verified present + default-on and is a non-blocker. See the attempt-1 retrospective's Correction.
 - **The BPQ importer imports every partner DISABLED with a BLANK connect script** (v2 retired auto-translate). At `connect-test`, each partner to forward to must have its structured script **authored by Tom** (his step; do not pre-author). "kinder import" (auto-derive direct dials) is parked (would revise a deliberate decision).
-- **AXUDP peer-set reconciliation OUTSTANDING** (not needed until `network` — those ports are held — but must be resolved before it): the held config's peer list (GB7OUK/MB7NPW/GB7BDH/GB7NDH/M7TAW, dated 2026-06-23, flagged "not confirmed") no longer matches the live node. A 2026-07-20 read of `gb7rdg-node:/opt/oarc/bpq/bpq32.cfg` shows **no MAP/AXUDP/10.66.66 lines at all** — the AXIP peers have moved to an include (likely `axipcache8.cfg`) or the port changed. Find the current AXIP peer set and update the held config before `network`.
+- **AXUDP peer set CONFIRMED CURRENT** (2026-07-21): the held config's AXUDP peers match the live `gb7rdg-node:/etc/bpq32.cfg` port-8 (`PORTNUM=8`, `DRIVER=BPQAXIP`) active MAP entries exactly — GB7OUK/MB7NPW/GB7BDH (UDP 10094), GB7NDH (10095), M7TAW (10093); the commented-out `M0LTE-9`/`MB7NGP`/`M0LTE-3` are correctly omitted. No reconciliation needed. (A 2026-07-20 note here wrongly claimed "no MAP lines" — it grepped `/opt/oarc/bpq/bpq32.cfg`, which does not exist; the real node config is **`/etc/bpq32.cfg`**. `/opt/oarc/bpq` is the BPQMail *data* dir — the script's `BPQ_DIR`, used by `sync` for DIRMES/WFBID/linmail.cfg/Mail, not the node config.)
 - `golive` is the point of no return (one-way; typed `GB7RDG GO`, ≥1 partner enabled). `abort` is valid only before `golive`. A re-cut always starts fresh from `freeze`.
 
 ## Resume from here (studybox)
@@ -64,5 +64,5 @@ Env defaults already match this deployment (PVE `root@10.45.0.10`, CTID 129, `tf
 
 ## Immediate next actions
 
-1. (read-only) AXUDP peer-set reconciliation: the live `bpq32.cfg` no longer carries the MAP peers — find the current AXIP peer set (check `axipcache8.cfg` + the live BPQ AXIP port) and update the held config before `network`.
+1. AXUDP peer set — **confirmed current** (held config matches live `/etc/bpq32.cfg` port-8 MAP); no action needed.
 2. `freeze` — **off-air; requires explicit go + timing.**
