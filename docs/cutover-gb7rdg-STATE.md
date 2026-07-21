@@ -11,7 +11,7 @@ Attempt 2 ran `preflight ✅ → freeze ✅ → sync ✅ → baseline ✅ → ne
 - **CT 129 (`gb7rdg.lan` / 10.45.0.87) is staged**: `packetnet` **0.35.0** + `pdn-bbs` **0.2.52** installed (canonical release debs, checksum-verified). Node held — all 7 ports `enabled=false` (4 RF + 3 AXUDP), `oarc.enabled=false`, healthz 200. Off-air; no dual-claim. Node 0.35.0 pulls a new `libhamlib-utils` dependency (resolved by `apt-get -f install`) and migrates the persisted config schema **v1→v2** on first start; the held `schemaVersion: 1` YAML was re-imported cleanly under 0.35.0 (validated — so `network`'s `ct_apply` import is de-risked).
 - **`preflight` GREEN** (re-confirmed 2026-07-20 on node 0.35.0): all `[ok]`, one expected non-blocking warning (no tailscale key — M7TAW is dead).
 - **GB7RDG is live on LinBPQ again** (`gb7rdg-node`, 10.45.0.121; `linbpq` active, `wg0` up as `10.66.66.6` with a fresh handshake). **The CT (129) is held** — all 7 ports `enabled=false`, `forwarding_master=0`, all partners disabled, `bbs.db.pre-cutover` restored, CT wg down (0 interfaces). **Single identity, no dual-claim.** Attempt 2 reached the pre-`golive` hold (mailbox had rebuilt fresh: 190 msgs, **0 orphan headers**) but **no mail ever forwarded** (`golive` not reached) — LinBPQ's mailbox is intact.
-- **Attempt-2 root cause (2026-07-21, VERIFIED):** a **connect-script port-config error**, plus an unstable transport that hid it. The GB7CIP test-connect Dial step was `{"open":"GB7WEM-7","port":"hf-40m"}`. The Dial `port` field requires a **1-indexed numeric** port label; `hf-40m` (a port *name*) is silently dropped to null (pdn-bbs `ConnectScript.cs:117-124`), and the node then dials on the **first** configured port = `vhf-2m` (packet.net `SupervisorRhpGateway.cs:77-82`). Confirmed on the wire: the connect ran **80.07 s** = vhf-2m's `T1 4000 ms × N2 20` (hf-40m would be 56 s). So the dial was **misrouted to 2m** — the monitor showing `vhf-2m` was *correct*, not a display bug (an earlier hypothesis of mine, retracted). The correct value is **`3`** (= hf-40m, 3rd configured port; matches LinBPQ's `C 3 !GB7WEM-7`). Separately, the vhf-2m/vhf-6m KISS-TCP links (8910/8913) were flapping and the ACKMODE pacer faulted with `ObjectDisposedException` on the disposed `KissTcpClient` (`PacingKissModem`), so the misrouted 2m dial never reliably reached the air (zero 2m TX in the collector; 2m radio didn't key — the HF PTT the operator saw was concurrent *inbound* sessions on hf-40m). Issues filed: [pdn-bbs #91](https://github.com/packet-net/pdn-bbs/issues/91) (port-reference UX), [packet.net #664](https://github.com/packet-net/packet.net/issues/664) (ObjectDisposedException-on-reconnect), [packet.net #665](https://github.com/packet-net/packet.net/issues/665) (node silently defaults to the first port). **Before re-attempt:** set each partner's Dial `port` to its numeric label (GB7WEM-7/GB7CIP = `3`); re-cut fresh from `freeze`.
+- **Attempt-2 root cause (2026-07-21, VERIFIED):** a **connect-script port-config error**, plus an unstable transport that hid it. The GB7CIP test-connect Dial step was `{"open":"GB7WEM-7","port":"hf-40m"}`. The Dial `port` field requires a **1-indexed numeric** port label; `hf-40m` (a port *name*) is silently dropped to null (pdn-bbs `ConnectScript.cs:117-124`), and the node then dials on the **first** configured port = `vhf-2m` (packet.net `SupervisorRhpGateway.cs:77-82`). Confirmed on the wire: the connect ran **80.07 s** = vhf-2m's `T1 4000 ms × N2 20` (hf-40m would be 56 s). So the dial was **misrouted to 2m** — the monitor showing `vhf-2m` was *correct*, not a display bug (an earlier hypothesis of mine, retracted). The correct value is **`3`** (= hf-40m, 3rd configured port; matches LinBPQ's `C 3 !GB7WEM-7`). Separately, the vhf-2m/vhf-6m KISS-TCP links (8910/8913) were flapping and the ACKMODE pacer faulted with `ObjectDisposedException` on the disposed `KissTcpClient` (`PacingKissModem`), so the misrouted 2m dial never reliably reached the air (zero 2m TX in the collector; 2m radio didn't key — the HF PTT the operator saw was concurrent *inbound* sessions on hf-40m). Issues filed: [pdn-bbs #91](https://github.com/packet-net/pdn-bbs/issues/91) (port-reference UX), [packet.net #664](https://github.com/packet-net/packet.net/issues/664) (ObjectDisposedException-on-reconnect), [packet.net #665](https://github.com/packet-net/packet.net/issues/665) (node silently defaults to the first port). **All three are now FIXED + released (2026-07-21):** node-v0.36.1 (#664 pacing retry, #665 no silent first-port, #91 accept port ids) + pdn-bbs 0.2.53 (pass the port verbatim). The Dial `port` now takes a port **name** (GB7WEM-7/GB7CIP = `hf-40m`) — see the Partner reference below. **Before re-attempt:** stage node-v0.36.1 + pdn-bbs 0.2.53, set Dial ports to names, re-cut fresh from `freeze`.
 
 ## Execution environment (IMPORTANT — not claude-code)
 
@@ -68,32 +68,34 @@ Env defaults already match this deployment (PVE `root@10.45.0.10`, CTID 129, `tf
 
 ## Partner reference (verified 2026-07-21 — for the next `connect-test`)
 
-Re-checked against the live `gb7rdg-node:/opt/oarc/bpq/linmail.cfg` + `/etc/bpq32.cfg`. **The Dial `port` is a 1-indexed pdn-config-order label, NOT the BPQ port number** — they coincide only for 2m/70cm/40m:
+> **Port handling changed the same day — all three bugs fixed + released.** The Dial `port` is now a **pdn port id (name)**, matched case-insensitively against the node's configured port ids (node-v0.36.x `SupervisorRhpGateway.ResolvePortId`); a bad value gives a visible `No such port 'X' (<list>)`, and a null port errors on an outbound dial — no more silent misroute. **So use the port NAME (`hf-40m`)** — what was originally typed. The earlier "use numeric `3`" applied only to node ≤0.35.0 and is superseded. **Stage `node-v0.36.1` + `pdn-bbs 0.2.53`** for the re-attempt (they carry the [#664](https://github.com/packet-net/packet.net/issues/664) / [#665](https://github.com/packet-net/packet.net/issues/665) / #91 fixes).
 
-| BPQ port | band | pdn Dial `port` |
+Re-checked against the live `gb7rdg-node:/opt/oarc/bpq/linmail.cfg` + `/etc/bpq32.cfg`. Translate each BPQ port number to its pdn port **id**:
+
+| BPQ port | band | pdn `port` (id) |
 |---|---|---|
-| 1 | 2m | `1` |
-| 2 | 70cm | `2` |
-| 3 | 40m | `3` |
-| 6 | 6m | `4` *(differs)* |
-| 8 | AXIP | 5/6/7 (axudp) |
+| 1 | 2m | `vhf-2m` |
+| 2 | 70cm | `uhf-70cm` |
+| 3 | 40m | `hf-40m` |
+| 6 | 6m | `vhf-6m` |
+| 8 | AXIP | `axudp-10093` / `-10094` / `-10095` |
 | 9 | "simulated RF link to pdn" | — *(no pdn equivalent)* |
 
 Enabled partners in the live config → Dial port + disposition:
 
 | Partner | BPQ connect script | pdn Dial `port` | Auto-imports? | Notes |
 |---|---|---|---|---|
-| GB7CIP | `C 3 !GB7WEM-7` → `C uhf gb7cip` | `3` | yes | multi-hop via GB7WEM-7 (URONode `=> ` → `C uhf gb7cip`) |
-| GB7OXF | `NC 3 !GB7OXF-2` | `3` | yes | direct 40m; the marginal/XID-heavy one |
-| GB7BSK | `NC 2 !GB7BSK-1` | `2` | yes | direct 70cm |
-| GB7BPQ | `NC 3 !GB7BPQ` | `3` | yes | direct 40m |
-| GB7LOX | `NC 3 !GB7LOX-2` → `bbs` | `3` | yes | multi-hop via GB7LOX-2 |
-| **EI0RSI (RSI)** | `C 3 EI0RSI-1` | `3` | yes | **replaces EI5IYB** |
+| GB7CIP | `C 3 !GB7WEM-7` → `C uhf gb7cip` | `hf-40m` | yes | multi-hop via GB7WEM-7 (URONode `=> ` → `C uhf gb7cip`) |
+| GB7OXF | `NC 3 !GB7OXF-2` | `hf-40m` | yes | direct 40m; the marginal/XID-heavy one |
+| GB7BSK | `NC 2 !GB7BSK-1` | `uhf-70cm` | yes | direct 70cm |
+| GB7BPQ | `NC 3 !GB7BPQ` | `hf-40m` | yes | direct 40m |
+| GB7LOX | `NC 3 !GB7LOX-2` → `bbs` | `hf-40m` | yes | multi-hop via GB7LOX-2 |
+| **EI0RSI (RSI)** | `C 3 EI0RSI-1` | `hf-40m` | yes | **replaces EI5IYB** |
 | GB7NDH | `C NDHBBS` | — (NET/ROM alias) | yes | AXUDP peer 10.66.66.10 |
 | M9YYY | `C 9 !M9YYY-1` | — ⚠️ port 9 = sim-link-to-pdn | yes | no real pdn path — drop or re-route |
 | EI5IYB | `NC 3 EI5IYB-1` | — | **no** (skipped) | superseded → use EI0RSI |
 | GB7MNK | `C GB7MNK` | — (NET/ROM alias) | **no** (skipped) | add manually if wanted |
-| GB7BRK | `c gb7wod` → `c gb7brk` → `bbs` | via GB7WOD (70cm = `2`) | **no** (skipped) | multi-hop; add manually if wanted |
+| GB7BRK | `c gb7wod` → `c gb7brk` → `bbs` | via GB7WOD (`uhf-70cm`) | **no** (skipped) | multi-hop; add manually if wanted |
 
 Decisions for the re-attempt:
 - **EI5IYB → EI0RSI (RSI)**: use EI0RSI, drop EI5IYB (same Irish relationship; EI0RSI imports, EI5IYB doesn't).
@@ -106,5 +108,5 @@ Decisions for the re-attempt:
 
 1. **ROLLED BACK** — GB7RDG live on LinBPQ, CT held, no mail moved. Nothing running on the node right now.
 2. **Fix the connect-script Dial ports** — each partner's `port` must be a **1-indexed numeric** label (GB7WEM-7/GB7CIP = `3`), not a port name. Verified root cause of the abort (see Attempt-2 note).
-3. **Track the filed issues** — [pdn-bbs #91](https://github.com/packet-net/pdn-bbs/issues/91) (make port refs robust: picker / accept names / don't silent-drop), [packet.net #664](https://github.com/packet-net/packet.net/issues/664) (`ObjectDisposedException` on KISS-TCP reconnect), [packet.net #665](https://github.com/packet-net/packet.net/issues/665) (don't default to the first port). Also worth checking why the 2m/6m KISS-TCP links (8910/8913) were flapping — were those TNCs/radios attached?
+3. **Filed issues — all FIXED + released 2026-07-21:** [pdn-bbs #91](https://github.com/packet-net/pdn-bbs/issues/91) → pdn-bbs 0.2.53 (port passed verbatim); [packet.net #664](https://github.com/packet-net/packet.net/issues/664) (pacing retry on reconnect), [packet.net #665](https://github.com/packet-net/packet.net/issues/665) (no silent first-port), #91/#668 (accept port ids) → node-v0.36.1. Still worth checking why the 2m/6m KISS-TCP links (8910/8913) were flapping — were those TNCs/radios attached?
 4. **Re-attempt** (after the above): fresh `freeze → … → connect-test → golive → validate`. For `connect-test`, use the **Partner reference** above — numeric Dial ports, EI5IYB→EI0RSI, and the M9YYY / skipped-import / NET-ROM-alias flags.
