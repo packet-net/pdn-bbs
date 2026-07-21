@@ -66,9 +66,45 @@ CUTOVER_YES=1 bash scripts/cutover-gb7rdg.sh freeze
 
 Env defaults already match this deployment (PVE `root@10.45.0.10`, CTID 129, `tf@gb7rdg-node`, `STAGE_DIR=~/gb7rdg-cutover`). See the script header for overrides.
 
+## Partner reference (verified 2026-07-21 — for the next `connect-test`)
+
+Re-checked against the live `gb7rdg-node:/opt/oarc/bpq/linmail.cfg` + `/etc/bpq32.cfg`. **The Dial `port` is a 1-indexed pdn-config-order label, NOT the BPQ port number** — they coincide only for 2m/70cm/40m:
+
+| BPQ port | band | pdn Dial `port` |
+|---|---|---|
+| 1 | 2m | `1` |
+| 2 | 70cm | `2` |
+| 3 | 40m | `3` |
+| 6 | 6m | `4` *(differs)* |
+| 8 | AXIP | 5/6/7 (axudp) |
+| 9 | "simulated RF link to pdn" | — *(no pdn equivalent)* |
+
+Enabled partners in the live config → Dial port + disposition:
+
+| Partner | BPQ connect script | pdn Dial `port` | Auto-imports? | Notes |
+|---|---|---|---|---|
+| GB7CIP | `C 3 !GB7WEM-7` → `C uhf gb7cip` | `3` | yes | multi-hop via GB7WEM-7 (URONode `=> ` → `C uhf gb7cip`) |
+| GB7OXF | `NC 3 !GB7OXF-2` | `3` | yes | direct 40m; the marginal/XID-heavy one |
+| GB7BSK | `NC 2 !GB7BSK-1` | `2` | yes | direct 70cm |
+| GB7BPQ | `NC 3 !GB7BPQ` | `3` | yes | direct 40m |
+| GB7LOX | `NC 3 !GB7LOX-2` → `bbs` | `3` | yes | multi-hop via GB7LOX-2 |
+| **EI0RSI (RSI)** | `C 3 EI0RSI-1` | `3` | yes | **replaces EI5IYB** |
+| GB7NDH | `C NDHBBS` | — (NET/ROM alias) | yes | AXUDP peer 10.66.66.10 |
+| M9YYY | `C 9 !M9YYY-1` | — ⚠️ port 9 = sim-link-to-pdn | yes | no real pdn path — drop or re-route |
+| EI5IYB | `NC 3 EI5IYB-1` | — | **no** (skipped) | superseded → use EI0RSI |
+| GB7MNK | `C GB7MNK` | — (NET/ROM alias) | **no** (skipped) | add manually if wanted |
+| GB7BRK | `c gb7wod` → `c gb7brk` → `bbs` | via GB7WOD (70cm = `2`) | **no** (skipped) | multi-hop; add manually if wanted |
+
+Decisions for the re-attempt:
+- **EI5IYB → EI0RSI (RSI)**: use EI0RSI, drop EI5IYB (same Irish relationship; EI0RSI imports, EI5IYB doesn't).
+- **M9YYY**: BPQ port 9 is the cutover's own "simulated RF link to pdn" test link — no real pdn route. Drop it or give it a real path.
+- **Skipped by importer** (no `F_BBS` user): EI5IYB, GB7MNK, GB7BRK → won't auto-import; add manually if wanted (EI5IYB → EI0RSI).
+- **NET/ROM-alias partners** (GB7NDH `NDHBBS`, GB7MNK, GB7BRK-via-GB7WOD): the RHP `open` is direct-AX.25-on-a-port, **not** NET/ROM-routed — these need a NET/ROM connect approach worked out in test-connect, not a plain port dial.
+- GB7BEX is `en=0` (disabled) in BPQ — not a forwarding partner either direction (supersedes the earlier "add GB7BEX" note).
+
 ## Immediate next actions
 
 1. **ROLLED BACK** — GB7RDG live on LinBPQ, CT held, no mail moved. Nothing running on the node right now.
 2. **Fix the connect-script Dial ports** — each partner's `port` must be a **1-indexed numeric** label (GB7WEM-7/GB7CIP = `3`), not a port name. Verified root cause of the abort (see Attempt-2 note).
 3. **Track the filed issues** — [pdn-bbs #91](https://github.com/packet-net/pdn-bbs/issues/91) (make port refs robust: picker / accept names / don't silent-drop), [packet.net #664](https://github.com/packet-net/packet.net/issues/664) (`ObjectDisposedException` on KISS-TCP reconnect), [packet.net #665](https://github.com/packet-net/packet.net/issues/665) (don't default to the first port). Also worth checking why the 2m/6m KISS-TCP links (8910/8913) were flapping — were those TNCs/radios attached?
-4. **Re-attempt** (after the above): fresh `freeze → … → connect-test → golive → validate`. `connect-test` reminder: importer skipped GB7BEX (no `F_BBS` user in linmail.cfg) though it's an active RF partner; add it if wanted.
+4. **Re-attempt** (after the above): fresh `freeze → … → connect-test → golive → validate`. For `connect-test`, use the **Partner reference** above — numeric Dial ports, EI5IYB→EI0RSI, and the M9YYY / skipped-import / NET-ROM-alias flags.
