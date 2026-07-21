@@ -114,14 +114,7 @@ public static class ConnectScript
                 }
 
                 target = open;
-                string? openPort = string.IsNullOrWhiteSpace(step.Port) ? null : step.Port.Trim();
-                if (openPort is not null && !openPort.All(char.IsAsciiDigit))
-                {
-                    warnings.Add($"connect step {i + 1}: port \"{openPort}\" is not numeric — ignored");
-                    openPort = null;
-                }
-
-                port = openPort;
+                port = string.IsNullOrWhiteSpace(step.Port) ? null : step.Port.Trim();
                 continue;
             }
 
