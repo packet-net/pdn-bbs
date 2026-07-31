@@ -18,7 +18,9 @@
 # PHASES (run in order; check each result before the next):
 #   preflight  read-only: assert everything is staged + reachable + the held config is
 #              correct (forwarding HELD, housekeeping >= BPQ MaxAge). Changes nothing.
-#   freeze     stop LinBPQ on the old box -> GB7RDG off-air, mail files frozen.
+#   freeze     stop + DISABLE LinBPQ on the old box -> GB7RDG off-air, mail files frozen, and it
+#              cannot return on a reboot to dual-claim. Then restart kissproxy (the 8910-8913 KISS
+#              bridge) now LinBPQ has let go, so the CT meets a clean bridge at `network`.
 #   sync       pull the FROZEN dump (atomic) -> rebuild bbs.db -> load into the CT (HELD).
 #   baseline   snapshot the held mailbox + node state (for `validate` to diff). Run after sync.
 #   network    WireGuard handover (CT inherits 10.66.66.6, auto-rollback on failure) +
@@ -56,6 +58,7 @@ BPQ_SSH="${BPQ_SSH:-tf@gb7rdg-node}"          # sudo-capable login on the old no
 BPQ_SUDO="${BPQ_SUDO:-sudo}"                  # how to escalate there
 BPQ_DIR="${BPQ_DIR:-/opt/oarc/bpq}"           # BPQMail data dir (DIRMES/WFBID/Mail/linmail)
 BPQ_SERVICE="${BPQ_SERVICE:-linbpq}"          # the systemd unit (mail engine + node)
+KISSPROXY_SERVICE="${KISSPROXY_SERVICE:-kissproxy}"  # serial<->TCP KISS bridge (8910-8913); BOTH nodes dial it
 BPQ_WG_IFACE="${BPQ_WG_IFACE:-wg0}"           # the WireGuard iface that holds 10.66.66.6
 WG_ADDR="${WG_ADDR:-10.66.66.6}"              # the wg address the CT must inherit
 WG_PROBE="${WG_PROBE:-10.66.66.10}"           # a known-LIVE AXUDP peer to ping (GB7NDH)
@@ -276,13 +279,17 @@ preflight)
   ct "command -v wg-quick >/dev/null" && ok "CT has wireguard-tools" || die "CT lacks wireguard-tools (apt-get install -y wireguard-tools in the CT)"
   ct "test -c /dev/net/tun" && ok "CT has /dev/net/tun" || die "CT lacks /dev/net/tun — wg inherit will fail"
   ct "curl -s -m5 -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/healthz" | grep -qx 200 && ok "CT node healthy" || warn "CT node /healthz not 200"
-  ct "dpkg -l packetnet | tail -1 | awk '{print \\\$3}'" | grep -qE '^([1-9][0-9]*\.|0\.(2[2-9]|[3-9][0-9]))' && ok "CT node >= 0.22.0" || warn "CT node version may be below 0.22.0"
-  # connect-test AUTHORS v2 structured connect scripts (docs/connect-script-v2.md) — needs pdn-bbs >= 0.2.52.
+  # VERSION FLOOR — the connect-script port must survive end to end as a port NAME (e.g. hf-40m):
+  #   pdn-bbs < 0.2.53 drops a non-numeric port to null (ConnectScript.cs) — the attempt-2 misroute;
+  #   node    < 0.36.2 resolves ports 1-indexed only (SupervisorRhpGateway.ResolvePortId) and rejects
+  #                    a name outright. Both legs are required, so both are hard gates (die, not warn).
+  nodev="$(ct "dpkg -l packetnet | tail -1 | awk '{print \\\$3}'")"
   bbsv="$(ct "dpkg -l pdn-bbs | tail -1 | awk '{print \\\$3}'")"
   if command -v dpkg >/dev/null 2>&1; then
-    dpkg --compare-versions "$bbsv" ge 0.2.52 && ok "CT pdn-bbs $bbsv >= 0.2.52 (connect scripts v2)" || die "CT pdn-bbs $bbsv below 0.2.52 — connect scripts v2 (structured steps) is required to author partner scripts in connect-test; install the current pdn-bbs in the CT"
+    dpkg --compare-versions "$nodev" ge 0.36.2 && ok "CT node $nodev >= 0.36.2 (resolves port ids by name)" || die "CT node $nodev below 0.36.2 — it cannot resolve a connect-script port NAME (needs #668); install packetnet 0.36.2+ in the CT"
+    dpkg --compare-versions "$bbsv" ge 0.2.53 && ok "CT pdn-bbs $bbsv >= 0.2.53 (passes the port verbatim)" || die "CT pdn-bbs $bbsv below 0.2.53 — it silently drops a non-numeric connect-script port (the attempt-2 misroute, #91); install pdn-bbs 0.2.53+ in the CT"
   else
-    warn "no local dpkg to version-compare; CT pdn-bbs reports $bbsv — ensure it is >= 0.2.52 (connect scripts v2)"
+    warn "no local dpkg to version-compare; CT reports node $nodev / pdn-bbs $bbsv — ensure node >= 0.36.2 and pdn-bbs >= 0.2.53"
   fi
   [[ -f "$TAILSCALE_KEY" ]] && ok "tailscale auth key staged (optional)" || warn "no tailscale key at $TAILSCALE_KEY — tailscale join skipped (M7TAW is dead -> non-blocking)"
   note "PREFLIGHT done. If all [ok], proceed: cutover-gb7rdg.sh freeze"
@@ -296,6 +303,21 @@ freeze)
   # is briefly "deactivating" before "inactive". Wait it out (up to ~40s) rather than checking once.
   for _i in $(seq 1 20); do bpq_inactive && break; sleep 2; done
   bpq_inactive && ok "LinBPQ stopped; GB7RDG off-air, mail frozen" || die "LinBPQ still active after 40s — STOP before continuing"
+  # DISABLE it too: a stop alone survives only until the old box reboots, after which LinBPQ would
+  # come back and dual-claim GB7RDG against the CT. `abort` re-enables it.
+  bpq "systemctl disable $BPQ_SERVICE" >/dev/null 2>&1 || true
+  bpq "systemctl is-enabled $BPQ_SERVICE 2>/dev/null || true" | grep -qx disabled \
+    && ok "LinBPQ disabled (will not return on reboot)" || warn "could not confirm $BPQ_SERVICE is disabled — check before 'network'"
+  # RESTART kissproxy now that LinBPQ has let go of it. kissproxy (8910-8913) is the serial<->TCP KISS
+  # bridge both nodes dial; LinBPQ's client sessions have just dropped, and a stale/half-open session
+  # on its side is the prime suspect for the 8910/8913 flapping seen at attempt 2. Restarting here —
+  # after LinBPQ is down, before the CT connects at `network` — hands the CT a clean bridge.
+  bpq "systemctl restart $KISSPROXY_SERVICE" || true
+  for _i in $(seq 1 15); do bpq "ss -ltn | grep -qE '0\.0\.0\.0:8910'" && break; sleep 2; done
+  bpq "systemctl is-active $KISSPROXY_SERVICE" | grep -qx active \
+    && ok "kissproxy restarted (clean bridge for the CT)" || die "$KISSPROXY_SERVICE not active after restart — the CT cannot reach the radios; fix before 'network'"
+  bpq "ss -ltn | grep -qE '0\.0\.0\.0:8910'" \
+    && ok "kissproxy listening on 0.0.0.0:8910 (CT-reachable)" || die "kissproxy not listening on 8910 after restart — fix before 'network'"
   ok "Next: cutover-gb7rdg.sh sync"
   ;;
 
@@ -486,8 +508,12 @@ chown packetnet:packetnet $BBS_STATE/bbs.db"
   # 2) Drop the CT's wg and VERIFY it is down before re-arming the old node (no dual-claim).
   ct "wg-quick down wg0 2>/dev/null || true"
   ct "wg show wg0 2>/dev/null | grep -q interface" && die "CT wg STILL up — refusing to raise old wg (would dual-claim $WG_ADDR). Fix the CT first." || ok "CT wg down"
-  # 3) Old box back on-air.
+  # 3) Old box back on-air. Re-ENABLE first (freeze disabled it so a reboot could not dual-claim) —
+  #    otherwise the restored node would silently not survive the next reboot of the old box.
   bpq "wg-quick up $BPQ_WG_IFACE 2>/dev/null || true"
+  bpq "systemctl enable $BPQ_SERVICE" >/dev/null 2>&1 || true
+  bpq "systemctl is-enabled $BPQ_SERVICE 2>/dev/null || true" | grep -qx enabled \
+    && ok "LinBPQ re-enabled (survives reboot)" || warn "could not confirm $BPQ_SERVICE is enabled — re-enable by hand"
   bpq "systemctl start $BPQ_SERVICE"; sleep 3
   bpq "systemctl is-active $BPQ_SERVICE" | grep -qx active && ok "old LinBPQ back on-air" || warn "old LinBPQ did not restart — investigate"
   rm -f "$SYNC_MARKER"

@@ -1,6 +1,10 @@
 # GB7RDG cutover — state of play
 
-**Banked:** 2026-07-01 · **Re-prepped:** 2026-07-20 · **Attempt 2 — ROLLED BACK 2026-07-21.** Ran `freeze→sync→baseline→network→verify` clean; at the pre-`golive` hold a test-connect dialled on the wrong RF port, so `abort` was run. **Root cause VERIFIED** (see Attempt-2 note): a connect-script Dial `port` of `hf-40m` (a name) is non-numeric → dropped → the node dialled the *first* port (vhf-2m) instead of 40m; correct value is `3`. **GB7RDG is live again on LinBPQ; the CT is held; no dual-claim; no mail moved (`golive` never reached).** Fix the port values + address the filed issues, then re-cut fresh from `freeze`.
+**Banked:** 2026-07-01 · **Attempt 2 — ROLLED BACK 2026-07-21** · **Re-prepped for attempt 3: 2026-07-31.**
+
+Attempt 2 ran `freeze→sync→baseline→network→verify` clean; at the pre-`golive` hold a test-connect dialled on the wrong RF port, so `abort` was run. **Root cause VERIFIED** (see Attempt-2 note): a connect-script Dial `port` of `hf-40m` (a name) was non-numeric → dropped to null → the node dialled the *first* port (vhf-2m) instead of 40m. **GB7RDG is live on LinBPQ; the CT is held; no dual-claim; no mail moved (`golive` never reached).**
+
+**Attempt-3 prep DONE (2026-07-31):** CT restaged to **node 0.36.2 + pdn-bbs 0.2.53** (the pair that carries a port **name** end to end), `preflight` re-run **GREEN**, and `freeze` now also **disables** LinBPQ and **restarts kissproxy**. Ready for `freeze` on Tom's go.
 
 Living operational snapshot of the in-progress GB7RDG LinBPQ→pdn cutover. Read alongside [`cutover-gb7rdg.md`](cutover-gb7rdg.md) (the runbook) and [`cutover-gb7rdg-attempt1.md`](cutover-gb7rdg-attempt1.md) (attempt-1 retrospective + the corrected diagnosis). Update this in place as phases complete.
 
@@ -8,8 +12,8 @@ Living operational snapshot of the in-progress GB7RDG LinBPQ→pdn cutover. Read
 
 Attempt 2 ran `preflight ✅ → freeze ✅ → sync ✅ → baseline ✅ → network ✅ → verify ✅`, then **`abort` ✅ — rolled back to LinBPQ** at the pre-`golive` hold. `connect-test` / `golive` / `validate` were NOT reached. A re-attempt starts fresh from `freeze`.
 
-- **CT 129 (`gb7rdg.lan` / 10.45.0.87) is staged**: `packetnet` **0.35.0** + `pdn-bbs` **0.2.52** installed (canonical release debs, checksum-verified). Node held — all 7 ports `enabled=false` (4 RF + 3 AXUDP), `oarc.enabled=false`, healthz 200. Off-air; no dual-claim. Node 0.35.0 pulls a new `libhamlib-utils` dependency (resolved by `apt-get -f install`) and migrates the persisted config schema **v1→v2** on first start; the held `schemaVersion: 1` YAML was re-imported cleanly under 0.35.0 (validated — so `network`'s `ct_apply` import is de-risked).
-- **`preflight` GREEN** (re-confirmed 2026-07-20 on node 0.35.0): all `[ok]`, one expected non-blocking warning (no tailscale key — M7TAW is dead).
+- **CT 129 (`gb7rdg.lan` / 10.45.0.87) is staged**: `packetnet` **0.36.2** + `pdn-bbs` **0.2.53** installed 2026-07-31 (canonical release debs, SHA256-verified). Node held — all 7 ports `enabled=false` (4 RF + 3 AXUDP), `oarc.enabled=false`, healthz 200, forwarding HELD in the log. Off-air; no dual-claim. Config store is on schema **v2**, loaded clean (`callsign GB7RDG, 7 port(s)`), no errors on restart. The node's live port ids read back as **`vhf-2m, uhf-70cm, hf-40m, vhf-6m, axudp-10093, axudp-10094, axudp-10095`** — these are exactly the strings the Dial `port` takes (see Partner reference).
+- **`preflight` GREEN** (re-run 2026-07-31 on node 0.36.2 / pdn-bbs 0.2.53): all `[ok]`, one expected non-blocking warning (no tailscale key — M7TAW is dead). `preflight` now **hard-gates** node ≥ 0.36.2 and pdn-bbs ≥ 0.2.53 (it previously allowed ≥ 0.22.0 / ≥ 0.2.52, which is how the wrong pair got staged).
 - **GB7RDG is live on LinBPQ again** (`gb7rdg-node`, 10.45.0.121; `linbpq` active, `wg0` up as `10.66.66.6` with a fresh handshake). **The CT (129) is held** — all 7 ports `enabled=false`, `forwarding_master=0`, all partners disabled, `bbs.db.pre-cutover` restored, CT wg down (0 interfaces). **Single identity, no dual-claim.** Attempt 2 reached the pre-`golive` hold (mailbox had rebuilt fresh: 190 msgs, **0 orphan headers**) but **no mail ever forwarded** (`golive` not reached) — LinBPQ's mailbox is intact.
 - **Attempt-2 root cause (2026-07-21, VERIFIED):** a **connect-script port-config error**, plus an unstable transport that hid it. The GB7CIP test-connect Dial step was `{"open":"GB7WEM-7","port":"hf-40m"}`. The Dial `port` field requires a **1-indexed numeric** port label; `hf-40m` (a port *name*) is silently dropped to null (pdn-bbs `ConnectScript.cs:117-124`), and the node then dials on the **first** configured port = `vhf-2m` (packet.net `SupervisorRhpGateway.cs:77-82`). Confirmed on the wire: the connect ran **80.07 s** = vhf-2m's `T1 4000 ms × N2 20` (hf-40m would be 56 s). So the dial was **misrouted to 2m** — the monitor showing `vhf-2m` was *correct*, not a display bug (an earlier hypothesis of mine, retracted). The correct value is **`3`** (= hf-40m, 3rd configured port; matches LinBPQ's `C 3 !GB7WEM-7`). Separately, the vhf-2m/vhf-6m KISS-TCP links (8910/8913) were flapping and the ACKMODE pacer faulted with `ObjectDisposedException` on the disposed `KissTcpClient` (`PacingKissModem`), so the misrouted 2m dial never reliably reached the air (zero 2m TX in the collector; 2m radio didn't key — the HF PTT the operator saw was concurrent *inbound* sessions on hf-40m). Issues filed: [pdn-bbs #91](https://github.com/packet-net/pdn-bbs/issues/91) (port-reference UX), [packet.net #664](https://github.com/packet-net/packet.net/issues/664) (ObjectDisposedException-on-reconnect), [packet.net #665](https://github.com/packet-net/packet.net/issues/665) (node silently defaults to the first port). **All three are now FIXED + released (2026-07-21):** node-v0.36.1 (#664 pacing retry, #665 no silent first-port, #91 accept port ids) + pdn-bbs 0.2.53 (pass the port verbatim). The Dial `port` now takes a port **name** (GB7WEM-7/GB7CIP = `hf-40m`) — see the Partner reference below. **Before re-attempt:** stage node-v0.36.1 + pdn-bbs 0.2.53, set Dial ports to names, re-cut fresh from `freeze`.
 
@@ -20,7 +24,7 @@ The cutover is driven from **studybox (the primary working host), NOT `claude-co
 - **Script**: `~/src/pdn-bbs/scripts/cutover-gb7rdg.sh` (this repo; also on GitHub).
 - **`STAGE_DIR` = `~/gb7rdg-cutover/`** (local), containing:
   - `packetnet.yaml` + `bbs.yaml` — the authoritative **held** config (node ports/oarc HELD; bbs forwarding HELD + housekeeping 365/60). Originally authored on claude-code; now local.
-  - `debs/node/packetnet_0.26.0_amd64.deb`, `debs/bbs/pdn-bbs_0.2.52_amd64.deb` (+ SHA256SUMS) — from GitHub releases, verified.
+  - `debs/node/packetnet_0.36.2_amd64.deb`, `debs/bbs/pdn-bbs_0.2.53_amd64.deb` (+ SHA256SUMS) — from GitHub releases, SHA256-verified (2026-07-31). The superseded `packetnet_0.26.0_amd64.deb` is still present but is **not** the staged version.
   - `reference/` — `GAP-ANALYSIS.md`, `ANALYSIS.md`, `bpq32.cfg` (2026-06-11 snapshot), `gb7rdg-migration.md`, `gb7rdg-loadtest-reset.md`.
   - `.cutover-work/` — created **fresh** per run by the script (do NOT reuse claude-code's stale attempt-1 `.cutover-work`).
 - **Toolchain**: .NET 10 SDK (10.0.109) present; `sync`'s BPQ importer (`tools/Bbs.Import.Bpq` → `bpq-import.dll`) builds + runs here.
@@ -51,15 +55,15 @@ GB7LOX (the other attempt-1 multi-hop) shows zero 24h traffic → inactive. AXUD
 - **AXUDP peer set CONFIRMED CURRENT** (2026-07-21): the held config's AXUDP peers match the live `gb7rdg-node:/etc/bpq32.cfg` port-8 (`PORTNUM=8`, `DRIVER=BPQAXIP`) active MAP entries exactly — GB7OUK/MB7NPW/GB7BDH (UDP 10094), GB7NDH (10095), M7TAW (10093); the commented-out `M0LTE-9`/`MB7NGP`/`M0LTE-3` are correctly omitted. No reconciliation needed. (A 2026-07-20 note here wrongly claimed "no MAP lines" — it grepped `/opt/oarc/bpq/bpq32.cfg`, which does not exist; the real node config is **`/etc/bpq32.cfg`**. `/opt/oarc/bpq` is the BPQMail *data* dir — the script's `BPQ_DIR`, used by `sync` for DIRMES/WFBID/linmail.cfg/Mail, not the node config.)
 - `golive` is the point of no return (one-way; typed `GB7RDG GO`, ≥1 partner enabled). `abort` is valid only before `golive`. A re-cut always starts fresh from `freeze`.
 
-## Resume from here (studybox) — attempt 2 rolled back; re-attempt after offline testing
+## Resume from here (studybox) — attempt 3 is prepped and green
 
-GB7RDG is live on LinBPQ; the CT is held. Do NOT re-cut until the RF/port-mapping symptom (above) is resolved offline. A re-attempt is a fresh run from `freeze` (never reuse a stale sync):
+GB7RDG is live on LinBPQ; the CT is held, restaged (node 0.36.2 / pdn-bbs 0.2.53) and `preflight`-green as of 2026-07-31. A re-attempt is a fresh run from `freeze` (never reuse a stale sync):
 
 ```sh
 cd ~/src/pdn-bbs
 bash scripts/cutover-gb7rdg.sh status          # where both nodes stand
-bash scripts/cutover-gb7rdg.sh preflight       # re-confirm green before any re-attempt
-# then, only once the port issue is fixed + on explicit go:
+bash scripts/cutover-gb7rdg.sh preflight       # re-confirm green on the day
+# then, on explicit go — freeze also disables LinBPQ + restarts kissproxy:
 CUTOVER_YES=1 bash scripts/cutover-gb7rdg.sh freeze
 # … sync → baseline → network → verify → connect-test → golive → validate
 ```
@@ -68,7 +72,7 @@ Env defaults already match this deployment (PVE `root@10.45.0.10`, CTID 129, `tf
 
 ## Partner reference (verified 2026-07-21 — for the next `connect-test`)
 
-> **Port handling changed the same day — all three bugs fixed + released.** The Dial `port` is now a **pdn port id (name)**, matched case-insensitively against the node's configured port ids (node-v0.36.x `SupervisorRhpGateway.ResolvePortId`); a bad value gives a visible `No such port 'X' (<list>)`, and a null port errors on an outbound dial — no more silent misroute. **So use the port NAME (`hf-40m`)** — what was originally typed. The earlier "use numeric `3`" applied only to node ≤0.35.0 and is superseded. **Stage `node-v0.36.1` + `pdn-bbs 0.2.53`** for the re-attempt (they carry the [#664](https://github.com/packet-net/packet.net/issues/664) / [#665](https://github.com/packet-net/packet.net/issues/665) / #91 fixes).
+> **Port handling changed the same day — all three bugs fixed + released.** The Dial `port` is now a **pdn port id (name)**, matched case-insensitively against the node's configured port ids (node-v0.36.x `SupervisorRhpGateway.ResolvePortId`); a bad value gives a visible `No such port 'X' (<list>)`, and a null port errors on an outbound dial — no more silent misroute. **So use the port NAME (`hf-40m`)** — what was originally typed. The earlier "use numeric `3`" applied only to node ≤0.35.0 and is superseded. **Stage `node-v0.36.2` + `pdn-bbs 0.2.53`** for the re-attempt. ⚠️ **`node-v0.36.1` is NOT enough** — 0.36.1 carries [#664](https://github.com/packet-net/packet.net/issues/664) + [#665](https://github.com/packet-net/packet.net/issues/665) only; the port-**name** resolution (#91/[#668](https://github.com/packet-net/packet.net/pull/668)) landed in **0.36.2**, whose `ResolvePortId` matches port ids case-insensitively (0.36.1's is `int.TryParse` 1..N and rejects `hf-40m` outright).
 
 Re-checked against the live `gb7rdg-node:/opt/oarc/bpq/linmail.cfg` + `/etc/bpq32.cfg`. Translate each BPQ port number to its pdn port **id**:
 
@@ -104,9 +108,20 @@ Decisions for the re-attempt:
 - **NET/ROM-alias partners** (GB7NDH `NDHBBS`, GB7MNK, GB7BRK-via-GB7WOD): the RHP `open` is direct-AX.25-on-a-port, **not** NET/ROM-routed — these need a NET/ROM connect approach worked out in test-connect, not a plain port dial.
 - GB7BEX is `en=0` (disabled) in BPQ — not a forwarding partner either direction (supersedes the earlier "add GB7BEX" note).
 
-## Immediate next actions
+## Attempt-3 prep (2026-07-31) — DONE
 
-1. **ROLLED BACK** — GB7RDG live on LinBPQ, CT held, no mail moved. Nothing running on the node right now.
-2. **Fix the connect-script Dial ports** — each partner's `port` must be a **1-indexed numeric** label (GB7WEM-7/GB7CIP = `3`), not a port name. Verified root cause of the abort (see Attempt-2 note).
-3. **Filed issues — all FIXED + released 2026-07-21:** [pdn-bbs #91](https://github.com/packet-net/pdn-bbs/issues/91) → pdn-bbs 0.2.53 (port passed verbatim); [packet.net #664](https://github.com/packet-net/packet.net/issues/664) (pacing retry on reconnect), [packet.net #665](https://github.com/packet-net/packet.net/issues/665) (no silent first-port), #91/#668 (accept port ids) → node-v0.36.1. Still worth checking why the 2m/6m KISS-TCP links (8910/8913) were flapping — were those TNCs/radios attached?
-4. **Re-attempt** (after the above): fresh `freeze → … → connect-test → golive → validate`. For `connect-test`, use the **Partner reference** above — numeric Dial ports, EI5IYB→EI0RSI, and the M9YYY / skipped-import / NET-ROM-alias flags.
+1. **CT restaged** to node **0.36.2** + pdn-bbs **0.2.53** (debs downloaded to `$STAGE_DIR/debs/{node,bbs}`, SHA256-verified, installed together). Came back held: 7 ports `enabled=false`, forwarding HELD, healthz 200, schema v2, no errors.
+2. **`preflight` re-run GREEN** on the new pair, and its version gates raised to node ≥ 0.36.2 / pdn-bbs ≥ 0.2.53 (hard `die`, not `warn`) so the wrong pair cannot be staged again.
+3. **`freeze` hardened** (Tom's call, 2026-07-31) — it now, after LinBPQ is confirmed inactive:
+   - **`systemctl disable linbpq`** — a stop alone survives only to the next reboot of the old box, after which LinBPQ would return and dual-claim GB7RDG. `abort` re-enables it (added to the abort path too).
+   - **`systemctl restart kissproxy`** — kissproxy (8910-8913) is the serial↔TCP KISS bridge *both* nodes dial. Suspected latent connection bug: LinBPQ's client sessions have just dropped, and a stale/half-open session on kissproxy's side is the prime suspect for the 8910/8913 flapping at attempt 2. Restarting after LinBPQ is down and before the CT connects at `network` hands the CT a clean bridge. Verified active + listening on `0.0.0.0:8910` before the phase returns.
+4. **Dial ports are port NAMES** (`hf-40m`, `uhf-70cm`, …) — confirmed against the node's live port ids. The earlier "1-indexed numeric" instruction is **superseded**; do not use numbers.
+
+## Still open going into attempt 3
+
+- **Why were the 2m/6m KISS-TCP links (8910/8913) flapping?** Not root-caused. #664 fixed the *symptom* (the pacer's `ObjectDisposedException` on a disposed `KissTcpClient`); nobody established why the links dropped in the first place, or whether those TNCs/radios were even attached. The `freeze` kissproxy restart is a precaution against a latent kissproxy-side connection bug, **not** a diagnosis. Watch 8910/8913 closely at `network`/`verify`.
+- **Filed issues — all FIXED + released 2026-07-21:** [pdn-bbs #91](https://github.com/packet-net/pdn-bbs/issues/91) → pdn-bbs 0.2.53 (port passed verbatim); [packet.net #664](https://github.com/packet-net/packet.net/issues/664) (pacing retry on reconnect) + [#665](https://github.com/packet-net/packet.net/issues/665) (no silent first-port) → node-v0.36.1; #91/[#668](https://github.com/packet-net/packet.net/pull/668) (accept port ids by name) → **node-v0.36.2**.
+
+## Next action
+
+**Re-attempt = a fresh run from `freeze`** (never reuse a stale `sync`), then `sync → baseline → network → verify → connect-test → golive → validate`. For `connect-test`, use the **Partner reference** above — port **names**, EI5IYB→EI0RSI, plus the M9YYY / skipped-import / NET-ROM-alias flags.
