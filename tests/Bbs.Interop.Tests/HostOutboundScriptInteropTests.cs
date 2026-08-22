@@ -28,9 +28,14 @@ public class HostOutboundScriptInteropTests
         await using ComposedInteropHost host = await ComposedInteropHost.StartAsync("""
             partners:
               - call: GB7BPQ
+                # Structured v2 steps. The flat form ("- C GB7BPQ") is retired, and
+                # ConnectScriptYamlConverter degrades a script containing ANY scalar step to blank,
+                # which silently makes the partner inbound-only so the scheduler never dials.
+                # No expect before the verb: BPQ's node prompt is not >-shaped, so the post-script
+                # terminal waits for the FBB SID instead of guessing a prompt.
                 connectScript:
-                  - C GB7BPQ
-                  - BBS
+                  - open: GB7BPQ
+                  - send: BBS
                 sendImmediately: true
                 at: [GB7BPQ]
             """);
