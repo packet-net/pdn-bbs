@@ -29,13 +29,16 @@ public class HostInboundForwardingInteropTests
 
         // Partner records under both spellings the oracle may present on the dial
         // (its own logs strip SSIDs inbound — README delta 8 — so don't bet on one).
-        // enabled: false keeps the host's own scheduler quiet; inbound is unaffected.
+        // Both partners are ENABLED and carry no connectScript. A script with no open step is
+        // inbound-only (ConnectPlan.IsInboundOnly), so the scheduler never dials them, which is
+        // what this test wanted from the original `enabled: false`. That spelling stopped working
+        // when the per-partner gate became bidirectional: FbbSessionRunner now REFUSES an inbound
+        // FBB session from a configured-but-disabled partner, so the host greeted and then declined
+        // to forward, and the oracle waited out the deadline holding an unanswered FA proposal.
         await using ComposedInteropHost host = await ComposedInteropHost.StartAsync("""
             partners:
               - call: GB7BPQ
-                enabled: false
               - call: GB7BPQ-1
-                enabled: false
             """);
 
         // Listen as PDNBBS-1 BEFORE posting, so the oracle's first ~2 s dial finds us.
