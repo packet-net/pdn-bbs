@@ -86,7 +86,9 @@ chmod 0755 "$stage/DEBIAN/postinst"
 echo "==> build .deb"
 mkdir -p "$root/artifacts"
 # --root-owner-group (dpkg >= 1.19): root:root files without fakeroot.
-dpkg-deb --build --root-owner-group "$stage" "$out"
+# -Zxz: pin xz - dpkg-deb's zstd default (dpkg >= 1.21.18) can't be unpacked by
+# Debian Bullseye's dpkg, so a zstd .deb refuses to install there.
+dpkg-deb --build --root-owner-group -Zxz "$stage" "$out"
 
 echo "==> built $out"
 dpkg-deb --info "$out"
