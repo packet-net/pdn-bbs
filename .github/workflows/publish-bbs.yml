@@ -69,3 +69,25 @@ jobs:
             --repo "${{ github.repository }}" \
             --title "pdn-bbs v${VERSION}" \
             --notes "Packet-radio BBS app package for the Packet.NET node (pdn) ${VERSION} — self-contained \`.deb\`s for amd64 / arm64 / armhf. Install on a box that already runs the packetnet node host: \`sudo apt install ./pdn-bbs_${VERSION}_<arch>.deb\` (no .NET runtime required); the BBS lands under /usr/share/packetnet/apps/bbs and you enable it from the node control panel. State (bbs.db, bbs.yaml) lives in /var/lib/packetnet/apps/bbs and is preserved across upgrades."
+
+      - name: Tell the apt repo to rebuild
+        # Last, and only after gh release create has succeeded: packet-net/apt indexes whatever
+        # is on releases/latest when it runs, so dispatching before the assets exist would just
+        # make it re-index the previous release.
+        #
+        # A HARD requirement, not fire-and-forget (Tom, 2026-09-18): if this repo cannot tell
+        # packet-net/apt about the release, the build fails rather than shipping quietly with
+        # apt left stale until its next scheduled rebuild.
+        env:
+          GH_TOKEN: ${{ secrets.APT_DISPATCH_TOKEN }}
+          TAG: v${{ steps.v.outputs.version }}
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::error::APT_DISPATCH_TOKEN is not visible to this repo - cannot notify packet-net/apt"
+            exit 1
+          fi
+          # gh api --input - with a JSON body, not -f client_payload[...]=...: gh's -f does not
+          # do curl-style bracket nesting, so the nested object has to arrive as JSON.
+          payload=$(printf '{"event_type":"release-published","client_payload":{"repo":"%s","tag":"%s"}}' \
+            "$GITHUB_REPOSITORY" "$TAG")
+          printf '%s' "$payload" | gh api -X POST repos/packet-net/apt/dispatches --input -
