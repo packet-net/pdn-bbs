@@ -1,5 +1,6 @@
 using System.Text;
 using Bbs.Core;
+using Bbs.Fbb;
 using Bbs.Mime;
 using MailKit.Net.Smtp;
 using MimeKit;

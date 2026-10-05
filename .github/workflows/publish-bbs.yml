@@ -33,6 +33,7 @@ jobs:
     runs-on: [self-hosted, Linux, X64]
     permissions:
       contents: write
+      actions: write # to dispatch nuget.yml
     steps:
       - uses: actions/checkout@v4
 
@@ -59,13 +60,22 @@ jobs:
             scripts/build-deb.sh "$rid" "$VERSION"
           done
 
+      # Packet.Bbs.Fbb, the FBB forwarding library (src/Bbs.Fbb), versioned with the release.
+      - name: Pack Packet.Bbs.Fbb
+        env:
+          VERSION: ${{ steps.v.outputs.version }}
+        run: |
+          set -euo pipefail
+          dotnet pack src/Bbs.Fbb/Bbs.Fbb.csproj -c Release -o artifacts -p:Version="$VERSION"
+          test -f "artifacts/Packet.Bbs.Fbb.${VERSION}.nupkg"
+
       - name: Checksum + create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ steps.v.outputs.version }}
         run: |
-          ( cd artifacts && sha256sum pdn-bbs_*.deb > SHA256SUMS && ls -l pdn-bbs_*.deb SHA256SUMS )
-          gh release create "v${VERSION}" artifacts/pdn-bbs_*.deb artifacts/SHA256SUMS \
+          ( cd artifacts && sha256sum pdn-bbs_*.deb Packet.Bbs.Fbb.*.nupkg > SHA256SUMS && ls -l pdn-bbs_*.deb Packet.Bbs.Fbb.*.nupkg SHA256SUMS )
+          gh release create "v${VERSION}" artifacts/pdn-bbs_*.deb artifacts/Packet.Bbs.Fbb.*.nupkg artifacts/SHA256SUMS \
             --repo "${{ github.repository }}" \
             --title "pdn-bbs v${VERSION}" \
             --notes "Packet-radio BBS app package for the Packet.NET node (pdn) ${VERSION} — self-contained \`.deb\`s for amd64 / arm64 / armhf. Install on a box that already runs the packetnet node host: \`sudo apt install ./pdn-bbs_${VERSION}_<arch>.deb\` (no .NET runtime required); the BBS lands under /usr/share/packetnet/apps/bbs and you enable it from the node control panel. State (bbs.db, bbs.yaml) lives in /var/lib/packetnet/apps/bbs and is preserved across upgrades."
@@ -91,3 +101,12 @@ jobs:
           payload=$(printf '{"event_type":"release-published","client_payload":{"repo":"%s","tag":"%s"}}' \
             "$GITHUB_REPOSITORY" "$TAG")
           printf '%s' "$payload" | gh api -X POST repos/packet-net/apt/dispatches --input -
+
+      # The NuGet push lives in nuget.yml, which nuget.org's trusted publishing policy names, and
+      # pushes the .nupkg attached to this release. Dispatching it (GITHUB_TOKEN may trigger a
+      # workflow_dispatch) keeps the OIDC login out of this job.
+      - name: Push Packet.Bbs.Fbb to nuget.org
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: v${{ steps.v.outputs.version }}
+        run: gh workflow run nuget.yml --repo "$GITHUB_REPOSITORY" --ref main -f tag="$TAG"

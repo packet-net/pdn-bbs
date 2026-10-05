@@ -12,6 +12,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\Bbs.Core\Bbs.Core.csproj" />
+    <ProjectReference Include="..\Bbs.Fbb\Bbs.Fbb.csproj" />
   </ItemGroup>
 
 </Project>

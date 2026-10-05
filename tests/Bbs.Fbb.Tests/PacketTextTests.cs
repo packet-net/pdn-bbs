@@ -1,7 +1,6 @@
 using System.Text;
-using Bbs.Core;
 
-namespace Bbs.Core.Tests;
+namespace Bbs.Fbb.Tests;
 
 /// <summary>
 /// Unit tests for <see cref="PacketText"/> — the header-text codec for FBB B1

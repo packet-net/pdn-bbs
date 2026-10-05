@@ -50,6 +50,12 @@ When the node finds the same app `id` under both roots, **the later root wins** 
 
 Neither the `.deb` nor `scripts/deploy-bbs.sh` touches `/var/lib` — they only install code under `/usr/share`, and `/var/lib` is left entirely to state (`bbs.db`, `bbs.yaml`, `*.db-wal`/`*.db-shm`). The one box that had the old hand-staged layout (the lab) was migrated off it **once, by hand**: strip exactly `pdn-bbs` + `pdn-app.yaml` from `/var/lib/packetnet/apps/bbs/`, keep the state. After that `/usr/share` is authoritative and every future `.deb` upgrades the code in place. (This is a one-off, not codified — a normal install is `/usr/share`-only from the start.)
 
+## The NuGet package: Packet.Bbs.Fbb
+
+Every release also carries `Packet.Bbs.Fbb.<version>.nupkg`, the FBB forwarding library (`src/Bbs.Fbb`, namespace `Bbs.Fbb`) packed at the release's version, and pushes it to nuget.org so other programs (pdn-mailcast first) can forward FBB mail without copying the code. `Bbs.Fbb` references nothing else in this repo, so the package has no dependencies; `PacketText`, the header text codec it shares with `Bbs.Mime` and `Bbs.Smtp`, lives in it for that reason. The `test` job packs it on every PR and fails if it ever grows a dependency.
+
+Both release paths below pack it, attach it to the GitHub Release (and to `SHA256SUMS`), then dispatch `.github/workflows/nuget.yml`, which downloads the `.nupkg` from the release and pushes it with NuGet trusted publishing (OIDC, as the nuget.org user `tomf84`), so there is no API key anywhere. nuget.org's trusted publishing policy names that workflow file, so keep its name. To push a release's package by hand: `gh workflow run nuget.yml -f tag=v0.3.0`.
+
 ## The three entry points
 
 ### Auto-release on merge — `.github/workflows/ci.yml` (the `release` job)

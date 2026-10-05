@@ -35,11 +35,28 @@ jobs:
       - name: Build (Release)
         run: dotnet build -c Release
       - name: Test
+        env:
+          # The host tests start many web hosts, each watching its config files through inotify.
+          # Some self-hosted runners allow only 128 inotify instances per user, which the suite
+          # runs out of; polling needs none.
+          DOTNET_USE_POLLING_FILE_WATCHER: "true"
         # Excludes BOTH heavy interop lanes from the fast PR gate: Interop (the LinBPQ oracle,
         # run in the `interop` job below) and InteropF6fbb / InteropF6fbbDebug (the canonical-F6FBB
         # VM lane, run only on demand via interop-f6fbb.yml). Those tests already skip when their rig
         # is unreachable, but excluding them here keeps this lane off the rig-probe timeout entirely.
         run: dotnet test -c Release --no-build --filter "Category!=Interop&Category!=InteropF6fbb&Category!=InteropF6fbbDebug"
+      - name: Pack Packet.Bbs.Fbb (check only)
+        # The release jobs pack it for nuget.org; this proves on every PR that it still packs and
+        # that it still has no dependency on the rest of the repo.
+        run: |
+          set -euo pipefail
+          dotnet pack src/Bbs.Fbb/Bbs.Fbb.csproj -c Release --no-build -o "$RUNNER_TEMP/pack-check" -p:Version=0.0.0-ci
+          unzip -p "$RUNNER_TEMP/pack-check/Packet.Bbs.Fbb.0.0.0-ci.nupkg" Packet.Bbs.Fbb.nuspec > "$RUNNER_TEMP/pack-check/nuspec.xml"
+          if grep -q '<dependency ' "$RUNNER_TEMP/pack-check/nuspec.xml"; then
+            echo "::error::Packet.Bbs.Fbb has package dependencies; it is meant to stand alone"
+            cat "$RUNNER_TEMP/pack-check/nuspec.xml"
+            exit 1
+          fi
 
       # Version is the single source of truth in pdn-app.yaml (`version:`) — the same field the .deb
       # stamps and pdn shows in its UI. Bump it in the PR you want released; merge → release. Don't
@@ -87,6 +104,7 @@ jobs:
     runs-on: [self-hosted, Linux, X64]
     permissions:
       contents: write
+      actions: write # to dispatch nuget.yml
     steps:
       - name: Pre-checkout — clear root-owned oracle state (self-heal interrupted runs)
         # Same root-owned docker/oracle/state hazard the other jobs guard against (see the test job):
@@ -114,14 +132,32 @@ jobs:
             scripts/build-deb.sh "$rid" "$VERSION"
           done
 
+      # Packet.Bbs.Fbb, the FBB forwarding library (src/Bbs.Fbb), versioned with the release.
+      - name: Pack Packet.Bbs.Fbb
+        env:
+          VERSION: ${{ needs.test.outputs.version }}
+        run: |
+          set -euo pipefail
+          dotnet pack src/Bbs.Fbb/Bbs.Fbb.csproj -c Release -o artifacts -p:Version="$VERSION"
+          test -f "artifacts/Packet.Bbs.Fbb.${VERSION}.nupkg"
+
       - name: Checksum + create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ needs.test.outputs.version }}
         run: |
-          ( cd artifacts && sha256sum pdn-bbs_*.deb > SHA256SUMS && ls -l pdn-bbs_*.deb SHA256SUMS )
-          gh release create "v${VERSION}" artifacts/pdn-bbs_*.deb artifacts/SHA256SUMS \
+          ( cd artifacts && sha256sum pdn-bbs_*.deb Packet.Bbs.Fbb.*.nupkg > SHA256SUMS && ls -l pdn-bbs_*.deb Packet.Bbs.Fbb.*.nupkg SHA256SUMS )
+          gh release create "v${VERSION}" artifacts/pdn-bbs_*.deb artifacts/Packet.Bbs.Fbb.*.nupkg artifacts/SHA256SUMS \
             --repo "${{ github.repository }}" \
             --target "${{ github.sha }}" \
             --title "pdn-bbs v${VERSION}" \
             --generate-notes
+
+      # The NuGet push lives in nuget.yml, which nuget.org's trusted publishing policy names, and
+      # pushes the .nupkg attached to this release. Dispatching it (GITHUB_TOKEN may trigger a
+      # workflow_dispatch) keeps the OIDC login out of this job.
+      - name: Push Packet.Bbs.Fbb to nuget.org
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.test.outputs.version }}
+        run: gh workflow run nuget.yml --repo "${{ github.repository }}" --ref main -f tag="v${VERSION}"
