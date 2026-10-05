@@ -35,6 +35,11 @@ jobs:
       - name: Build (Release)
         run: dotnet build -c Release
       - name: Test
+        env:
+          # The host tests start many web hosts, each watching its config files through inotify.
+          # Some self-hosted runners allow only 128 inotify instances per user, which the suite
+          # runs out of; polling needs none.
+          DOTNET_USE_POLLING_FILE_WATCHER: "true"
         # Excludes BOTH heavy interop lanes from the fast PR gate: Interop (the LinBPQ oracle,
         # run in the `interop` job below) and InteropF6fbb / InteropF6fbbDebug (the canonical-F6FBB
         # VM lane, run only on demand via interop-f6fbb.yml). Those tests already skip when their rig
