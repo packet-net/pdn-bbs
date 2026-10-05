@@ -28,7 +28,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\Bbs.Host\Bbs.Host.csproj" />
-    <ProjectReference Include="..\..\src\Bbs.Fbb\Bbs.Fbb.csproj" />
+    <PackageReference Include="Packet.Fbb" />
     <ProjectReference Include="..\..\src\Bbs.Core\Bbs.Core.csproj" />
     <ProjectReference Include="..\..\src\Bbs.Console\Bbs.Console.csproj" />
     <ProjectReference Include="..\..\src\Bbs.SevenPlus\Bbs.SevenPlus.csproj" />

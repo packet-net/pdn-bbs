@@ -1,7 +1,7 @@
 using System.Globalization;
 using System.Text;
 using Bbs.Core;
-using Bbs.Fbb;
+using Packet.Fbb;
 using Microsoft.Extensions.Logging;
 
 namespace Bbs.Host.Forwarding;

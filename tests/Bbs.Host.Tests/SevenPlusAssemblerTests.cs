@@ -1,7 +1,7 @@
 using System.Reflection;
 using System.Text;
 using Bbs.Core;
-using Bbs.Fbb;
+using Packet.Fbb;
 using Bbs.SevenPlus;
 
 namespace Bbs.Host.Tests;

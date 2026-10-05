@@ -8,7 +8,8 @@
 
 ```
 pdn-bbs.sln
-  src/Bbs.Fbb        the wire: lzhuf (N=2048, CRC16+len32 "e1" container), SID build/parse,
+  Packet.Fbb         (NuGet, from packet-net/pdn-fbb; was src/Bbs.Fbb here until 0.3.0)
+                     the wire: lzhuf (N=2048, CRC16+len32 "e1" container), SID build/parse,
                      FA/FC proposals + F> checksum, FS parse/emit, SOH/STX/EOT framing,
                      R:-line codec, the forwarding session FSM (caller + answerer roles),
                      MBL/RLI text fallback (SHOULD). No I/O — pure codecs + an FSM over

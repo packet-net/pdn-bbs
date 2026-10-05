@@ -1,5 +1,5 @@
 using Bbs.Core;
-using Bbs.Fbb;
+using Packet.Fbb;
 using Bbs.Host.Forwarding;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.Extensions.DependencyInjection;

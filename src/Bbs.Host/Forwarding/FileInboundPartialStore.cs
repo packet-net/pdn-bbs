@@ -2,7 +2,7 @@ using System.Buffers.Binary;
 using System.Security.Cryptography;
 using System.Text;
 using Bbs.Core;
-using Bbs.Fbb;
+using Packet.Fbb;
 
 namespace Bbs.Host.Forwarding;
 
