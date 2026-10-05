@@ -12,7 +12,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\Bbs.Core\Bbs.Core.csproj" />
-    <ProjectReference Include="..\Bbs.Fbb\Bbs.Fbb.csproj" />
+    <PackageReference Include="Packet.Fbb" />
   </ItemGroup>
 
 </Project>

@@ -5,7 +5,7 @@ using System.Text;
 using System.Text.Json;
 using Bbs.Console;
 using Bbs.Core;
-using Bbs.Fbb;
+using Packet.Fbb;
 using Bbs.Host.Forwarding;
 using Bbs.Host.Web;
 using Bbs.SevenPlus;

@@ -2,7 +2,7 @@ using System.Net;
 using System.Net.Sockets;
 using System.Text;
 using Bbs.Core;
-using Bbs.Fbb;
+using Packet.Fbb;
 using Bbs.Host.Rhp;
 using Bbs.Host.Sessions;
 using Microsoft.Extensions.Logging;

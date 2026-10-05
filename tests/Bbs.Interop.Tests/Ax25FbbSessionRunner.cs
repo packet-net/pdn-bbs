@@ -1,6 +1,6 @@
 using System.Text;
 using Bbs.Core;
-using Bbs.Fbb;
+using Packet.Fbb;
 using Bbs.Host.Forwarding;
 
 namespace Bbs.Interop.Tests;

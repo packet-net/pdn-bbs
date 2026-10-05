@@ -14,6 +14,7 @@
     <PackageVersion Include="Packet.Ax25.Transport.Abstractions" Version="0.37.0" />
     <PackageVersion Include="Packet.Axudp" Version="0.37.0" />
     <PackageVersion Include="Packet.Core" Version="0.37.0" />
+    <PackageVersion Include="Packet.Fbb" Version="0.1.0" />
     <PackageVersion Include="Packet.Kiss" Version="0.37.0" />
     <PackageVersion Include="RhpV2.Client" Version="0.3.1" />
     <!-- CVE-2025-6965: override only the native SQLite binary. See Bbs.Core.csproj. -->

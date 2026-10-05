@@ -1,6 +1,6 @@
 using System.Text;
 using System.Text.RegularExpressions;
-using Bbs.Fbb;
+using Packet.Fbb;
 using Bbs.Host.Rhp;
 using Microsoft.Extensions.Logging;
 

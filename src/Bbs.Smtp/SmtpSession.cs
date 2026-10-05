@@ -3,7 +3,7 @@ using System.Security.Authentication;
 using System.Security.Cryptography.X509Certificates;
 using System.Text;
 using Bbs.Core;
-using Bbs.Fbb;
+using Packet.Fbb;
 using Bbs.Mime;
 using Bbs.SevenPlus;
 using Microsoft.Extensions.Logging;
