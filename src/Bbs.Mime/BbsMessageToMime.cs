@@ -1,5 +1,6 @@
 using System.Text;
 using Bbs.Core;
+using Bbs.Fbb;
 using MimeKit;
 using MimeKit.Text;
 using MimeKit.Utils;

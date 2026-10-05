@@ -1,6 +1,6 @@
 using System.Text;
 
-namespace Bbs.Core;
+namespace Bbs.Fbb;
 
 /// <summary>
 /// Encoding helpers for human-readable header text carried over the packet

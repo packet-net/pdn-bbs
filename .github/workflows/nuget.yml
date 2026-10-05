@@ -1,0 +1,56 @@
+name: nuget
+
+# Pushes Packet.Bbs.Fbb to nuget.org from a GitHub Release's .nupkg, with NuGet trusted
+# publishing (OIDC), so there is no long-lived API key anywhere. The nuget.org trusted
+# publishing policy names this file, so keep its name.
+#
+# The release workflows (the release job in ci.yml, and publish-bbs.yml) dispatch this once
+# they have published a release. To push a release's package by hand:
+#   gh workflow run nuget.yml -f tag=v0.3.0
+#
+# It pushes the .nupkg already attached to the release rather than building one, so a NuGet
+# push never rebuilds (and never changes) anything the release already carries. Same pattern
+# as pdn-mailcast's nuget.yml, but on the self-hosted runners like the rest of this repo.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag whose .nupkg files to push (e.g. v0.3.0)'
+        required: true
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  push:
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 10
+    steps:
+      - name: Download the package from the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          rm -rf pkg
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern '*.nupkg' --dir pkg
+          ls -l pkg
+          [ "$(find pkg -name '*.nupkg' | wc -l)" -ge 1 ] || { echo "::error::no .nupkg on $TAG"; exit 1; }
+
+      # dotnet is pre-installed on the self-hosted runners; setup-dotnet cannot write its
+      # install dir there.
+      - name: Use the runner's .NET
+        run: dotnet --version
+
+      - name: Log in to nuget.org (trusted publishing)
+        id: login
+        uses: NuGet/login@v1
+        with:
+          user: tomf84
+
+      - name: Push
+        env:
+          NUGET_API_KEY: ${{ steps.login.outputs.NUGET_API_KEY }}
+        run: dotnet nuget push pkg/*.nupkg --source https://api.nuget.org/v3/index.json --api-key "$NUGET_API_KEY" --skip-duplicate
