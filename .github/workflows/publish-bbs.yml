@@ -59,6 +59,13 @@ jobs:
             scripts/build-deb.sh "$rid" "$VERSION"
           done
 
+      # Self-contained, so the runtime in each .deb is the runner's SDK's, and a stale runner ships
+      # old security fixes. Fail the release instead.
+      - name: Check the bundled .NET runtime is the latest patch
+        env:
+          VERSION: ${{ steps.v.outputs.version }}
+        run: python3 scripts/check-bundled-runtime.py artifacts/pdn-bbs_"${VERSION}"_*.deb
+
       - name: Checksum + create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
