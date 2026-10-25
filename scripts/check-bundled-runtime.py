@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-"""Fails unless every package bundles the latest .NET 10 runtime patch.
+"""Fails if any package bundles a .NET 10 runtime older than the latest patch.
 
 The program in each .deb is self-contained, so the package carries the runtime of whichever SDK
 built it, and an operating system update never patches it. A self-hosted runner with a stale SDK
 once shipped another packet-net project's armhf packages on runtime 10.0.7 while the rest had
 10.0.13, months of security fixes behind, and nothing noticed. This reads the runtime version out
-of each package's program and compares it with the latest 10.0 runtime Microsoft lists.
+of each package's program and compares it with the latest 10.0 runtime Microsoft lists. A newer one
+passes: SDK workloads can run ahead of the release index (the WebAssembly workload did on 2026-10-25,
+10.0.14 against a listed 10.0.13), and the point is to catch a stale runner, not one ahead of the index.
 
 Usage: scripts/check-bundled-runtime.py <package.deb>...
 """
@@ -33,6 +35,10 @@ def latest_runtime():
     sys.exit(f"no .NET {CHANNEL} channel in {INDEX}")
 
 
+def version_key(version):
+    return tuple(int(part) for part in version.split("."))
+
+
 def program_bytes(package):
     with tempfile.TemporaryDirectory() as tmp:
         subprocess.run(["dpkg-deb", "-x", str(package), tmp], check=True)
@@ -57,9 +63,13 @@ def main(packages):
                 found.setdefault(framework.decode(), set()).add(version.decode())
             report = ", ".join(f"{f} {'/'.join(sorted(v))}" for f, v in sorted(found.items()))
             print(f"{package.name}: {name} bundles {report or 'nothing recognisable'}")
-            if sorted(found) != ["AspNetCore", "NETCore"] or any(v != {want} for v in found.values()):
+            if sorted(found) != ["AspNetCore", "NETCore"] or any(len(v) != 1 for v in found.values()):
                 print(f"::error::{package.name} bundles .NET runtime {report or 'unknown'}, "
-                      f"not {want} for both frameworks. Update the .NET 10 SDK on the runner that built it.")
+                      f"not one recognisable version for both frameworks. Check how {name} was built.")
+                bad = True
+            elif any(version_key(next(iter(v))) < version_key(want) for v in found.values()):
+                print(f"::error::{package.name} bundles .NET runtime {report}, older than {want} "
+                      "for at least one framework. Update the .NET 10 SDK on the runner that built it.")
                 bad = True
     return 1 if bad else 0
 
