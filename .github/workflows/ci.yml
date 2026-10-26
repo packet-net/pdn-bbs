@@ -132,7 +132,7 @@ jobs:
           cache: ${{ runner.environment == 'github-hosted' }}
           cache-dependency-path: Directory.Packages.props
       - name: Check the tools this job needs
-        run: scripts/ci-require-tools.sh dpkg-deb:dpkg fakeroot:fakeroot xz:xz-utils sha256sum:coreutils gh docker:docker.io
+        run: scripts/ci-require-tools.sh dpkg-deb:dpkg sha256sum:coreutils gh
 
       - name: Build .debs (amd64 / arm64 / armhf)
         env:

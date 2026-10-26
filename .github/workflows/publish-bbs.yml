@@ -49,7 +49,7 @@ jobs:
           cache: ${{ runner.environment == 'github-hosted' }}
           cache-dependency-path: Directory.Packages.props
       - name: Check the tools this job needs
-        run: scripts/ci-require-tools.sh dpkg-deb:dpkg fakeroot:fakeroot xz:xz-utils python3 gh sha256sum:coreutils
+        run: scripts/ci-require-tools.sh dpkg-deb:dpkg python3 gh sha256sum:coreutils
 
       - id: v
         name: Resolve version
