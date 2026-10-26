@@ -79,6 +79,19 @@ jobs:
           echo ">> guest self-test: ${res:-TIMEOUT}"
           [ "$res" = PASS ] || { tail -n 40 artifacts/boot.log 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g'; exit 1; }
 
+      # Self-hosted runners: put the SDK under the runner account's home, which it can always write,
+      # never in the system install (which it cannot). Workloads install there too, without root.
+      - name: Choose where setup-dotnet installs
+        if: runner.environment == 'self-hosted'
+        run: echo "DOTNET_INSTALL_DIR=$HOME/.dotnet" >> "$GITHUB_ENV"
+      # Install the SDK in the job instead of trusting the runner's: every build then bundles the
+      # current runtime whichever runner picked it up.
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+          cache: ${{ runner.environment == 'github-hosted' }}
+          cache-dependency-path: pdn-bbs/Directory.Packages.props
+
       - name: Build (Release)
         working-directory: pdn-bbs
         run: dotnet build -c Release
