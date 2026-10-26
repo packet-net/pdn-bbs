@@ -36,11 +36,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # dotnet is pre-installed on the self-hosted runners (as in ci.yml + packet.net's
-      # workflows); setup-dotnet@v4 fails on them ("mkdir: Permission denied" — it can't
-      # write its install dir as the runner user). Use the runner's SDK directly.
-      - name: dotnet version
-        run: dotnet --version
+      # Self-hosted runners: put the SDK under the runner account's home, which it can always write,
+      # never in the system install (which it cannot). Workloads install there too, without root.
+      - name: Choose where setup-dotnet installs
+        if: runner.environment == 'self-hosted'
+        run: echo "DOTNET_INSTALL_DIR=$HOME/.dotnet" >> "$GITHUB_ENV"
+      # Install the SDK in the job instead of trusting the runner's: every build then bundles the
+      # current runtime whichever runner picked it up.
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+          cache: ${{ runner.environment == 'github-hosted' }}
+          cache-dependency-path: Directory.Packages.props
+      - name: Check the tools this job needs
+        run: scripts/ci-require-tools.sh dpkg-deb:dpkg fakeroot:fakeroot xz:xz-utils python3 gh sha256sum:coreutils
 
       - id: v
         name: Resolve version
