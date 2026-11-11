@@ -1,0 +1,87 @@
+name: package upgrades
+
+on:
+  schedule:
+    - cron: '41 3 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: package-upgrades
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  upgrade:
+    runs-on: [self-hosted, Linux, X64]
+    steps:
+      # Clear root-owned oracle state left behind by an interrupted run (as in ci.yml).
+      - name: Pre-checkout, clear root-owned oracle state
+        run: |
+          state="$GITHUB_WORKSPACE/docker/oracle/state"
+          if [ -d "$state" ]; then
+            docker run --rm --entrypoint /bin/sh \
+              -v "$state:/data" \
+              m0lte/linbpq@sha256:872343ffb76a52316b1ae42a42d3c0893f545ccd577301ebc7c4455b292a8025 \
+              -c 'rm -rf /data/* /data/.[!.]* /data/..?* 2>/dev/null; true' || true
+          fi
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - name: Choose where setup-dotnet installs
+        if: runner.environment == 'self-hosted'
+        run: echo "DOTNET_INSTALL_DIR=$HOME/.dotnet" >> "$GITHUB_ENV"
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - name: Check the tools this job needs
+        run: scripts/ci-require-tools.sh docker:docker.io
+      - name: Upgrade, build and test
+        id: full
+        continue-on-error: true
+        shell: bash
+        env:
+          DOTNET_USE_POLLING_FILE_WATCHER: "true"
+        run: |
+          set -euo pipefail
+          python3 scripts/bump-packages.py pdn-bbs.slnx | tee "$RUNNER_TEMP/bump-full.txt"
+          dotnet build -c Release
+          dotnet test -c Release --no-build --filter "Category!=Interop&Category!=InteropF6fbb&Category!=InteropF6fbbDebug"
+      - name: Security fixes only, if the full upgrade failed
+        if: steps.full.outcome == 'failure'
+        shell: bash
+        env:
+          DOTNET_USE_POLLING_FILE_WATCHER: "true"
+        run: |
+          set -euo pipefail
+          git reset --hard
+          git clean -fdx -e .dotnet
+          python3 scripts/bump-packages.py pdn-bbs.slnx --vulnerable-only | tee "$RUNNER_TEMP/bump-security.txt"
+          dotnet build -c Release
+          dotnet test -c Release --no-build --filter "Category!=Interop&Category!=InteropF6fbb&Category!=InteropF6fbbDebug"
+      - name: Commit and push to main
+        if: success()
+        shell: bash
+        env:
+          FULL_OUTCOME: ${{ steps.full.outcome }}
+        run: |
+          set -euo pipefail
+          if [ "$FULL_OUTCOME" = "failure" ]; then
+            subject="chore(deps): security package fixes"
+            log="$RUNNER_TEMP/bump-security.txt"
+          else
+            subject="chore(deps): package upgrades"
+            log="$RUNNER_TEMP/bump-full.txt"
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -u
+          if git diff --cached --quiet; then
+            echo "nothing to upgrade"
+            exit 0
+          fi
+          { echo "$subject"; echo; cat "$log"; } > "$RUNNER_TEMP/commit-msg.txt"
+          git commit -F "$RUNNER_TEMP/commit-msg.txt"
+          git pull --rebase origin main
+          git push origin HEAD:main
